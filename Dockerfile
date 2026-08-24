@@ -48,19 +48,14 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash raven
 WORKDIR /app
 
 # v0.7.17+: editable install ❌ (scripts/pyproject.toml 의존성 build fail).
-# → 의존성을 Dockerfile에 직접 박아 install (단순, 결정적).
 # → 본체 raven 패키지는 PYTHONPATH=/app + entrypoint로 직접 실행.
+# v0.7.184+: 핀 하드코딩 폐기 — requirements.txt가 단일 진실 원천이다.
+# (이미지·데스크톱 번들·dev venv가 제각기 핀을 들고 있다가 번들만 mcp 2.0을
+#  물어 fastmcp import가 깨진 사고를 반복하지 않기 위함.)
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir \
-        'python-frontmatter>=1.1.0' \
-        'mcp[cli]>=1.0' \
-        'fastapi>=0.100' \
-        'uvicorn[standard]>=0.20' \
-        'pydantic>=2.0' \
-        'typer>=0.9' \
-        'pytest>=7.0' \
-        'httpx<0.28' \
-        'starlette>=0.30'
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir 'pytest>=7.0'
 
 # Dashboard 정적 빌드 (stage 1에서) 복사
 COPY --from=dashboard-build /app/dashboard/dist ./dashboard/dist

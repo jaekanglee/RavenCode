@@ -24,7 +24,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **CLI** (사람/자동화) | Typer 6 top-level commands + 11 subcommand groups | `raven/cli/` |
 | **API** (HTTP) | FastAPI 65 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
-| **MCP** (LLM 표준) | FastMCP 23 tools + 4 resources | `raven/mcp/` |
+| **MCP** (LLM 표준) | MCPServer 23 tools + 4 resources | `raven/mcp/` |
 
 **SoT = 마크다운**. DB/API/GUI/MCP는 **모두 재생성 가능**한 파생 산출물.
 

@@ -55,18 +55,10 @@ mv "$TMPDIR_BUNDLE/python" "$RESOURCES/python"
 echo "[3/4] Installing dependencies into bundled Python..."
 BUNDLED_PIP="$RESOURCES/python/bin/python3 -m pip"
 
-# Core runtime dependencies (no dev/test deps)
-$BUNDLED_PIP install --quiet --no-cache-dir \
-  "fastapi>=0.115" \
-  "uvicorn[standard]>=0.34" \
-  "mcp>=1.28" \
-  "python-frontmatter>=1.1" \
-  "PyYAML>=6.0" \
-  "jsonschema>=4.24" \
-  "rich>=14.0" \
-  "typer>=0.15" \
-  "python-dotenv>=1.1" \
-  "httpx>=0.27"
+# Core runtime dependencies — requirements.txt가 단일 진실 원천이다.
+# 여기에 핀을 다시 하드코딩하지 말 것: 번들만 `mcp>=1.28`(상한 없음)을 들고
+# 있던 탓에 mcp 2.0.0이 딸려 들어와 mcp.server.fastmcp import가 깨졌다.
+$BUNDLED_PIP install --quiet --no-cache-dir -r "$REPO_ROOT/requirements.txt"
 
 echo "  Installed packages:"
 $BUNDLED_PIP list --format=columns 2>/dev/null | wc -l | xargs echo "   "

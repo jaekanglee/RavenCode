@@ -1,11 +1,17 @@
 # Raven Python dependencies (direct)
+#
+# 단일 진실 원천 (v0.7.184+): 데스크톱 번들(scripts/prepare-bundle.sh)도
+# 이 파일을 그대로 설치한다. 여기 없는 핀을 다른 곳에 따로 두지 말 것 —
+# 번들만 mcp 2.0을 물어 fastmcp import가 깨진 사고의 원인이었다.
 fastapi>=0.115
 uvicorn[standard]>=0.34
-mcp>=1.12,<2.0  # mcp 2.0 removed mcp.server.fastmcp (ADR v0.6.0 anticipated pin)
+mcp>=2.0,<3.0  # 2.0에서 mcp.server.fastmcp → mcp.server.mcpserver.MCPServer
 starlette>=0.46
 pydantic>=2.11
 httpx>=0.28
 python-dotenv>=1.1
+python-frontmatter>=1.1
+PyYAML>=6.0
 cffi>=1.17
 click>=8.2
 rich>=14.0

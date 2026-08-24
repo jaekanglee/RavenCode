@@ -5,7 +5,9 @@ description = "Build, lint, and maintain the ~/wiki SQLite query index"
 requires-python = ">=3.9"
 dependencies = [
     "python-frontmatter>=1.1.0",
-    "mcp[cli]>=1.0",
+    # mcp 핀 제거 (v0.7.184): build_db/lint은 mcp를 import하지 않는다.
+    # 상한 없는 잔여 핀이 번들 mcp 2.0 드리프트의 경로 중 하나였다.
+    # MCP SDK 핀은 requirements.txt 한 곳에만 둔다.
 ]
 
 [project.optional-dependencies]

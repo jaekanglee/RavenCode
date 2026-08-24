@@ -16,6 +16,13 @@
 # 인증 체계가 없으므로 신뢰 수준에 맞게 RAVEN_MCP_HOST / RAVEN_MCP_TEAM_HOST /
 # RAVEN_DASHBOARD_HOST 를 머신마다 다르게 둘 것.
 #
+# 데스크톱 앱과의 관계 (v0.7.184+)
+#   Raven.app도 같은 포트 매트릭스로 API 8765 + MCP 8766을 서빙한다. 외부 에이전트의
+#   1차 창구는 데스크톱 앱이다 — 운영자 머신에서 상시 떠 있는 게 그쪽이기 때문.
+#   이 스크립트는 서버/헤드리스 배포용이며, 포트가 이미 점유돼 있으면 해당 서비스를
+#   건너뛰고 경고만 낸다(port_in_use). PID 파일만 보던 이전 버전은 데스크톱 앱이
+#   점유한 포트에 계속 재기동을 시도해 bind 실패로 조용히 죽었다.
+#
 # Exit on error
 set -e
 
@@ -62,6 +69,13 @@ elif command -v uv &> /dev/null; then
 else
   PY="python3"
 fi
+
+# v0.7.184+: PID 파일은 "우리가 띄운 프로세스"만 안다. 데스크톱 앱(Raven.app)이
+# 같은 포트를 이미 쓰고 있으면 여기서 또 띄워봐야 bind 실패로 조용히 죽고, PID
+# 파일에는 죽은 PID만 남는다. 포트 수준에서 먼저 확인해 양보한다.
+port_in_use() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
 
 # status() helper: PID의 process args에서 --mode 값을 추출 (env 의존 0).
 # silent hotfix (v0.7.85+): status() 호출 시 RAVEN_MCP_MODE env가 export되지 않으면
@@ -122,6 +136,8 @@ start() {
   # API (8765)
   if [ -f "$API_PID" ] && kill -0 $(cat "$API_PID") 2>/dev/null; then
     echo "⚠️  API server is already running (PID: $(cat "$API_PID"))"
+  elif port_in_use "$API_PORT"; then
+    echo "⏭️  API port $API_PORT is already served by another process (Raven.app?) — skipping."
   else
     echo "🚀 Starting API server in background on port $API_PORT..."
     PYTHONPATH=. $PY -m raven.api > tmp/api.log 2>&1 &
@@ -131,6 +147,9 @@ start() {
   # MCP (8766, HTTP only, v0.7.81+)
   if [ -f "$MCP_PID" ] && kill -0 $(cat "$MCP_PID") 2>/dev/null; then
     echo "⚠️  MCP server is already running (PID: $(cat "$MCP_PID"))"
+  elif port_in_use "$MCP_PORT"; then
+    echo "⏭️  MCP port $MCP_PORT is already served by another process (Raven.app?) — skipping."
+    echo "    데스크톱 앱이 MCP를 서빙 중이면 그쪽이 외부 에이전트 창구다."
   else
     echo "🚀 Starting MCP server in background on port $MCP_PORT (mode=$MCP_MODE, host=$MCP_HOST)..."
     PYTHONPATH=. $PY -m raven.mcp.cli \
@@ -142,6 +161,8 @@ start() {
   if [ "$MCP_TEAM_ENABLE" = "true" ]; then
     if [ -f "$MCP_TEAM_PID" ] && kill -0 $(cat "$MCP_TEAM_PID") 2>/dev/null; then
       echo "⚠️  MCP(team) server is already running (PID: $(cat "$MCP_TEAM_PID"))"
+    elif port_in_use "$MCP_TEAM_PORT"; then
+      echo "⏭️  MCP(team) port $MCP_TEAM_PORT is already served by another process — skipping."
     else
       echo "🚀 Starting MCP(team) server in background on port $MCP_TEAM_PORT (mode=$MCP_TEAM_MODE, host=$MCP_TEAM_HOST)..."
       PYTHONPATH=. $PY -m raven.mcp.cli \

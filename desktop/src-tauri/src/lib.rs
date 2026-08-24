@@ -82,9 +82,7 @@ fn app_version(app: tauri::AppHandle) -> String {
 }
 
 pub fn run() {
-    let mcp_enabled = std::env::var("RAVEN_DESKTOP_MCP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -203,13 +201,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::core::runtime_launch_spec;
+    use super::core::{mcp_enabled_from_env, mcp_mode_from_env, runtime_launch_spec};
     use std::path::PathBuf;
 
     #[test]
     fn runtime_launch_spec_invokes_python_desktop_module() {
         let python = PathBuf::from("/tmp/python");
-        let spec = runtime_launch_spec(python.clone(), false, None, None);
+        let spec = runtime_launch_spec(python.clone(), false, None, None, None);
         assert_eq!(spec.program, python);
         assert_eq!(spec.args, vec!["-m", "raven.desktop.runtime"]);
         assert!(spec.env.is_empty());
@@ -218,15 +216,18 @@ mod tests {
     #[test]
     fn runtime_launch_spec_with_mcp_adds_flag() {
         let python = PathBuf::from("/tmp/python");
-        let spec = runtime_launch_spec(python.clone(), true, None, None);
-        assert_eq!(spec.args, vec!["-m", "raven.desktop.runtime", "--mcp"]);
+        let spec = runtime_launch_spec(python.clone(), true, None, None, Some("admin".into()));
+        assert_eq!(
+            spec.args,
+            vec!["-m", "raven.desktop.runtime", "--mcp", "--mcp-mode", "admin"]
+        );
     }
 
     #[test]
     fn runtime_launch_spec_with_python_path_sets_env() {
         let python = PathBuf::from("/tmp/python");
         let pp = PathBuf::from("/app/Resources/raven");
-        let spec = runtime_launch_spec(python, false, Some(pp.clone()), None);
+        let spec = runtime_launch_spec(python, false, Some(pp.clone()), None, None);
         assert_eq!(spec.args, vec!["-P", "-m", "raven.desktop.runtime"]);
         assert_eq!(
             spec.env,
@@ -235,9 +236,36 @@ mod tests {
     }
 
     #[test]
+    fn mcp_defaults_to_enabled_when_env_unset() {
+        // v0.7.184 회귀 가드: 기본 OFF였던 탓에 GUI 실행 시 MCP 엔드포인트가
+        // 조용히 없었고, 외부 에이전트가 "안 떠 있다"를 반복해서 겪었다.
+        assert!(mcp_enabled_from_env(None));
+        assert!(mcp_enabled_from_env(Some("1".into())));
+        assert!(mcp_enabled_from_env(Some("true".into())));
+    }
+
+    #[test]
+    fn mcp_opts_out_only_on_explicit_falsey() {
+        assert!(!mcp_enabled_from_env(Some("0".into())));
+        assert!(!mcp_enabled_from_env(Some("false".into())));
+        assert!(!mcp_enabled_from_env(Some("off".into())));
+    }
+
+    #[test]
+    fn mcp_mode_defaults_to_admin_and_degrades_garbage_to_read() {
+        assert_eq!(mcp_mode_from_env(None), "admin");
+        assert_eq!(mcp_mode_from_env(Some("admin".into())), "admin");
+        assert_eq!(mcp_mode_from_env(Some("write".into())), "write");
+        assert_eq!(mcp_mode_from_env(Some("read".into())), "read");
+        // 오타/미지의 값은 권한을 넓히는 쪽이 아니라 좁히는 쪽으로 떨어져야 한다.
+        assert_eq!(mcp_mode_from_env(Some("root".into())), "read");
+        assert_eq!(mcp_mode_from_env(Some("ADMIN".into())), "read");
+    }
+
+    #[test]
     fn runtime_launch_spec_with_host_adds_flag() {
         let python = PathBuf::from("/tmp/python");
-        let spec = runtime_launch_spec(python, false, None, Some("0.0.0.0".to_string()));
+        let spec = runtime_launch_spec(python, false, None, Some("0.0.0.0".to_string()), None);
         assert_eq!(
             spec.args,
             vec!["-m", "raven.desktop.runtime", "--host", "0.0.0.0"]

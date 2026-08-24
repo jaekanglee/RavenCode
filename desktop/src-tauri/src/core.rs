@@ -11,11 +11,47 @@ pub(crate) struct RuntimeLaunchSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// Whether the Python Core should serve MCP.
+///
+/// v0.7.184+: defaults to ON. External agents reach Raven over MCP, and the
+/// desktop app is the process that is actually running on the operator's
+/// machine — leaving MCP opt-in meant the endpoint was silently absent (the
+/// GUI is launched from Finder/Dock, so it never sees a shell-exported
+/// `RAVEN_DESKTOP_MCP=1` either). Opt out with `RAVEN_DESKTOP_MCP=0`.
+pub(crate) fn mcp_enabled_from_env(raw: Option<String>) -> bool {
+    match raw {
+        None => true,
+        Some(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+    }
+}
+
+/// Permission mode for the desktop MCP listener.
+///
+/// Defaults to `admin` (operator's own machine), matching `.env`'s
+/// `RAVEN_MCP_MODE=admin` for the standalone operator instance. MCP has no
+/// authentication, so this is only sound because the listener binds the
+/// tailnet address rather than the API's 0.0.0.0 — see
+/// `raven/desktop/runtime.py::_resolve_mcp_host`. Narrow it with
+/// `RAVEN_DESKTOP_MCP_MODE=read|write`. An unrecognized value falls back to
+/// `read` — the safe direction — rather than failing the launch.
+pub(crate) fn mcp_mode_from_env(raw: Option<String>) -> String {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => "admin".to_string(),
+        Some("admin") => "admin".to_string(),
+        Some("write") => "write".to_string(),
+        _ => "read".to_string(),
+    }
+}
+
 pub(crate) fn runtime_launch_spec(
     program: PathBuf,
     mcp: bool,
     python_path: Option<PathBuf>,
     host: Option<String>,
+    mcp_mode: Option<String>,
 ) -> RuntimeLaunchSpec {
     let mut args = Vec::new();
     // Bundled mode: -P prevents CWD from shadowing the bundled raven package
@@ -30,6 +66,10 @@ pub(crate) fn runtime_launch_spec(
     }
     if mcp {
         args.push("--mcp".into());
+        if let Some(m) = &mcp_mode {
+            args.push("--mcp-mode".into());
+            args.push(m.clone());
+        }
     }
     let mut env = Vec::new();
     if let Some(pp) = python_path {
@@ -44,6 +84,10 @@ struct ReadyMessage {
     port: u16,
     #[serde(default)]
     mcp_port: Option<u16>,
+    /// MCP는 API와 다른 주소에 바인딩된다 (API는 LAN 전체, MCP는 tailnet/loopback).
+    /// 따라서 `host`처럼 loopback으로 정규화하지 않고 실제 바인딩을 그대로 받는다.
+    #[serde(default)]
+    mcp_host: Option<String>,
 }
 
 pub(crate) struct ManagedCore {
@@ -60,7 +104,8 @@ impl ManagedCore {
             .or_else(|| env::var("RAVEN_HOST").ok())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "0.0.0.0".to_string());
-        let spec = runtime_launch_spec(python, mcp, python_path, Some(host));
+        let mcp_mode = mcp_mode_from_env(env::var("RAVEN_DESKTOP_MCP_MODE").ok());
+        let spec = runtime_launch_spec(python, mcp, python_path, Some(host), Some(mcp_mode));
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args)
             .current_dir(safe_workspace(spec.env.iter().any(|(k, _)| k == "PYTHONPATH")))
@@ -111,9 +156,10 @@ impl ManagedCore {
             return Err("Python Core가 유효한 loopback endpoint를 보고하지 않았습니다".to_string());
         }
 
-        let mcp_endpoint = ready
-            .mcp_port
-            .map(|p| format!("http://{}:{}", ready.host, p));
+        let mcp_endpoint = ready.mcp_port.map(|p| {
+            let host = ready.mcp_host.as_deref().unwrap_or(&ready.host);
+            format!("http://{host}:{p}/mcp")
+        });
 
         Ok(Self {
             child,

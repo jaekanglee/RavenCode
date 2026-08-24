@@ -12,8 +12,8 @@ import json
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from raven.mcp.cli import register_tools
 
@@ -43,24 +43,23 @@ def two_vaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, P
     return alpha, beta
 
 
-def _call_tool_result(mcp: FastMCP, name: str, arguments: dict):
-    """Normalize `call_tool`'s return shape back to the tool's plain value.
+def _call_tool_result(mcp: MCPServer, name: str, arguments: dict):
+    """`call_tool`의 CallToolResult를 도구의 원래 반환값으로 정규화.
 
-    FastMCP returns a bare content list for scalar/dict returns but a
-    `(content, {"result": ...})` tuple when the return type is a richer
-    structure (e.g. `list[dict]`) — unwrap either into the original value.
+    mcp 2.0은 1.x의 "bare content list 또는 (content, structured) 튜플" 대신
+    항상 CallToolResult를 돌려준다. 구조화 결과가 있으면 그쪽을, 없으면
+    (dict 반환 등) content[0].text의 JSON을 푼다.
     """
     result = asyncio.run(mcp.call_tool(name, arguments))
-    if isinstance(result, tuple):
-        _, structured = result
-        return structured["result"]
-    return json.loads(result[0].text)
+    if result.structured_content is not None:
+        return result.structured_content["result"]
+    return json.loads(result.content[0].text)
 
 
 
 
 def test_wiki_log_routes_by_vault_name(two_vaults):
-    mcp = FastMCP("wiki")
+    mcp = MCPServer("wiki")
     register_tools(mcp, "read")
 
     alpha_lines = _call_tool_result(mcp, "wiki_log", {"vault": "alpha", "tail_n": 5})
@@ -82,7 +81,7 @@ def test_wiki_update_only_touches_the_named_vault(two_vaults):
     (alpha / "page.md").write_text("---\ntitle: p\ntype: concept\n---\n\noriginal\n", encoding="utf-8")
     (beta / "page.md").write_text("---\ntitle: p\ntype: concept\n---\n\noriginal\n", encoding="utf-8")
 
-    mcp = FastMCP("wiki")
+    mcp = MCPServer("wiki")
     register_tools(mcp, "write")
 
     asyncio.run(mcp.call_tool(
@@ -95,7 +94,7 @@ def test_wiki_update_only_touches_the_named_vault(two_vaults):
 
 
 def test_unknown_vault_name_raises_clear_error(two_vaults):
-    mcp = FastMCP("wiki")
+    mcp = MCPServer("wiki")
     register_tools(mcp, "read")
 
     with pytest.raises(ToolError) as excinfo:

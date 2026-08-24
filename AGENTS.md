@@ -64,6 +64,13 @@ Raven은 **4개 진입점만** 제공합니다. **5번째 진입점 추가 ❌**
 | **Dashboard** | 사람 탐색/편집 UX (read-write, API-backed) | `dashboard/` |
 | **MCP** | LLM 클라이언트 표준 진입점 (read/write/admin 모드) | `raven/mcp/` |
 
+**MCP는 어디에 떠 있나 (v0.7.184+)** — 외부 에이전트의 1차 창구는 **데스크톱 앱**이다.
+Raven.app이 API 8765와 함께 MCP 8766을 항상 서빙한다(기본 mode=admin, `RAVEN_DESKTOP_MCP=0`
+으로 끄고 `RAVEN_DESKTOP_MCP_MODE`로 좁힌다). MCP는 인증이 없으므로 API가 LAN 전체(0.0.0.0)에
+열리는 것과 달리 **tailnet 주소에만** 바인딩된다 — `raven/desktop/runtime.py::_resolve_mcp_host`.
+`./raven.sh start`는 서버/헤드리스 배포용이고, 포트가 이미 점유돼 있으면 건너뛴다.
+MCP SDK는 `mcp>=2.0`(`mcp.server.mcpserver.MCPServer`)이며 핀은 `requirements.txt` 한 곳에만 둔다.
+
 → 진입점 추가/제거는 ADR(Architecture Decision Record)로만. **`raven docs`로 노출되는 패키지 내부 문서 ≠ 진입점**.
 
 ---

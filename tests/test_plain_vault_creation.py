@@ -27,7 +27,7 @@ def test_default_create_leaves_a_plain_markdown_workspace(tmp_path, monkeypatch)
 
 def test_retired_bootstrap_guide_and_freshness_surfaces_are_not_registered():
     """Plain vaults never expose policy injection or template-tracking controls."""
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from raven.api.server import app
     from raven.cli.__main__ import app as cli_app
@@ -50,12 +50,12 @@ def test_retired_bootstrap_guide_and_freshness_surfaces_are_not_registered():
     assert "bootstrap" not in vault_help.output.lower()
     assert "verify" not in vault_help.output.lower()
 
-    tools_mcp = FastMCP("plain-vault-tools")
+    tools_mcp = MCPServer("plain-vault-tools")
     register_tools(tools_mcp, "read")
     tool_names = {tool.name for tool in asyncio.run(tools_mcp.list_tools())}
     assert tool_names.isdisjoint({"wiki_get_guide", "wiki_get_guide_diff", "wiki_check_freshness"})
 
-    resources_mcp = FastMCP("plain-vault-resources")
+    resources_mcp = MCPServer("plain-vault-resources")
     register_resources(resources_mcp)
-    resource_uris = {resource.uriTemplate for resource in asyncio.run(resources_mcp.list_resource_templates())}
+    resource_uris = {resource.uri_template for resource in asyncio.run(resources_mcp.list_resource_templates())}
     assert "wiki://{vault}/schema" not in resource_uris

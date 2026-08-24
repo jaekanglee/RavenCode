@@ -4,12 +4,16 @@ Default mode is read-only; pass --write for mutating tools, --admin for
 destructive tools (delete / rename). Supports both stdio transport (local
 in-process) and streamable-http transport (remote, e.g. Tailscale).
 
-Why this file can import `mcp.server.fastmcp` directly
------------------------------------------------------
-The wiki package used to live at `mcp/`, which collided with the SDK's
-`mcp[cli]>=1.x` package. After v0.6.0 the wiki package is at
-`raven/mcp/`, so there is no name collision — `import mcp` resolves to
-the SDK exactly as expected.
+Why this file can import `mcp.server.mcpserver` directly
+--------------------------------------------------------
+The wiki package used to live at `mcp/`, which collided with the SDK
+package. After v0.6.0 the wiki package is at `raven/mcp/`, so there is no
+name collision — `import mcp` resolves to the SDK exactly as expected.
+
+SDK: mcp>=2.0 (v0.7.184+). 2.0 removed `mcp.server.fastmcp`; the ergonomic
+server class is now `mcp.server.mcpserver.MCPServer`. The decorator surface
+(`.tool()`, `.resource()`) is unchanged, but `transport_security` moved off
+the constructor onto `streamable_http_app()` / `run()`.
 
 Tools registered
 ----------------
@@ -26,7 +30,7 @@ import sys
 from typing import Any, Literal, Optional
 
 # Direct SDK import — no name collision (see module docstring).
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Local package imports (our own `raven.mcp` module).
@@ -43,7 +47,7 @@ from raven.mcp.resources import register_resources
 
 
 def register_tools(mcp: Any, mode: str) -> None:
-    """Bind the 9 wiki tools onto a FastMCP instance, gated by `mode`.
+    """Bind the 9 wiki tools onto an MCPServer instance, gated by `mode`.
 
     One MCP server process serves every vault the registry knows about —
     each tool takes a `vault` (registered vault name) argument and resolves
@@ -509,7 +513,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="stdio (local in-process) or http (remote, e.g. Tailscale)",
     )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
-    parser.add_argument("--port", type=int, default=8765, help="HTTP bind port")
+    parser.add_argument("--port", type=int, default=8766, help="HTTP bind port")
     parser.add_argument(
         "--mode",
         choices=["read", "write", "admin"],
@@ -531,17 +535,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.transport == "http":
         print(f"🌐 bind:     {args.host}:{args.port}", file=sys.stderr)
 
-    mcp = FastMCP(
+    mcp = MCPServer(
         "wiki",
-        # v0.7.148+ fix: FastMCP's own transport_security auto-locks Host-header
-        # validation to 127.0.0.1/localhost/::1 whenever no `host` kwarg is passed
-        # (mcp/server/transport_security.py) — independent of, and unaffected by,
-        # the TrustedHostMiddleware added below. Remote clients (Tailscale IP, LAN
-        # IP) got a hard 421 "Invalid Host header" no matter what --host/--port
-        # uvicorn bound to. Disabling DNS-rebinding protection here is acceptable:
-        # this server has no browser-facing surface, only direct MCP clients on
-        # Tailscale/segregated internal networks.
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         instructions=(
             "Raven multi-vault Markdown PKM MCP server. "
             f"Registered vaults: {', '.join(vault_names) or '(none)'}."
@@ -555,10 +550,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         mcp.run()
     else:
         # streamable-http for Tailscale/LAN-bound remote access.
-        # 421 회피는 FastMCP() 생성 시 transport_security로 처리 (위 참고).
         import uvicorn
 
-        app = mcp.streamable_http_app()  # FastMCP starlette app
+        # v0.7.148+ fix (mcp 2.0에서 인자 위치만 이동): SDK의 transport_security는
+        # `host` 미지정 시 Host 헤더 검증을 127.0.0.1/localhost/::1로 자동 잠근다
+        # (mcp/server/transport_security.py). 그 탓에 Tailscale IP·LAN IP로 붙는
+        # 원격 클라이언트가 uvicorn 바인딩과 무관하게 421 "Invalid Host header"를
+        # 맞았다. DNS-rebinding 보호를 끄는 건 여기서 수용 가능하다 — 이 서버는
+        # 브라우저 대면 surface가 없고 Tailscale/내부망의 직접 MCP 클라이언트만
+        # 상대한다.
+        app = mcp.streamable_http_app(  # MCPServer starlette app
+            transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+            host=args.host,
+        )
 
         uvicorn.run(
             app,

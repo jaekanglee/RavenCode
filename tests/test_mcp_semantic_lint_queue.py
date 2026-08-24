@@ -11,8 +11,8 @@ import json
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from raven.core.registry import VaultMeta
 from raven.core.vault import Vault
@@ -194,16 +194,15 @@ def test_duplicate_title_pair_gets_paired_with_on_both_sides(tmp_path: Path):
     assert b["id"] == "#17" and b["paired_with"] == "content/python-guide"
 
 
-def _call_tool_result(mcp: FastMCP, name: str, arguments: dict):
-    """FastMCP의 `call_tool` 반환 shape을 원래 값으로 정규화.
+def _call_tool_result(mcp: MCPServer, name: str, arguments: dict):
+    """`call_tool`의 CallToolResult를 원래 값으로 정규화 (mcp 2.0).
 
     tests/test_mcp_multi_vault.py의 동일 헬퍼와 같은 정규화 규칙.
     """
     result = asyncio.run(mcp.call_tool(name, arguments))
-    if isinstance(result, tuple):
-        _, structured = result
-        return structured["result"]
-    return json.loads(result[0].text)
+    if result.structured_content is not None:
+        return result.structured_content["result"]
+    return json.loads(result.content[0].text)
 
 
 def test_tool_registered_and_reachable_by_vault_name(tmp_path: Path, monkeypatch):
@@ -225,7 +224,7 @@ def test_tool_registered_and_reachable_by_vault_name(tmp_path: Path, monkeypatch
     reg = VaultRegistry(root=tmp_path)
     reg.add(VaultMeta(name="reg-vault", path=root))
 
-    mcp = FastMCP("wiki")
+    mcp = MCPServer("wiki")
     register_tools(mcp, "read")
 
     payload = _call_tool_result(
@@ -245,7 +244,7 @@ def test_tool_rejects_disallowed_check_id_as_tool_error(tmp_path: Path, monkeypa
     reg = VaultRegistry(root=tmp_path)
     reg.add(VaultMeta(name="reg-vault-2", path=root))
 
-    mcp = FastMCP("wiki")
+    mcp = MCPServer("wiki")
     register_tools(mcp, "read")
 
     with pytest.raises(ToolError) as excinfo:

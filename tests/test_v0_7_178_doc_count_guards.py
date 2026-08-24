@@ -58,7 +58,7 @@ def test_readme_api_endpoint_counts_match_runtime():
 def test_readme_mcp_tool_counts_match_source():
     tools = source_count("raven/mcp/cli.py", r"@mcp\.tool")
     resources = source_count("raven/mcp/resources.py", r"@mcp\.resource")
-    assert readme_numbers(r"FastMCP (\d+) tools \+ (\d+) resources") == (tools, resources)
+    assert readme_numbers(r"MCPServer (\d+) tools \+ (\d+) resources") == (tools, resources)
     assert readme_number(r"tools/list → (\d+)개 도구") == tools
 
 

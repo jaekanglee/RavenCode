@@ -8,8 +8,7 @@ backed by `wiki.db` (SQLite, SCHEMA v2.4).
 ```bash
 cd /Users/jaekanglee/Desktop/Dev/Project/Raven
 source scripts/.venv/bin/activate
-pip install "mcp[cli]>=1.0"      # FastMCP SDK (transitively brings httpx, etc.)
-pip install python-frontmatter    # already in scripts/pyproject.toml
+pip install -r ../../requirements.txt   # MCP SDK 핀의 단일 진실 원천 (mcp>=2.0)
 ```
 
 ## Usage
@@ -37,7 +36,7 @@ scripts/.venv/bin/python -m mcp.cli --mode read
 ### HTTP (Tailscale remote)
 
 ```bash
-python -m mcp.cli --transport http --host 127.0.0.1 --port 8765 --mode read
+python -m mcp.cli --transport http --host 127.0.0.1 --port 8766 --mode read
 # Streamable-HTTP transport; bind to Tailscale IP for remote access.
 ```
 
@@ -47,7 +46,7 @@ python -m mcp.cli --transport http --host 127.0.0.1 --port 8765 --mode read
 |---|---|---|
 | `--transport` | `stdio` | `stdio` (local) or `http` (remote) |
 | `--host` | `127.0.0.1` | HTTP bind host (use Tailscale IP for remote) |
-| `--port` | `8765` | HTTP bind port |
+| `--port` | `8766` | HTTP bind port (8765는 API 몫 — 겹치면 bind 실패) |
 | `--mode` | `read` | `read` / `write` / `admin` — access level for this process, applies across every vault it serves |
 
 **v0.7.6x+: no `--vault` flag.** One server process serves every vault the
@@ -104,7 +103,7 @@ also enforced inside each write tool via `VaultContext.require()`.
 ```
 mcp/
 ├── __init__.py
-├── cli.py          # CLI entry, FastMCP bootstrap, transport, mode gating
+├── cli.py          # CLI entry, MCPServer bootstrap, transport, mode gating
 ├── resources.py     # 5 wiki:// resources
 ├── db.py            # read-only sqlite helpers (single connection per call)
 ├── tools/
@@ -135,9 +134,10 @@ from the `wiki_db` fixture.
 > To run the server, use `python -m mcp.cli` (not `python -m mcp.server`).
 
 Our local package is named `mcp` (sibling of `wiki.db`). The real MCP SDK
-(`mcp[cli]` ≥ 1.x) also ships an `mcp` package and provides `mcp.server.fastmcp.FastMCP`.
+(`mcp` ≥ 2.0) also ships an `mcp` package and provides `mcp.server.mcpserver.MCPServer`
+(2.0 removed the old `mcp.server.fastmcp.FastMCP`).
 
-`mcp/cli.py` handles the namespace collision by deferring the FastMCP
+`mcp/cli.py` handles the namespace collision by deferring the MCPServer
 import to runtime and temporarily un-registering our local `mcp.*` from
 `sys.modules` so the SDK can be loaded. The local package is restored
 afterwards so tool body imports (`from mcp.tools import …`) still resolve.
