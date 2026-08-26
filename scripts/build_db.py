@@ -17,7 +17,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -26,16 +26,17 @@ import frontmatter
 from raven.core.relations import is_valid_relation_payload
 from raven.core.node_meta import aliases_to_json, collection_for_slug, normalize_status
 from raven.core.vault import ROOT_AGENT_INSTRUCTION_FILES
+from raven.core.wikilink import (
+    WIKILINK_RE,
+    extract_links,
+    slug_exists as _slug_exists,
+    resolve_short_slug as _resolve_short_slug,
+)
 
 # ─────────────────────────── constants ──────────────────────────────
 
 EXCLUDED_TOP_DIRS = {"raw", "_archive", "scripts", "node_modules", ".venv", ".git"}
 TODAY = dt.date.today().isoformat()
-
-# Wikilink regex: [[target]] or [[target]]! or [[target]]?
-# Captures: (target, intent_suffix) where intent_suffix in {'', '!', '?'}
-WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]([!?]?)")
-CONTEXT_RADIUS = 50  # chars on each side of the wikilink in the body
 
 
 # ─────────────────────────── schema (v2.4) ──────────────────────────
@@ -213,46 +214,6 @@ def parse_page(md_path: Path, vault: Path) -> dict:
         "tags": list(fm.get("tags") or []),
         "relations": list(fm.get("relations") or []),
     }
-
-
-# ─────────────────────────── wikilink extraction ───────────────────
-
-def extract_links(content: str) -> Iterable[tuple[str, str, Optional[str]]]:
-    """Yield (target_slug, intent, context) tuples from a markdown body.
-
-    intent is one of: 'auto', 'broken', 'missing'.
-    context is up to 50 chars on each side of the wikilink.
-    """
-    for m in WIKILINK_RE.finditer(content):
-        target = m.group(1).strip()
-        suffix = m.group(2)
-        intent = {"!": "broken", "?": "missing"}.get(suffix, "auto")
-        start, end = m.span()
-        ctx_start = max(0, start - CONTEXT_RADIUS)
-        ctx_end = min(len(content), end + CONTEXT_RADIUS)
-        context = content[ctx_start:ctx_end].replace("\n", " ").strip()
-        yield target, intent, context
-
-
-# v0.6.10: slug normalize helpers — 옛 빌드 wikilink 짧은 slug 호환
-def _slug_exists(conn, slug: str) -> bool:
-    row = conn.execute("SELECT 1 FROM pages WHERE slug = ? LIMIT 1", (slug,)).fetchone()
-    return row is not None
-
-
-def _resolve_short_slug(conn, short_slug: str) -> Optional[str]:
-    """pages 중 마지막 segment 매치로 짧은 slug 보정. 예: 'vault-structure' → 'concept/vault-structure'."""
-    base = short_slug.rsplit("/", 1)[-1]
-    rows = conn.execute(
-        "SELECT slug FROM pages WHERE slug = ? OR slug LIKE ?",
-        (base, "%/" + base),
-    ).fetchall()
-    if len(rows) == 1:
-        return rows[0][0]
-    if len(rows) > 1:
-        # ambiguous — 가장 짧은 path 우선 (root 가까울수록 canonical)
-        return min(rows, key=lambda r: len(r[0]))[0]
-    return None
 
 
 # ─────────────────────────── vault walking ─────────────────────────

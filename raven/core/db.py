@@ -23,6 +23,7 @@ from .lock import lock_for_file
 from .node_meta import aliases_to_json, collection_for_slug, normalize_status
 from .relations import is_valid_relation_payload
 from .vault import Vault, resolve_active_vault, ROOT_AGENT_INSTRUCTION_FILES
+from .wikilink import extract_links, slug_exists, resolve_short_slug
 
 
 # ────────────────────────── public API ──────────────────────────
@@ -446,8 +447,47 @@ def _inline_build(vault: Vault, db_path: Path) -> dict:
                     "verified_by, evidence, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (slug, target, rel_type, conf_sem, conf_str, conf_prov, verified_by_str, evidence_str, reason),
                 )
+
+        # Raven Product Feedback Brief: this fallback builder used to create
+        # the `links` table schema but never populate it — no [[wikilink]]
+        # extraction ran here at all, so wiki_graph edges,
+        # wiki_get_page backlinks/outbound_links, and the dashboard's
+        # orphan-page detection were always empty/wrong for any vault built
+        # through this path (e.g. the packaged desktop app, which ships
+        # `raven/` without the sibling `scripts/` dir the canonical builder
+        # lives in). Mirrors scripts/build_db.py's link extraction exactly.
+        for target, intent, context in extract_links(body):
+            normalized = target
+            if target and not slug_exists(con, target):
+                candidate = resolve_short_slug(con, target)
+                if candidate:
+                    normalized = candidate
+            con.execute(
+                "INSERT OR REPLACE INTO links (source_slug, target_slug, context, intent) "
+                "VALUES (?, ?, ?, ?)",
+                (slug, normalized, context, intent),
+            )
+
         n_pages += 1
     con.commit()
+
+    # short-slug 보정 후처리 패스 (scripts/build_db.py와 동일) — 첫 pass에서
+    # 아직 INSERT되지 않은 다른 페이지를 가리키는 self-reference race 보정.
+    try:
+        rows = con.execute("SELECT source_slug, target_slug FROM links").fetchall()
+        for src, tgt in rows:
+            if slug_exists(con, tgt):
+                continue
+            candidate = resolve_short_slug(con, tgt)
+            if candidate:
+                con.execute(
+                    "UPDATE links SET target_slug = ? WHERE source_slug = ? AND target_slug = ?",
+                    (candidate, src, tgt),
+                )
+        con.commit()
+    except Exception:
+        pass
+
     try:
         from .analytics import update_analytics_properties
         update_analytics_properties(con)

@@ -68,6 +68,15 @@ echo "[4/4] Copying Raven source..."
 mkdir -p "$RESOURCES/raven"
 cp -R "$REPO_ROOT/raven" "$RESOURCES/raven/raven"
 
+# Raven Product Feedback Brief: raven/core/db.py's build_db()
+# looks for scripts/build_db.py next to the raven/ package and falls back
+# to _inline_build() when it's missing — a fallback that (until v0.7.185)
+# never populated the `links` table at all, so any vault built through the
+# packaged app had empty wiki_graph edges / backlinks. Bundle the canonical
+# builder so the app never takes that fallback path.
+mkdir -p "$RESOURCES/raven/scripts"
+cp "$REPO_ROOT/scripts/build_db.py" "$RESOURCES/raven/scripts/build_db.py"
+
 # Remove __pycache__ and test artifacts
 find "$RESOURCES/raven" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find "$RESOURCES/raven" -name "*.pyc" -delete 2>/dev/null || true
