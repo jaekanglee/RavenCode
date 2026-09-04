@@ -203,21 +203,25 @@ class RelationAddPayload(BaseModel):
 
 @app.get("/api/system/info")
 def system_info():
-    """Returns backend system info including auto-detected Tailscale IP and MCP endpoints."""
-    from raven.api.main import get_tailscale_ip
+    """Returns backend system info including auto-detected Tailscale/LAN IP and MCP endpoints."""
+    from raven.api.main import get_tailscale_ip, get_lan_ip
     ts_ip = get_tailscale_ip()
+    lan_ip = get_lan_ip()
     port = bound_port()
     local_api = f"http://127.0.0.1:{port}"
     local_mcp = f"http://127.0.0.1:{port}/mcp"
-    
+
     ts_api = f"http://{ts_ip}:{port}" if ts_ip else None
     ts_mcp = f"http://{ts_ip}:{port}/mcp" if ts_ip else None
+    lan_api = f"http://{lan_ip}:{port}" if lan_ip else None
 
     return {
         "ok": True,
         "tailscale_ip": ts_ip,
+        "lan_ip": lan_ip,
         "local_api": local_api,
         "local_mcp": local_mcp,
+        "lan_api": lan_api,
         "tailscale_api": ts_api,
         "tailscale_mcp": ts_mcp,
         "bind_host": bound_host(),

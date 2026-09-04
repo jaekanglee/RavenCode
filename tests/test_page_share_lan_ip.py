@@ -43,3 +43,28 @@ def test_get_lan_ip_returns_none_when_no_network():
     with patch("socket.socket", side_effect=OSError("network unreachable")):
         with patch("socket.gethostbyname_ex", side_effect=OSError("no network")):
             assert get_lan_ip() is None
+
+
+from fastapi.testclient import TestClient
+
+from raven.api.server import app
+
+client = TestClient(app)
+
+
+def test_system_info_includes_lan_ip_when_detected():
+    with patch("raven.api.main.get_lan_ip", return_value="192.168.1.42"):
+        res = client.get("/api/system/info")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["lan_ip"] == "192.168.1.42"
+    assert data["lan_api"] == f"http://192.168.1.42:{data['port']}"
+
+
+def test_system_info_lan_api_is_none_when_lan_ip_not_detected():
+    with patch("raven.api.main.get_lan_ip", return_value=None):
+        res = client.get("/api/system/info")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["lan_ip"] is None
+    assert data["lan_api"] is None
