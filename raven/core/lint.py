@@ -484,10 +484,22 @@ def check_tag_audit(vault: Vault) -> list[dict]:
 
 
 def check_frontmatter_completeness(vault: Vault) -> list[dict]:
-    """#10 frontmatter 완전성: title/type/created/updated 필수. created/updated는 warning, 나머지는 info."""
+    """#10 frontmatter 완전성: title/type/created/updated 필수. created/updated는 warning, 나머지는 info.
+
+    면제 (SCHEMA.md "System Areas"): _meta/**, raw/**, content/_index/**,
+    content/index — 시스템 자동 생성/운영 영역은 type 9종 정책 밖 (Raven Product
+    Feedback Brief 2026-09-03: 문서엔 면제로 명시돼 있었지만 구현이 빠져 있었음).
+    """
     out: list[dict] = []
     for fp in _all_pages(vault):
         slug = _slug_of(vault, fp)
+        if (
+            slug.startswith("_meta/")
+            or slug.startswith("raw/")
+            or slug.startswith("content/_index/")
+            or slug == "content/index"
+        ):
+            continue
         fm = _parse_fm(fp)
         if not fm:
             out.append(_mk_issue(
@@ -840,8 +852,9 @@ def check_slug_title_1to1(vault: Vault) -> list[dict]:
             continue
         if slug.startswith("journal/"):
             continue
-        if slug.endswith("/index") or slug == "index":
-            continue  # _index 자동 카탈로그
+        if slug.endswith("/index") or slug == "index" or slug.startswith("content/_index/"):
+            continue  # _index 자동 카탈로그 (Raven Product Feedback Brief 2026-09-03:
+            # content/_index/{type} 카탈로그는 "/index"로 끝나지 않아 이 면제에 안 걸렸음)
         fm = _parse_fm(fp)
         title = fm.get("title")
         if not title or not isinstance(title, str):
@@ -1460,7 +1473,7 @@ def check_contextless_wikilinks(vault: Vault) -> list[dict]:
     out: list[dict] = []
     for fp in _all_pages(vault):
         slug = _slug_of(vault, fp)
-        if slug.startswith("_meta/") or slug.startswith("content/_index/") or slug == "content/index.md":
+        if slug.startswith("_meta/") or slug.startswith("content/_index/") or slug == "content/index":
             continue
         if slug.startswith("content/wip/") or slug.startswith("content/scratch/") or slug.startswith("wip/") or slug.startswith("scratch/"):
             continue
@@ -1604,7 +1617,7 @@ def check_semantic_relations(vault: Vault) -> list[dict]:
 
     for fp in _all_pages(vault):
         slug = _slug_of(vault, fp)
-        if slug.startswith("_meta/") or slug.startswith("content/_index/") or slug == "content/index.md":
+        if slug.startswith("_meta/") or slug.startswith("content/_index/") or slug == "content/index":
             continue
         try:
             text = _read_text(fp)
