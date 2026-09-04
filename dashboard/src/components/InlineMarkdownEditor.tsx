@@ -33,6 +33,7 @@
  import { TextField } from "./ui/TextField";
  import { Toast } from "./ui/Toast";
  import { AITagSuggestion } from "./AITagSuggestion";
+import { ShareButton } from "./ShareButton";
 
  // Lucide-style SVG icons (MIT, public domain). 16x16 viewBox, currentColor 사용
  // → var(--color-ink) / hover 시 var(--color-accent) 자동 적용.
@@ -398,6 +399,7 @@
        >
          {mode === "view" ? (
            <>
+             <ShareButton vault={vault} slug={slug} />
              <Button
                type="button"
                variant="primary"
