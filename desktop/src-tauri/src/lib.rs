@@ -2,7 +2,7 @@ mod core;
 
 use std::sync::Mutex;
 use tauri::{command, Manager, RunEvent, State, WebviewWindow, WindowEvent};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 
 /// Reveals the window and, if the webview's content process died while the
@@ -89,6 +89,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(CoreState::default())
         .invoke_handler(tauri::generate_handler![core_endpoint, mcp_endpoint, app_version])
+        .on_menu_event(|app, event| {
+            if event.id.as_ref() == "reload" {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("location.reload()");
+                }
+            }
+        })
         .setup(move |app| {
             // Python Core는 setup 훅에서 동기적으로 기다리지 않고 별도 task로 기동한다.
             // setup 훅이 Err를 반환하면 Tauri 내부가 응답 불가능한 패닉(panic→abort, FFI 경계라
@@ -111,6 +118,17 @@ pub fn run() {
                     handle.exit(1);
                 }
             });
+
+            // 데스크탑 앱은 브라우저가 아니라 웹뷰라 기본 Cmd+R/Ctrl+R 새로고침이 없다 —
+            // View 메뉴에 accelerator를 달아 웹뷰를 강제 새로고침한다(창 포커스 여부와 무관하게 앱 전역 메뉴).
+            let reload_i = MenuItemBuilder::new("Reload")
+                .id("reload")
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?;
+            let view_menu = SubmenuBuilder::new(app, "View").item(&reload_i).build()?;
+            let app_menu = Menu::default(app.handle())?;
+            app_menu.append(&view_menu)?;
+            app.set_menu(app_menu)?;
 
             let show_i = MenuItem::with_id(app, "show", "Open Dashboard", true, None::<&str>)?;
             let restart_i = MenuItem::with_id(app, "restart", "Restart Backend", true, None::<&str>)?;
