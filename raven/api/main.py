@@ -37,6 +37,42 @@ def get_tailscale_ip() -> str | None:
         pass
     return None
 
+def get_lan_ip() -> str | None:
+    """Detect this machine's LAN IP (192.168/10/172.16-31), distinct from Tailscale (100.64.0.0/10)."""
+    def _is_lan(ip: str) -> bool:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return False
+        try:
+            octets = [int(p) for p in parts]
+        except ValueError:
+            return False
+        if octets[0] == 192 and octets[1] == 168:
+            return True
+        if octets[0] == 10:
+            return True
+        if octets[0] == 172 and 16 <= octets[1] <= 31:
+            return True
+        return False
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if _is_lan(ip):
+            return ip
+    except Exception:
+        pass
+    try:
+        _, _, ips = socket.gethostbyname_ex(socket.gethostname())
+        for ip in ips:
+            if _is_lan(ip):
+                return ip
+    except Exception:
+        pass
+    return None
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="raven-api")
     env_host = os.environ.get("RAVEN_HOST", "")
