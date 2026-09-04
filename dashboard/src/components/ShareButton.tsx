@@ -22,12 +22,14 @@ function ShareRow({
   copyLabel,
   onCopy,
   copied,
+  fallbackText,
 }: {
   label: string;
   url: string | null;
   copyLabel: string;
   onCopy: (url: string) => void;
   copied: boolean;
+  fallbackText: string;
 }) {
   return (
     <div style={{ marginBottom: 10 }}>
@@ -59,7 +61,7 @@ function ShareRow({
         </div>
       ) : (
         <span style={{ fontSize: 12, color: "var(--color-muted)" }}>
-          {label.includes("내부망") ? "내부망 IP 감지 안 됨" : "Tailscale IP 감지 안 됨"}
+          {fallbackText}
         </span>
       )}
     </div>
@@ -154,6 +156,7 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
                 copyLabel="내부망 링크 복사"
                 onCopy={(url) => handleCopy(url, "lan")}
                 copied={copiedKey === "lan"}
+                fallbackText="내부망 IP 감지 안 됨"
               />
               <ShareRow
                 label="Tailscale 링크"
@@ -161,6 +164,7 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
                 copyLabel="Tailscale 링크 복사"
                 onCopy={(url) => handleCopy(url, "ts")}
                 copied={copiedKey === "ts"}
+                fallbackText="Tailscale IP 감지 안 됨"
               />
             </>
           )}
