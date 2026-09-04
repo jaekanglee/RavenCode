@@ -211,8 +211,10 @@ export async function testHostConnection(endpoint: string): Promise<{ ok: boolea
 export interface SystemInfo {
   ok: boolean;
   tailscale_ip: string | null;
+  lan_ip: string | null;
   local_api: string;
   local_mcp: string;
+  lan_api: string | null;
   tailscale_api: string | null;
   tailscale_mcp: string | null;
   bind_host: string;
