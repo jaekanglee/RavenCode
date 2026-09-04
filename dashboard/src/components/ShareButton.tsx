@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
 import { Button } from "./ui/Button";
+
+// 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
+// Layout의 <main overflow-hidden> / .page-content overflow-y-auto 안에서 position:absolute 로 두면
+// 사이드바 경계에서 잘린다 (overflow-y:auto 는 overflow-x 도 auto 로 계산됨).
+const POPOVER_WIDTH = 320;
+const POPOVER_GAP = 6;
+const VIEWPORT_MARGIN = 8;
 
 const Icon = {
   Share: () => (
@@ -73,7 +81,9 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -83,12 +93,35 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
       .finally(() => setLoading(false));
   }, [open]);
 
+  // 트리거 버튼 기준 viewport 좌표 계산 — 버튼 아래, 왼쪽 정렬, 우측 넘침은 클램프.
+  useEffect(() => {
+    if (!open) return;
+    function place() {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const maxLeft = window.innerWidth - POPOVER_WIDTH - VIEWPORT_MARGIN;
+      setPos({
+        top: rect.bottom + POPOVER_GAP,
+        left: Math.max(VIEWPORT_MARGIN, Math.min(rect.left, maxLeft)),
+      });
+    }
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  // 포털로 빠진 팝오버는 containerRef 밖이므로 popoverRef 도 "안쪽" 으로 취급해야 한다.
   useEffect(() => {
     if (!open) return;
     function onOutsideClick(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const t = e.target as Node;
+      const inTrigger = containerRef.current?.contains(t) ?? false;
+      const inPopover = popoverRef.current?.contains(t) ?? false;
+      if (!inTrigger && !inPopover) setOpen(false);
     }
     document.addEventListener("mousedown", onOutsideClick);
     return () => document.removeEventListener("mousedown", onOutsideClick);
@@ -117,19 +150,21 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
         <Icon.Share />
       </Button>
 
-      {open && (
+      {open && pos && createPortal(
         <div
+          ref={popoverRef}
+          data-testid="share-popover"
           style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            right: 0,
-            width: 320,
+            position: "fixed",
+            top: pos.top,
+            left: pos.left,
+            width: POPOVER_WIDTH,
             background: "var(--color-canvas)",
             border: "1px solid var(--color-hairline-strong)",
             borderRadius: "var(--radius-md)",
             boxShadow: "var(--shadow-overlay)",
             padding: 14,
-            zIndex: 50,
+            zIndex: 100,
           }}
         >
           {loading && (
@@ -168,7 +203,8 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
               />
             </>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
