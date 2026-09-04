@@ -248,7 +248,19 @@ def build_db(vault: Path, db_path: Path) -> tuple[int, int, int]:
 
         n_pages = n_links = n_tags = 0
         for md_path in iter_markdown(vault):
-            page = parse_page(md_path, vault)
+            # Raven Product Feedback Brief (2026-09-03): iter_markdown() snapshots
+            # the file list up front, but a concurrent wiki_rename/wiki_delete can
+            # move/remove a page while this scan is still working through the rest
+            # of the vault — read_text() then raises OSError and, uncaught, killed
+            # the *entire* build (intermittent "wiki.db rebuild fail, returncode 1"
+            # on otherwise-unrelated pages). Skip the vanished page instead; the
+            # rename/delete's own rebuild will pick it up correctly. Mirrors the
+            # OSError guard raven/core/db.py::_inline_build already has.
+            try:
+                page = parse_page(md_path, vault)
+            except OSError as exc:
+                print(f"⚠️  skipping {md_path} (vanished mid-scan?): {exc}", file=sys.stderr)
+                continue
             conn.execute(
                 """INSERT INTO pages (slug, title, type, created, updated, path,
                                       confidence, contested, content, raw_content,
@@ -378,8 +390,6 @@ def build_db(vault: Path, db_path: Path) -> tuple[int, int, int]:
 
         # analytics post-processing pass
         try:
-            import sys
-            from pathlib import Path
             repo_root = Path(__file__).resolve().parent.parent
             if str(repo_root) not in sys.path:
                 sys.path.insert(0, str(repo_root))
@@ -387,7 +397,6 @@ def build_db(vault: Path, db_path: Path) -> tuple[int, int, int]:
             update_analytics_properties(conn)
             conn.commit()
         except Exception as exc:
-            import sys
             sys.stderr.write(f"⚠️  analytics update failed: {exc}\n")
 
         return n_pages, n_links, n_tags
