@@ -52,3 +52,6 @@ desktop/src-tauri/resources/
 
 # Deployment scripts (Personal/Private)
 scripts/deploy-qc.sh
+
+# Isolated task worktrees (superpowers:using-git-worktrees)
+.worktrees/
