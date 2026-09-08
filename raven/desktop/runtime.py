@@ -60,6 +60,52 @@ DEFAULT_MCP_PORT = int(os.environ.get("PORT_MCP", "8766"))
 DEFAULT_API_PORT = int(os.environ.get("PORT_API", "8765"))
 
 
+class _PipeSafeStream:
+    """Wrap stdout/stderr so a closed pipe never becomes a request failure.
+
+    The Tauri shell pipes both streams, reads stdout for the readiness line
+    (and stderr only if that fails), then drops the handles. Afterwards every
+    ``sys.stderr.write`` raised BrokenPipeError inside whichever request
+    handler happened to log a warning — hybrid-search / rag returned 500 while
+    endpoints that stay quiet kept working. Once a write fails with an OSError
+    the stream is swapped for ``os.devnull`` and later writes are dropped.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def _fallback(self) -> None:
+        try:
+            self._stream = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            self._stream = None
+
+    def write(self, data: str) -> int:
+        if self._stream is None:
+            return len(data)
+        try:
+            return self._stream.write(data)
+        except OSError:
+            self._fallback()
+            return len(data)
+
+    def flush(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.flush()
+        except OSError:
+            self._fallback()
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+def _harden_std_streams() -> None:
+    sys.stdout = _PipeSafeStream(sys.stdout)
+    sys.stderr = _PipeSafeStream(sys.stderr)
+
+
 def _free_port(host: str = LOOPBACK_HOST) -> int:
     """Try preferred 8765 port first, fallback to OS assigned free port if occupied."""
     try:
@@ -153,6 +199,10 @@ def main() -> int:
     )
     parser.add_argument("--mcp-mode", choices=["read", "write", "admin"], default="read")
     args = parser.parse_args()
+
+    # Before uvicorn/logging capture sys.stderr: a dropped shell pipe must not
+    # turn into BrokenPipeError inside request handlers (see _PipeSafeStream).
+    _harden_std_streams()
 
     import uvicorn
 

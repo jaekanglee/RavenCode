@@ -128,7 +128,8 @@ impl ManagedCore {
         let stderr = child.stderr.take();
 
         let mut line = String::new();
-        BufReader::new(stdout)
+        let mut stdout_reader = BufReader::new(stdout);
+        stdout_reader
             .read_line(&mut line)
             .map_err(|error| format!("Python Core readiness 읽기 실패: {error}"))?;
 
@@ -156,6 +157,15 @@ impl ManagedCore {
             return Err("Python Core가 유효한 loopback endpoint를 보고하지 않았습니다".to_string());
         }
 
+        // Keep draining both pipes for the life of the child. Dropping the
+        // handles here closed the read ends, so every later `sys.stderr.write`
+        // in the Python Core (e.g. hybrid_search's sqlite-vec warning) raised
+        // BrokenPipeError inside the request handler → 500 on /hybrid-search.
+        forward_pipe("core", stdout_reader);
+        if let Some(err_stream) = stderr {
+            forward_pipe("core:stderr", BufReader::new(err_stream));
+        }
+
         let mcp_endpoint = ready.mcp_port.map(|p| {
             let host = ready.mcp_host.as_deref().unwrap_or(&ready.host);
             format!("http://{host}:{p}/mcp")
@@ -180,6 +190,24 @@ impl Drop for ManagedCore {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Relay a child pipe line-by-line to the shell's stderr until EOF.
+///
+/// The reader thread must outlive `start()`; otherwise the pipe's read end is
+/// closed and the child's next write fails with EPIPE.
+fn forward_pipe<R: Read + Send + 'static>(tag: &'static str, reader: BufReader<R>) {
+    std::thread::Builder::new()
+        .name(format!("raven-{tag}"))
+        .spawn(move || {
+            for line in reader.lines() {
+                match line {
+                    Ok(text) => eprintln!("[raven-{tag}] {text}"),
+                    Err(_) => break,
+                }
+            }
+        })
+        .ok();
 }
 
 /// Resolve the Python interpreter and optional PYTHONPATH.
