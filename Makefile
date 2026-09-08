@@ -242,3 +242,7 @@ deploy-prod: ## Deploy mobile Prod build via Fastlane
 
 desktop-install: ## Rebuild from current source and (re)install Raven.app to /Applications (no clone/pull)
 	@bash scripts/install-desktop.sh
+
+.PHONY: desktop-smoke
+desktop-smoke: ## Smoke-test the installed Raven.app through its real Tauri-managed core (launches it if needed)
+	@bash scripts/smoke-desktop.sh
