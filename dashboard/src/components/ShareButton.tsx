@@ -24,12 +24,38 @@ const Icon = {
   ),
 };
 
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to execCommand
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function ShareRow({
   label,
   url,
   copyLabel,
   onCopy,
   copied,
+  failed,
   fallbackText,
 }: {
   label: string;
@@ -37,6 +63,7 @@ function ShareRow({
   copyLabel: string;
   onCopy: (url: string) => void;
   copied: boolean;
+  failed: boolean;
   fallbackText: string;
 }) {
   return (
@@ -44,6 +71,11 @@ function ShareRow({
       <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4 }}>
         {label}
       </div>
+      {url && failed && (
+        <div style={{ fontSize: 11, color: "var(--color-danger-text)", marginBottom: 4 }}>
+          클립보드 접근이 거부되어 복사 실패 — 아래 링크를 직접 선택해 복사하세요.
+        </div>
+      )}
       {url ? (
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <span
@@ -64,7 +96,7 @@ function ShareRow({
             aria-label={copyLabel}
             onClick={() => onCopy(url)}
           >
-            {copied ? "✅ 복사됨!" : "📋 복사"}
+            {copied ? "✅ 복사됨!" : failed ? "⚠️ 복사 실패" : "📋 복사"}
           </Button>
         </div>
       ) : (
@@ -127,10 +159,22 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
     return () => document.removeEventListener("mousedown", onOutsideClick);
   }, [open]);
 
-  function handleCopy(url: string, key: string) {
-    navigator.clipboard.writeText(url);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
+  const [failedKey, setFailedKey] = useState<string | null>(null);
+
+  // 클립보드 쓰기는 실패할 수 있다 (WKWebView 권한 거부, http LAN 접속 같은
+  // non-secure context 에서는 navigator.clipboard 자체가 없음). 예전에는 결과를
+  // 기다리지 않고 "복사됨" 을 띄워서, 직전에 복사한 다른 링크가 클립보드에 남아
+  // 있어도 성공처럼 보였다. 이제 성공을 확인한 뒤에만 복사됨을 표시한다.
+  async function handleCopy(url: string, key: string) {
+    setFailedKey(null);
+    const ok = await copyToClipboard(url);
+    if (ok) {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 2000);
+    } else {
+      setCopiedKey(null);
+      setFailedKey(key);
+    }
   }
 
   const lanUrl = sysInfo?.lan_api ? `${sysInfo.lan_api}/page/${vault}/${slug}` : null;
@@ -191,6 +235,7 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
                 copyLabel="내부망 링크 복사"
                 onCopy={(url) => handleCopy(url, "lan")}
                 copied={copiedKey === "lan"}
+                failed={failedKey === "lan"}
                 fallbackText="내부망 IP 감지 안 됨"
               />
               <ShareRow
@@ -199,6 +244,7 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
                 copyLabel="Tailscale 링크 복사"
                 onCopy={(url) => handleCopy(url, "ts")}
                 copied={copiedKey === "ts"}
+                failed={failedKey === "ts"}
                 fallbackText="Tailscale IP 감지 안 됨"
               />
             </>
