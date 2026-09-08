@@ -49,16 +49,21 @@ MOUNT_POINT="$(mktemp -d)/Raven"
 hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -quiet
 trap 'hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true' EXIT
 
-rm -rf /Applications/Raven.app
-cp -R "$MOUNT_POINT/Raven.app" /Applications/Raven.app
+# Update the bundle in place instead of rm -rf + cp -R. Replacing the directory
+# made Spotlight/LaunchServices treat it as a brand-new 5,700-file item that sat
+# in the indexing queue for up to ~30 min, during which "Raven" vanished from
+# Spotlight after every install. Syncing into the existing directory keeps the
+# same inode/path, so the entry stays and only changed files are re-imported.
+mkdir -p /Applications/Raven.app
+rsync -a --delete "$MOUNT_POINT/Raven.app/" /Applications/Raven.app/
+codesign --verify --deep --strict /Applications/Raven.app 2>/dev/null \
+  || echo "⚠️  codesign verify failed after in-place sync (ad-hoc builds may still launch)"
 
 hdiutil detach "$MOUNT_POINT" -quiet
 trap - EXIT
 
-# Nudge Spotlight to index the freshly-replaced bundle now instead of waiting
-# for its own backlog — rm -rf + cp -R looks like a brand-new file to mds,
-# so a fresh install would otherwise be un-searchable for a while.
-mdimport -f /Applications/Raven.app >/dev/null 2>&1 || true
+# Nudge Spotlight to re-import the updated bundle metadata right away.
+mdimport /Applications/Raven.app >/dev/null 2>&1 || true
 
 echo ""
 echo "✅ Raven.app installed to /Applications/Raven.app"
