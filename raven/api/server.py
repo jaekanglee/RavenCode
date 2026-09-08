@@ -3212,9 +3212,33 @@ def delete_raw(
 # provides both API and UI.  Tauri desktop still serves dist/ via its own
 # webview; this path is for browser access (phone / other machines).
 
-_DASHBOARD_DIST = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+def _resolve_dashboard_dist(here: Path, env_override: Optional[str] = None) -> Optional[Path]:
+    """Locate the built dashboard for the layout we are running from.
 
-if _DASHBOARD_DIST.is_dir():
+    - RAVEN_DASHBOARD_DIST env wins when set.
+    - repo checkout:  <repo>/raven/api/server.py            → <repo>/dashboard/dist
+    - Raven.app:      Resources/resources/raven/raven/api/server.py
+                      → Resources/dashboard/dist  (placed there by scripts/make-dmg.sh)
+    Before this the bundled API only tried the repo layout, so the desktop app
+    served no SPA at all and every shared `/page/<vault>/<slug>` link was 404.
+    """
+    if env_override:
+        p = Path(env_override)
+        return p if (p / "index.html").is_file() else None
+    parents = here.resolve().parents
+    for depth in (2, 4):
+        if depth < len(parents):
+            candidate = parents[depth] / "dashboard" / "dist"
+            if (candidate / "index.html").is_file():
+                return candidate
+    return None
+
+
+_DASHBOARD_DIST = _resolve_dashboard_dist(
+    Path(__file__), os.environ.get("RAVEN_DASHBOARD_DIST") or None
+)
+
+if _DASHBOARD_DIST is not None:
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse
 
@@ -3224,6 +3248,10 @@ if _DASHBOARD_DIST.is_dir():
     # SPA fallback: any non-API GET that didn't match a route → index.html
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
+        # Unknown API paths must stay JSON 404s, not silently become index.html
+        # (clients probing /api/... would otherwise get 200 + HTML).
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
         # Serve the exact file if it exists (favicon, sw.js, manifest…)
         candidate = _DASHBOARD_DIST / full_path
         if full_path and candidate.is_file():
