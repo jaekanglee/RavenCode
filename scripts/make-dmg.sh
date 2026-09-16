@@ -12,7 +12,12 @@ BINARY="$TAURI_DIR/target/release/raven-desktop"
 BUNDLE_DIR="$TAURI_DIR/target/release/bundle"
 APP_DIR="$BUNDLE_DIR/macos/Raven.app"
 DMG_DIR="$BUNDLE_DIR/dmg"
-DMG_NAME="Raven_0.1.0_aarch64.dmg"
+
+# 버전 SOT는 tauri.conf.json 하나다. 여기서 파생시키지 않고 하드코딩하면
+# 버전을 올렸을 때 DMG 이름·Info.plist·업로드 경로가 조용히 어긋난다.
+VERSION="$(python3 -c "import json;print(json.load(open('$TAURI_DIR/tauri.conf.json'))['version'])")"
+DMG_NAME="Raven_${VERSION}_aarch64.dmg"
+echo "  version: $VERSION (tauri.conf.json)"
 
 [ -f "$BINARY" ] || { echo "❌ Binary not found: $BINARY (run: make desktop-build)"; exit 1; }
 
@@ -27,7 +32,7 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp "$BINARY" "$APP_DIR/Contents/MacOS/Raven"
 
 # Info.plist
-cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
+cat > "$APP_DIR/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -35,8 +40,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 	<key>CFBundleName</key><string>Raven</string>
 	<key>CFBundleDisplayName</key><string>Raven</string>
 	<key>CFBundleIdentifier</key><string>com.raven.local</string>
-	<key>CFBundleVersion</key><string>0.1.0</string>
-	<key>CFBundleShortVersionString</key><string>0.1.0</string>
+	<key>CFBundleVersion</key><string>$VERSION</string>
+	<key>CFBundleShortVersionString</key><string>$VERSION</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleExecutable</key><string>Raven</string>
 	<key>CFBundleIconFile</key><string>icon.icns</string>

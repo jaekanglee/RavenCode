@@ -13,6 +13,11 @@ VENV := scripts/.venv
 PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
 
+# 데스크톱 앱 버전 SOT = tauri.conf.json. DMG 이름·태그·latest.json 이 모두 여기서
+# 파생된다 (하드코딩하면 버전 범프 때 조용히 어긋난다). 올릴 때는 make desktop-version.
+GH_REPO := jaekanglee/RavenCode
+DESKTOP_VERSION = $(shell python3 -c "import json;print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])" 2>/dev/null)
+
 # Default target — show help when user just runs `make`
 .DEFAULT_GOAL := help
 
@@ -213,15 +218,21 @@ desktop-build: desktop-check desktop-bundle ## Build Tauri desktop app (release 
 	cd desktop/src-tauri && cargo build --release
 	@echo "✅ Binary: desktop/src-tauri/target/release/raven-desktop"
 
+desktop-version: ## Bump desktop app version (usage: make desktop-version VERSION=0.2.0)
+	@test -n "$(VERSION)" || (echo "❌ usage: make desktop-version VERSION=0.2.0"; exit 1)
+	@bash scripts/bump-desktop-version.sh "$(VERSION)"
+
 desktop-dmg: desktop-build ## Build DMG installer from release binary
 	@bash scripts/make-dmg.sh
-	@echo "✅ DMG: desktop/src-tauri/target/release/bundle/dmg/Raven_0.1.0_aarch64.dmg"
+	@echo "✅ DMG: desktop/src-tauri/target/release/bundle/dmg/Raven_$(DESKTOP_VERSION)_aarch64.dmg"
 
 desktop-release: desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + TAURI_SIGNING_PRIVATE_KEY)
-	@TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0"); \
-	VERSION=$${TAG#v}; \
-	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_0.1.0_aarch64.dmg"; \
-	bash scripts/sign-update.sh "$$VERSION" "jaekanglee/RavenWiki"; \
+	@VERSION="$(DESKTOP_VERSION)"; \
+	TAG="v$$VERSION"; \
+	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_$${VERSION}_aarch64.dmg"; \
+	git rev-parse "$$TAG" >/dev/null 2>&1 || { \
+	  echo "❌ 태그 $$TAG 가 없습니다 — 'make desktop-version VERSION=$$VERSION' 후 커밋/태그하세요."; exit 1; }; \
+	bash scripts/sign-update.sh "$$VERSION" "$(GH_REPO)"; \
 	ARTIFACT="desktop/src-tauri/target/release/bundle/updater/Raven.app.tar.gz"; \
 	MANIFEST="desktop/src-tauri/target/release/bundle/updater/latest.json"; \
 	echo "📦 Uploading $$DMG + $$ARTIFACT + $$MANIFEST to release $$TAG ..."; \

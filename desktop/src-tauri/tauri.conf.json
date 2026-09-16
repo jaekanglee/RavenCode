@@ -45,7 +45,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://github.com/jaekanglee/RavenWiki/releases/latest/download/latest.json"
+        "https://github.com/jaekanglee/RavenCode/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4NTU3MDUyRTdENUQ0QzQKUldURTFOWG5VbkJWaUdHTHgyUG1nYXJvM0M4c0pza1lLVWZtdFFpWER0Y1R3NWhHcFNSd24wOEMK"
     }

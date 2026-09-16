@@ -5,9 +5,19 @@
 #   또는 gh release download 후 직접 실행
 set -eu
 
-REPO="jaekanglee/RavenWiki"
-TAG="v0.1.0"
-DMG_NAME="Raven_0.1.0_aarch64.dmg"
+REPO="jaekanglee/RavenCode"
+# 버전을 고정하면 범프할 때마다 이 파일이 낡는다 — 최신 릴리스를 조회해서 파생한다.
+# RAVEN_TAG 로 특정 버전을 강제할 수 있다.
+if [ -n "${RAVEN_TAG:-}" ]; then
+  TAG="$RAVEN_TAG"
+elif command -v gh >/dev/null 2>&1; then
+  TAG="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
+else
+  TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+fi
+[ -n "$TAG" ] || { echo "❌ 최신 릴리스 태그를 찾지 못했습니다"; exit 1; }
+DMG_NAME="Raven_${TAG#v}_aarch64.dmg"
 APP_NAME="Raven.app"
 TMP_DMG="/tmp/$DMG_NAME"
 
