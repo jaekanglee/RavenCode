@@ -232,12 +232,18 @@ desktop-release: desktop-dmg ## Build DMG + signed auto-update artifact, upload 
 	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_$${VERSION}_aarch64.dmg"; \
 	git rev-parse "$$TAG" >/dev/null 2>&1 || { \
 	  echo "❌ 태그 $$TAG 가 없습니다 — 'make desktop-version VERSION=$$VERSION' 후 커밋/태그하세요."; exit 1; }; \
+	git ls-remote --tags origin "refs/tags/$$TAG" | grep -q . || { \
+	  echo "❌ 태그 $$TAG 가 원격에 없습니다 — 'git push origin --tags' 먼저 실행하세요."; exit 1; }; \
 	bash scripts/sign-update.sh "$$VERSION" "$(GH_REPO)"; \
 	ARTIFACT="desktop/src-tauri/target/release/bundle/updater/Raven.app.tar.gz"; \
 	MANIFEST="desktop/src-tauri/target/release/bundle/updater/latest.json"; \
+	gh release view "$$TAG" --repo "$(GH_REPO)" >/dev/null 2>&1 || { \
+	  echo "📝 릴리스 $$TAG 가 없어 새로 만듭니다 ..."; \
+	  gh release create "$$TAG" --repo "$(GH_REPO)" --title "Raven $$TAG" --generate-notes; }; \
 	echo "📦 Uploading $$DMG + $$ARTIFACT + $$MANIFEST to release $$TAG ..."; \
-	gh release upload "$$TAG" "$$DMG" "$$ARTIFACT" "$$MANIFEST" --clobber; \
-	echo "✅ Release $$TAG updated (auto-update manifest included)"
+	gh release upload "$$TAG" "$$DMG" "$$ARTIFACT" "$$MANIFEST" --repo "$(GH_REPO)" --clobber; \
+	echo "✅ Release $$TAG updated (auto-update manifest included)"; \
+	echo "   업데이터 엔드포인트: https://github.com/$(GH_REPO)/releases/latest/download/latest.json"
 # ────────────────────────── mobile ──────────────────────────
 
 .PHONY: deploy-dev deploy-prod deploy-qc
