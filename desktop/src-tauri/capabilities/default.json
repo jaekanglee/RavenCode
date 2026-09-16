@@ -7,6 +7,8 @@
     "core:default",
     "allow-core-endpoint",
     "allow-mcp-endpoint",
+    "allow-core-status",
+    "allow-restart-core",
     "updater:default",
     "process:allow-restart"
   ]

@@ -81,6 +81,45 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Snapshot of the managed Python Core, for the dashboard's admin page.
+#[derive(serde::Serialize)]
+struct CoreStatus {
+    running: bool,
+    endpoint: Option<String>,
+    mcp_endpoint: Option<String>,
+}
+
+/// Reports whether the Python Core child process is alive, plus its endpoints.
+#[command]
+fn core_status(state: State<'_, CoreState>) -> CoreStatus {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(managed) = guard.as_mut() {
+            return CoreStatus {
+                running: managed.is_alive(),
+                endpoint: Some(managed.endpoint.clone()),
+                mcp_endpoint: managed.mcp_endpoint.clone(),
+            };
+        }
+    }
+    CoreStatus { running: false, endpoint: None, mcp_endpoint: None }
+}
+
+/// Stops and relaunches the Python Core — shared by the tray "Restart Backend"
+/// item and the dashboard's admin page restart button.
+fn do_restart_core(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<CoreState>();
+    state.stop();
+    let resource_dir = app.path().resource_dir().ok();
+    let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
+    state.start(mcp_enabled, resource_dir)
+}
+
+/// Restarts the Python Core on demand (invoked from the dashboard admin page).
+#[command]
+fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
+    do_restart_core(&app)
+}
+
 pub fn run() {
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
@@ -88,7 +127,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(CoreState::default())
-        .invoke_handler(tauri::generate_handler![core_endpoint, mcp_endpoint, app_version])
+        .invoke_handler(tauri::generate_handler![
+            core_endpoint,
+            mcp_endpoint,
+            app_version,
+            core_status,
+            restart_core
+        ])
         .on_menu_event(|app, event| {
             if event.id.as_ref() == "reload" {
                 if let Some(window) = app.get_webview_window("main") {
@@ -141,13 +186,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "restart" => {
-                        let state = app.state::<CoreState>();
-                        state.stop();
-                        let resource_dir = app.path().resource_dir().ok();
-                        let mcp_enabled = std::env::var("RAVEN_DESKTOP_MCP")
-                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
-                        if let Err(e) = state.start(mcp_enabled, resource_dir) {
+                        if let Err(e) = do_restart_core(app) {
                             eprintln!("Failed to restart core: {}", e);
                         }
                     }

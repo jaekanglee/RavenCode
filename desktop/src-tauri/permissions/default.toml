@@ -1,6 +1,6 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-mcp-endpoint"]
+permissions = ["allow-core-endpoint", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
@@ -11,3 +11,13 @@ commands.allow = ["core_endpoint"]
 identifier = "allow-mcp-endpoint"
 description = "Allow invoking the mcp_endpoint command."
 commands.allow = ["mcp_endpoint"]
+
+[[permission]]
+identifier = "allow-core-status"
+description = "Allow invoking the core_status command."
+commands.allow = ["core_status"]
+
+[[permission]]
+identifier = "allow-restart-core"
+description = "Allow invoking the restart_core command."
+commands.allow = ["restart_core"]

@@ -74,6 +74,47 @@ export function VaultManage() {
     }
   }, []);
 
+  // ── 백엔드(Python Core) 프로세스 상태 ──
+  interface CoreStatus { running: boolean; endpoint?: string | null; mcp_endpoint?: string | null; }
+  const [coreStatus, setCoreStatus] = useState<CoreStatus | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const [restartMsg, setRestartMsg] = useState<string | null>(null);
+
+  const refreshCoreStatus = useCallback(async () => {
+    if (!isTauri) return;
+    const internals = (window as any).__TAURI_INTERNALS__;
+    if (!internals?.invoke) return;
+    try {
+      setCoreStatus(await internals.invoke("core_status"));
+    } catch {
+      setCoreStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    void refreshCoreStatus();
+    const id = setInterval(() => void refreshCoreStatus(), 5000);
+    return () => clearInterval(id);
+  }, [refreshCoreStatus]);
+
+  async function restartBackend() {
+    if (!isTauri) return;
+    if (!window.confirm("백엔드(API/MCP)를 재시작할까요? 재시작 중에는 잠시 연결이 끊깁니다.")) return;
+    setRestarting(true);
+    setRestartMsg(null);
+    try {
+      const internals = (window as any).__TAURI_INTERNALS__;
+      await internals.invoke("restart_core");
+      setRestartMsg("✅ 백엔드 재시작 완료");
+      await refreshCoreStatus();
+    } catch (e) {
+      setRestartMsg(`❌ 재시작 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRestarting(false);
+    }
+  }
+
   async function checkManualUpdate() {
     if (!isTauri) return;
     setCheckingUpdate(true);
@@ -725,6 +766,52 @@ export function VaultManage() {
               </div>
             </div>
           </div>
+
+          {/* 백엔드 프로세스 상태 & 재시작 (데스크톱 전용) */}
+          {isTauri && (
+            <div
+              style={{
+                background: "var(--color-canvas)",
+                padding: 14,
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--color-hairline)",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "space-between",
+                gap: 10,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", textTransform: "uppercase", marginBottom: 6 }}>
+                  백엔드 프로세스 상태
+                </div>
+                <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                  <span
+                    style={{
+                      display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                      background: coreStatus?.running ? "var(--color-success-text)" : "var(--color-danger-text)",
+                    }}
+                  />
+                  <strong>{coreStatus === null ? "확인 중…" : coreStatus.running ? "실행 중" : "중지됨"}</strong>
+                </div>
+                {coreStatus?.mcp_endpoint && (
+                  <div style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 4, wordBreak: "break-all" }}>
+                    MCP: {coreStatus.mcp_endpoint}
+                  </div>
+                )}
+              </div>
+              <div>
+                <Button variant="secondary" size="sm" disabled={restarting} onClick={() => void restartBackend()}>
+                  {restarting ? "재시작 중..." : "🔁 백엔드 재시작"}
+                </Button>
+                {restartMsg && (
+                  <div style={{ fontSize: 11, marginTop: 6, color: restartMsg.startsWith("❌") ? "var(--color-danger-text)" : "var(--color-success-text)" }}>
+                    {restartMsg}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 2. 현재 선택된 활성 타겟 호스트 정보 (만약 원격 연결 중이라면) */}

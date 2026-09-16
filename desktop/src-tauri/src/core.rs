@@ -184,6 +184,11 @@ impl ManagedCore {
             let _ = self.child.wait();
         }
     }
+
+    /// True if the child process is still running (non-blocking check).
+    pub(crate) fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 impl Drop for ManagedCore {
