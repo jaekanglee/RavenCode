@@ -21,7 +21,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Vault** (데이터) | 마크다운 폴더 (Obsidian식 자유 계층) | `~/Raven/<name>/` (v0.6.3+) |
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
-| **CLI** (사람/자동화) | Typer 6 top-level commands + 11 subcommand groups | `raven/cli/` |
+| **CLI** (사람/자동화) | Typer 7 top-level commands + 11 subcommand groups | `raven/cli/` |
 | **API** (HTTP) | FastAPI 65 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 23 tools + 4 resources | `raven/mcp/` |
@@ -199,7 +199,7 @@ WIKI_VAULT=agent-output raven page ls
 
 ---
 
-## 핵심 명령 (CLI — 6 top-level + 11 서브커맨드 그룹)
+## 핵심 명령 (CLI — 7 top-level + 11 서브커맨드 그룹)
 
 ```bash
 raven where                                 # 환경 표시
@@ -472,7 +472,7 @@ raven build && raven link check
 │   │   ├── export.py                ← GUI 정적 JSON
 │   │   └── link.py                  ← wikilink 파싱/감사
 │   ├── cli/
-│   │   └── __main__.py              ← Typer 6 top-level + 11 서브커맨드 그룹
+│   │   └── __main__.py              ← Typer 7 top-level + 11 서브커맨드 그룹
 │   └── api/
 │       ├── server.py                ← FastAPI app
 │       ├── main.py                  ← uvicorn entry

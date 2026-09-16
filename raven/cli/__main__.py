@@ -79,6 +79,71 @@ app.add_typer(docs_app, name="docs")
 
 
 @app.command()
+def update(
+    check: bool = typer.Option(
+        False, "--check", help="업데이트 가능 여부만 확인하고 아무것도 바꾸지 않습니다."
+    ),
+) -> None:
+    """Raven 자체 업데이트 — 체크아웃을 origin으로 fast-forward 하고 의존성을 갱신."""
+    from raven.cli import update as update_module
+
+    root = update_module.resolve_repo_root()
+    if root is None:
+        typer.echo("❌ git 체크아웃이 아닙니다 — 소스에서 설치된 raven에서만 업데이트할 수 있습니다.")
+        typer.echo("   데스크톱 앱(Raven.app)은 앱 내 '업데이트 확인'을 사용하세요.")
+        raise typer.Exit(1)
+
+    try:
+        status = update_module.read_repo_status(root)
+    except update_module.GitError as exc:
+        typer.echo(f"❌ {exc}")
+        raise typer.Exit(1)
+
+    plan = update_module.plan_update(status)
+    before = update_module.read_version_from_checkout(root) or RAVEN_VERSION
+    typer.echo(f"📦 raven {before}  ({root}, {status.branch})")
+
+    # --check는 읽기 전용 조회다. dirty 트리(untracked 포함)에서도 "받을 게 있는지"는
+    # 답할 수 있어야 한다 — 차단 사유는 덧붙이되 조회 자체를 막지 않는다.
+    if check:
+        if status.behind:
+            typer.echo(f"⬆️  {status.behind}개 커밋을 받을 수 있습니다.")
+        else:
+            typer.echo("✅ 이미 최신입니다.")
+        if plan.action == "blocked":
+            typer.echo(f"⚠️  단, 지금은 적용할 수 없습니다 — {plan.reason}")
+        typer.echo("   (--check — 아무것도 변경하지 않았습니다.)")
+        return
+
+    if plan.action == "blocked":
+        typer.echo(f"❌ {plan.reason}")
+        raise typer.Exit(1)
+    if plan.action == "up-to-date":
+        typer.echo(f"✅ {plan.reason}")
+        return
+
+    typer.echo(f"⬆️  {plan.reason}")
+    try:
+        update_module.apply_update(root, plan.reinstall_deps)
+    except update_module.GitError as exc:
+        typer.echo(f"❌ {exc}")
+        raise typer.Exit(1)
+    except update_module.DepsError as exc:
+        # 소스는 이미 전진했다 — 반쪽 상태를 숨기지 말고 다음 할 일을 알려준다.
+        after = update_module.read_version_from_checkout(root) or "?"
+        typer.echo(f"⚠️  소스는 {before} → {after} 로 업데이트됐지만 의존성 재설치에 실패했습니다.")
+        typer.echo(f"   {exc}")
+        typer.echo("   수동 복구: `make install`")
+        raise typer.Exit(1)
+
+    after = update_module.read_version_from_checkout(root) or "?"
+    typer.echo(f"✅ 업데이트 완료: {before} → {after}")
+    if plan.reinstall_deps:
+        typer.echo("   의존성도 재설치했습니다.")
+    typer.echo("   실행 중인 서비스는 `./raven.sh restart`로 재시작하세요.")
+
+
+@app.command()
 def where() -> None:
     """Show current raven config (vaults root, registry, active vault)."""
     typer.echo(f"📁 vaults root: {VAULTS_ROOT()}")
