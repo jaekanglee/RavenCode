@@ -41,7 +41,15 @@ if [ "$LOWEST" = "$VERSION" ]; then
   exit 1
 fi
 if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
-  echo "❌ 태그 v$VERSION 이 이미 존재합니다."
+  echo "❌ 로컬에 태그 v$VERSION 이 이미 존재합니다."
+  # 원격에 없는데 로컬에만 남아 있는 경우가 흔하다 — 다른 머신에서 잘못 만든 태그를
+  # 원격에서만 지웠을 때. 어느 쪽인지 알려줘야 사용자가 판단할 수 있다.
+  if git -C "$REPO_ROOT" ls-remote --tags origin "refs/tags/v$VERSION" 2>/dev/null | grep -q .; then
+    echo "   원격에도 존재합니다 — 이미 배포된 버전일 수 있으니 다른 번호를 쓰세요."
+  else
+    echo "   원격에는 없습니다(로컬 잔재). 지우고 다시 시도하세요:"
+    echo "     git tag -d v$VERSION"
+  fi
   exit 1
 fi
 
