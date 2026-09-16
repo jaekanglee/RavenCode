@@ -55,3 +55,6 @@ scripts/deploy-qc.sh
 
 # Isolated task worktrees (superpowers:using-git-worktrees)
 .worktrees/
+
+# fastlane 생성 산출물 — 커밋 대상 아님
+mobile/fastlane/report.xml
