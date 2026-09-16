@@ -1,6 +1,6 @@
 [package]
 name = "raven-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Raven desktop runtime spike"
 authors = ["Raven"]
 edition = "2021"
