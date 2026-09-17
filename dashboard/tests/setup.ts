@@ -40,7 +40,15 @@ if (typeof window !== "undefined") {
   }
 }
 
-if (typeof globalThis !== "undefined" && typeof (globalThis as any).localStorage === "undefined") {
+// v0.7.181: 존재 여부만 보던 가드를 "Storage로 동작하는가"로 강화. Node 22의
+// 실험적 웹스토리지 플래그(--localstorage-file) 영향으로 vitest 2.1.9 jsdom
+// 환경에는 getItem이 없는 빈 객체가 localStorage로 노출된다. 그래서 이전 가드는
+// stub을 건너뛰고, getActiveHostId처럼 try/catch 없이 호출하는 코드가 있는
+// suite(Folder-hover-menu 등)는 "localStorage.getItem is not a function"으로 죽었다.
+if (
+  typeof globalThis !== "undefined" &&
+  typeof (globalThis as any).localStorage?.getItem !== "function"
+) {
   const store = new Map<string, string>();
   const storage: Storage = {
     get length() {
