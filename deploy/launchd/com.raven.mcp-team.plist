@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.raven.mcp-team — 팀원용 MCP 인스턴스 (8767, 사내 LAN 전체, mode=write).
+
+  왜 별도 서비스인가
+  ------------------
+  Raven.app은 API 8765 + MCP 8766만 서빙하고 `.env`를 읽지 않는다. `.env`의
+  RAVEN_MCP_TEAM_* 설정은 `./raven.sh start`만 소비하므로, 데스크톱 앱만 띄운
+  머신에서는 8767이 영원히 뜨지 않는다. 이 LaunchAgent가 그 간극을 메운다.
+
+  admin(8766)은 여기 포함하지 않는다 — 인증이 없어 tailnet 전용 바인딩을 유지해야
+  한다(raven/desktop/runtime.py::_resolve_mcp_host). LAN에는 write 인스턴스만 연다.
+
+  왜 소스 트리가 아니라 앱 번들을 실행하나
+  ----------------------------------------
+  소스 체크아웃이 ~/Desktop 아래에 있으면 launchd로는 못 띄운다. ~/Desktop은 TCC
+  보호 경로이고 launchd가 스폰한 잡에는 TCC 동의가 없어서, WorkingDirectory chdir와
+  stdout/stderr 파일 열기가 막혀 EX_CONFIG(78)로 죽는다(에러 파일이 생성조차 안 되는
+  게 그 증상). 반면 앱 번들(/Applications)과 vault root(~/Raven), 로그(~/Library/Logs)는
+  모두 보호 밖이라 이 조합은 TCC 표면이 0이다.
+
+  트레이드오프: 팀원에게 서빙되는 코드는 git 체크아웃이 아니라 설치된 Raven.app의
+  버전이다. 소스를 고쳐도 앱을 재설치(`make install-app`)하기 전엔 반영되지 않는다.
+  팀원용 상시 서비스로는 오히려 이쪽이 맞다 — 개발 중인 작업 트리가 아니라 릴리스된
+  버전이 서빙된다.
+
+  설치
+  ----
+    mkdir -p ~/Library/Logs/raven
+    sed 's|{{HOME}}|'"$HOME"'|g' deploy/launchd/com.raven.mcp-team.plist \
+      > ~/Library/LaunchAgents/com.raven.mcp-team.plist
+    launchctl load ~/Library/LaunchAgents/com.raven.mcp-team.plist
+
+  중지: launchctl unload ~/Library/LaunchAgents/com.raven.mcp-team.plist
+  (`./raven.sh stop`으로는 안 죽는다 — PID 파일에 없고, 죽여도 launchd가 되살린다.
+   반대로 `./raven.sh start`는 port_in_use로 8767 점유를 감지해 건너뛰므로 충돌 없음.)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.raven.mcp-team</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Raven.app/Contents/Resources/resources/python/bin/python3</string>
+        <string>-m</string>
+        <string>raven.mcp.cli</string>
+        <string>--transport</string>
+        <string>http</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8767</string>
+        <string>--mode</string>
+        <string>write</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- 앱 번들 안의 raven 패키지. 소스 트리(~/Desktop)를 참조하지 않는다. -->
+        <key>PYTHONPATH</key>
+        <string>/Applications/Raven.app/Contents/Resources/resources/raven</string>
+        <!-- launchd는 .env를 읽지 않는다. vault root를 명시해 기본값 추론에 기대지 않는다.
+             (registry.py::VAULTS_ROOT가 읽는 이름은 WIKI_VAULTS_DIR — 런타임 루트) -->
+        <key>WIKI_VAULTS_DIR</key>
+        <string>{{HOME}}/Raven</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/Library/Logs/raven/mcp_team.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/Library/Logs/raven/mcp_team.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
