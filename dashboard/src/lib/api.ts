@@ -336,23 +336,6 @@ export async function fetchTree(vault: string): Promise<TreeNode | null> {
   });
 }
 
-export async function createFolder(
-  vault: string,
-  payload: { path: string },
-): Promise<{ ok: boolean; path: string; existed: boolean }> {
-  const r = await apiFetch(`/api/vaults/${vault}/folders`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const detail = (await r.json().catch(() => ({}))).detail || `create folder failed: ${r.status}`;
-    throw new Error(detail);
-  }
-  invalidateCache(`tree:${vault}`);
-  return r.json();
-}
-
 export async function fetchPage(vault: string, slug: string) {
   const r = await apiFetch(`/api/vaults/${vault}/pages/${slug}?_=${Date.now()}`);
   if (!r.ok) throw new Error(`page ${slug} not found in vault ${vault}`);

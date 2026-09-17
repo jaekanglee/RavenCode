@@ -17,13 +17,44 @@ const TYPE_OPTIONS = [
   { value: "rule", label: "규칙" },
   { value: "query", label: "질문/검색" },
   { value: "journal", label: "기록" },
+  // v0.7.181: issue 추가. SCHEMA type인데 여기 빠져 있어서, 사이드바 issue
+  // 그룹 "＋"로 만든 페이지의 분류를 issue로 맞출 수가 없었다. 템플릿이 붙는
+  // 발행 폼은 여전히 NewIssueButton(⚠) 쪽.
+  { value: "issue", label: "이슈" },
 ];
+
+// v0.7.181: 제출 전 slug 유효성 (defense-in-depth layer 2).
+//
+// raven/core/slug.py의 거부 규칙을 클라이언트에서 미러링한다. 이유 둘:
+//  1) 사이드바 canonical 그룹 "＋"가 `__canonical/issue`를 프리필하던 버그처럼
+//     UI 내부 sentinel이 vault 파일시스템으로 새는 걸 한 겹 더 막는다.
+//  2) 폴더까지만 적고 저장하면 백엔드가 400 + 영문 detail("slug contains
+//     empty/'. ' segment")을 주는데, 사용자에겐 무슨 말인지 안 보인다.
+//
+// 통과면 null, 막을 이유가 있으면 사용자에게 보여줄 한국어 문장을 반환.
+export function validatePageSlug(slug: string): string | null {
+  const s = slug.trim();
+  if (!s) return "경로를 입력해 주세요.";
+  if (s.startsWith("/") || s.startsWith("~")) return "경로는 vault 기준 상대경로여야 합니다.";
+  if (s.includes(":")) return "경로에 ':' 는 쓸 수 없습니다.";
+  const segments = s.split("/");
+  if (segments.some((seg) => seg === "" || seg === ".")) {
+    return "경로 마지막에 파일명을 입력해 주세요.";
+  }
+  if (segments.includes("..")) return "경로에 '..' 는 쓸 수 없습니다.";
+  if (segments.includes("__canonical")) {
+    return "__canonical 은 사이드바 분류용 내부 이름입니다. 실제 폴더 경로를 입력해 주세요.";
+  }
+  return null;
+}
 
 interface NewPageButtonProps {
   vault?: string;
   variant?: "pill" | "icon";
   label?: string;
   initialSlug?: string;
+  /** v0.7.181: 모달 열 때 프리필할 문서 분류. TYPE_OPTIONS에 없는 값은 무시. */
+  initialType?: string;
   /** Called once when the trigger button is clicked, before the modal opens.
    *  Used by mobile sidebar to auto-close the drawer so the modal isn't
    *  covered by it. Optional — omit to keep old behavior (regression safe). */
@@ -35,6 +66,7 @@ export function NewPageButton({
   variant = "pill",
   label = "새 페이지",
   initialSlug = "",
+  initialType,
   onOpen,
 }: NewPageButtonProps) {
   const [open, setOpen] = useState(false);
@@ -84,6 +116,11 @@ export function NewPageButton({
       setErr("파일 경로와 제목을 입력해 주세요.");
       return;
     }
+    const slugErr = validatePageSlug(slug);
+    if (slugErr) {
+      setErr(slugErr);
+      return;
+    }
     setBusy(true);
     try {
       await createPage(vault, {
@@ -112,6 +149,9 @@ export function NewPageButton({
         onClick={(e) => {
           e.stopPropagation();
           if (initialSlug && !slug) setSlug(initialSlug);
+          if (initialType && TYPE_OPTIONS.some((o) => o.value === initialType)) {
+            setType(initialType);
+          }
           onOpen?.();
           setOpen(true);
         }}

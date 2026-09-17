@@ -19,6 +19,7 @@ import {
   type RawContent,
   type RawItem,
 } from "../lib/api";
+import { resolveNewRawFile } from "../lib/rawPath";
 import { RawTree } from "../components/RawTree";
 import { EmptyState } from "../components/ui/EmptyState";
 import { EmptyIcon } from "../lib/emptyIcons";
@@ -131,11 +132,16 @@ export function RawPanel() {
   };
 
   const handleNewFile = async () => {
-    if (!vault || !newFileName.trim()) return;
-    const name = newFileName.trim();
-    const parent = newFileDir.replace(/\/$/, "") || "raw";
-    const fullPath = `${parent}/${name}`;
-    const rel = fullPath.replace(/^raw\//, "");
+    if (!vault) return;
+    setSaveError(null);
+    // v0.7.181: Sidebar raw ＋와 같은 검증 (rawPath.resolveNewRawFile).
+    // 기존 파일명을 입력하면 writeRaw(rel, "")가 내용을 날린다 — create-only
+    // 의미는 이 UI에만 있으므로 가드도 여기.
+    const { rel, error } = resolveNewRawFile({ name: newFileName, dir: newFileDir, items });
+    if (error || !rel) {
+      setSaveError(error);
+      return;
+    }
     try {
       await writeRaw(vault, rel, "");
       setNewFileOpen(false);

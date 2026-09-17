@@ -7,7 +7,11 @@ import { nodeColor, typeLabel } from "./GraphCanvas";
 import { RawTree } from "./RawTree";
 import { SearchBar } from "./SearchBar";
 import { HostPicker } from "./HostPicker";
-import { fetchDraftsList, type DraftListItem } from "../lib/api";
+import { Modal } from "./ui/Modal";
+import { TextField } from "./ui/TextField";
+import { Button } from "./ui/Button";
+import { fetchDraftsList, writeRaw, type DraftListItem } from "../lib/api";
+import { resolveNewRawFile } from "../lib/rawPath";
 import type { TreeNode as TNode, VaultMeta } from "../types";
 
 interface SidebarProps {
@@ -110,6 +114,7 @@ const SCHEMA_TYPE_RANK: Record<string, number> = Object.fromEntries(
 );
 
 const CANONICAL_GROUP_PREFIX = "__canonical";
+const CONTENT_ROOT = "content";
 const HIDDEN_CATALOG_PATHS = new Set(["content/index"]);
 
 function isHiddenCatalogNode(node: TNode): boolean {
@@ -162,6 +167,49 @@ export function normalizeSidebarTree(tree: TNode | null): TNode | null {
       ),
     })),
   };
+}
+
+// v0.7.181: 사이드바 dir row "＋"(새 페이지)가 프리필할 실제 폴더 경로.
+//
+// normalizeSidebarTree가 만드는 `__canonical/<type>` 그룹은 SCHEMA type별 가상
+// 노드다 — vault에 그런 폴더는 없다. 이 가상 path를 initialSlug로 넘기면 모달
+// 경로가 `__canonical/issue`로 잡히고, 저장 시 백엔드 normalize_prefix가
+// content/를 붙여 `content/__canonical/issue.md`를 만든다 (UI sentinel이
+// 파일시스템에 새는 오염). 그래서 그룹은 소속 페이지들의 공통 부모 디렉토리로
+// 환원하고, 공통 부모가 없으면 content/로 폴백한다.
+//
+// trailing slash는 의도적 — 마지막 segment가 파일명이므로 사용자가 이어서
+// 입력할 자리를 남긴다 (NewPageButton의 폴더 피커 pickFolder와 같은 규약).
+export function newPageTargetSlug(node: TNode): string {
+  if (!node.path.startsWith(`${CANONICAL_GROUP_PREFIX}/`)) {
+    return `${node.path.replace(/\/+$/, "")}/`;
+  }
+  const parents = (node.children ?? [])
+    .filter((child) => child.type === "page")
+    .map((child) => child.path.split("/").slice(0, -1))
+    .filter((segments) => segments.length > 0);
+  if (parents.length === 0) return `${CONTENT_ROOT}/`;
+  let common = parents[0];
+  for (const segments of parents.slice(1)) {
+    const next: string[] = [];
+    for (let i = 0; i < Math.min(common.length, segments.length); i++) {
+      if (common[i] !== segments[i]) break;
+      next.push(common[i]);
+    }
+    common = next;
+  }
+  return common.length > 0 ? `${common.join("/")}/` : `${CONTENT_ROOT}/`;
+}
+
+// v0.7.181: canonical 그룹 "＋"가 프리필할 문서 분류.
+//
+// 그룹은 SCHEMA type 그 자체다. type을 안 넘기면 issue 그룹에서 만든 페이지가
+// NewPageButton 기본값(concept)으로 저장돼, 방금 누른 그룹이 아닌 "일반 노트"
+// 그룹으로 들어간다. 실제 dir 노드는 type과 무관하므로 강제하지 않는다.
+// (misc 같은 비-SCHEMA 값은 NewPageButton이 자기 옵션 목록으로 걸러낸다.)
+export function newPageTargetType(node: TNode): string | undefined {
+  if (!node.path.startsWith(`${CANONICAL_GROUP_PREFIX}/`)) return undefined;
+  return node.path.split("/").pop() || undefined;
 }
 
 function findTreeAncestors(tree: TNode | null, predicate: (node: TNode) => boolean): string[] {
@@ -487,7 +535,7 @@ export function Sidebar({
           )
         )}
 
-        {activeVaultMeta && activeRawItems.length > 0 && (
+        {activeVaultMeta && (
           <div style={{ marginTop: 16 }}>
             <div
               className="sidebar-label"
@@ -508,19 +556,27 @@ export function Sidebar({
               <span style={{ marginLeft: "auto", fontWeight: 500, fontSize: 10 }}>
                 {activeRawItems.length}
               </span>
+              <NewRawFileButton
+                vault={activeVault}
+                items={activeRawItems}
+                onOpen={onClose}
+                onCreated={onRefresh}
+              />
             </div>
-            <RawTree
-              items={activeRawItems}
-              selectedPath={null}
-              onSelect={(path, type) => {
-                // RawTree already expands/collapses directories; only files have a viewer route.
-                if (type === "dir") return;
-                const rel = path.replace(/^raw\//, "");
-                navigate(`/raw/${activeVault}/${rel}`);
-                onClose();
-              }}
-              compact
-            />
+            {activeRawItems.length > 0 && (
+              <RawTree
+                items={activeRawItems}
+                selectedPath={null}
+                onSelect={(path, type) => {
+                  // RawTree already expands/collapses directories; only files have a viewer route.
+                  if (type === "dir") return;
+                  const rel = path.replace(/^raw\//, "");
+                  navigate(`/raw/${activeVault}/${rel}`);
+                  onClose();
+                }}
+                compact
+              />
+            )}
           </div>
         )}
       </div>
@@ -684,6 +740,127 @@ function VaultTreeGroup({
   );
 }
 
+// v0.7.x+: 사이드바 raw 섹션 인라인 새 파일 생성. RawPanel.tsx의 새 파일 모달과
+// 동일 패턴(파일명 + 부모 디렉토리 → writeRaw)을 재사용해 /raw/{vault} 이동 없이 생성 가능.
+function NewRawFileButton({
+  vault,
+  items,
+  onOpen,
+  onCreated,
+}: {
+  vault: string;
+  items: import("../lib/api").RawItem[];
+  onOpen?: () => void;
+  onCreated?: () => void;
+}) {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [dir, setDir] = useState("raw");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const dirOptions = useMemo(() => {
+    const set = new Set<string>(["raw"]);
+    for (const it of items) {
+      if (it.type === "dir") set.add(it.path);
+    }
+    return [...set].sort();
+  }, [items]);
+
+  async function submit() {
+    setErr(null);
+    // v0.7.181: 검증은 rawPath.resolveNewRawFile 한 곳 — 특히 기존 파일을
+    // writeRaw(rel, "")로 덮어써 내용을 날리는 경로를 여기서 막는다.
+    const { rel, error } = resolveNewRawFile({ name, dir, items });
+    if (error || !rel) {
+      setErr(error);
+      return;
+    }
+    setBusy(true);
+    try {
+      await writeRaw(vault, rel, "");
+      setOpen(false);
+      setName("");
+      onCreated?.();
+      navigate(`/raw/${vault}/${rel}`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        className="sidebar-icon-action"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen?.();
+          setOpen(true);
+        }}
+        aria-label={`${vault} raw/에 새 파일 만들기`}
+        title={`${vault} raw/에 새 파일 만들기`}
+      >
+        ＋
+      </button>
+      {open && (
+        <Modal open={open} onClose={() => !busy && setOpen(false)} disableBackdropClose={busy}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>raw/ 새 파일</h3>
+            <TextField
+              label="파일명"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="예: notes.md, source.txt"
+              helper="확장자 포함. 예: my-notes.md"
+            />
+            <TextField
+              label="부모 디렉토리"
+              value={dir}
+              onChange={(e) => setDir(e.target.value)}
+              helper="기본 raw/. 다른 디렉토리 경로 입력 가능 (예: raw/articles)."
+            />
+            <details style={{ fontSize: 12, color: "var(--color-muted)" }}>
+              <summary style={{ cursor: "pointer" }}>기존 디렉토리 ({dirOptions.length})</summary>
+              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                {dirOptions.map((d) => (
+                  <li key={d} style={{ cursor: "pointer" }} onClick={() => setDir(d)}>
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            </details>
+            {err && (
+              <div
+                style={{
+                  background: "var(--color-danger-soft, #fee)",
+                  color: "var(--color-danger, #c00)",
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                }}
+              >
+                ❌ {err}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+              <Button type="button" variant="ghost" size="md" onClick={() => setOpen(false)} disabled={busy}>
+                취소
+              </Button>
+              <Button type="button" variant="primary" size="md" onClick={submit} disabled={busy || !name.trim()}>
+                {busy ? "만드는 중…" : "만들기"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function DraftSection({
   vault,
   activeSlug,
@@ -821,7 +998,14 @@ function TreeLeaf({
             <span aria-hidden style={{ fontSize: 13 }}>📁</span>
             <span className="sidebar-tree-dir-label">{displayTitle(node)}</span>
           </button>
-          <NewPageButton vault={vault} initialSlug={node.path} variant="icon" label="페이지" onOpen={onClose} />
+          <NewPageButton
+            vault={vault}
+            initialSlug={newPageTargetSlug(node)}
+            initialType={newPageTargetType(node)}
+            variant="icon"
+            label="페이지"
+            onOpen={onClose}
+          />
         </div>
         {isOpen && (node.children ?? []).length > 0 && (
           <div className="sidebar-tree">

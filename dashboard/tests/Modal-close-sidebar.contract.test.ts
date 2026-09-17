@@ -5,9 +5,10 @@
  *
  * 보장:
  *  1. NewPageButton: onOpen?: () => void prop + 트리거에서 onOpen?.() 호출
- *  2. NewFolderButton: onOpen?: () => void prop + 트리거에서 onOpen?.() 호출
- *  3. Sidebar: 두 호출부에 onOpen={onClose} 전달 (모달 → 사이드바 자동 close)
- *  4. Layout: 모바일 breakpoint 744px 그대로 유지
+ *  2. Sidebar: 호출부에 onOpen={onClose} 전달 (모달 → 사이드바 자동 close)
+ *  3. Layout: 모바일 breakpoint 744px 그대로 유지
+ *
+ * v0.7.181: NewFolderButton 계약 제거 — 컴포넌트 삭제.
  */
 import { describe, it, expect } from "vitest";
 
@@ -15,13 +16,11 @@ import { describe, it, expect } from "vitest";
 // `node:fs` / `node:path` would require @types/node + tsconfig types array.
 // Tests still load file content at runtime via Vite's bundler.
 import NewPageButtonSrc from "../src/components/NewPageButton.tsx?raw";
-import NewFolderButtonSrc from "../src/components/NewFolderButton.tsx?raw";
 import SidebarSrc from "../src/components/Sidebar.tsx?raw";
 import LayoutSrc from "../src/components/Layout.tsx?raw";
 
 const SOURCES = {
   NewPageButton: NewPageButtonSrc,
-  NewFolderButton: NewFolderButtonSrc,
   Sidebar: SidebarSrc,
   Layout: LayoutSrc,
 } as const;
@@ -31,12 +30,6 @@ describe("Modal-close-sidebar source contracts", () => {
     const s = SOURCES.NewPageButton;
     expect(s).toMatch(/onOpen\?:\s*\(\)\s*=>\s*void/);
     // 호출 위치는 setOpen(true) 직전 (주석/whitespace 포함해서 200자 이내)
-    expect(s).toMatch(/onOpen\?\.\(\);[\s\S]{0,200}setOpen\(true\)/);
-  });
-
-  it("NewFolderButton exposes onOpen?: () => void and fires it before setOpen(true)", () => {
-    const s = SOURCES.NewFolderButton;
-    expect(s).toMatch(/onOpen\?:\s*\(\)\s*=>\s*void/);
     expect(s).toMatch(/onOpen\?\.\(\);[\s\S]{0,200}setOpen\(true\)/);
   });
 

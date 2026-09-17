@@ -11,15 +11,16 @@
  *
  * 회귀 가드:
  *  1. NewPageButton: 모달이 document.body 직속 (primary-sidebar ❌)
- *  2. NewFolderButton: 동일
- *  3. source: 두 컴포넌트 모두 createPortal(modal, document.body) 사용
- *  4. 폴백: portal 미지원 환경 (test)에서는 in-place 렌더 (테스트 격리 보장)
+ *  2. source: createPortal(modal, document.body) 사용
+ *  3. 폴백: portal 미지원 환경 (test)에서는 in-place 렌더 (테스트 격리 보장)
+ *
+ * v0.7.181: NewFolderButton 케이스 제거 — 컴포넌트 자체를 삭제했다
+ * (v0.7.111 canonical tree view 이후 어디서도 렌더되지 않는 고아였음).
  */
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { NewPageButton } from "../src/components/NewPageButton";
-import { NewFolderButton } from "../src/components/NewFolderButton";
 
 function wrap(node: React.ReactNode) {
   return render(<MemoryRouter>{node}</MemoryRouter>);
@@ -44,18 +45,6 @@ describe("Modal Portal contract (v0.6.18)", () => {
       expect(sidebar.contains(modal!)).toBe(false);
     }
     // 모달은 document.body 직속
-    expect(modal!.parentElement).toBe(document.body);
-  });
-
-  it("NewFolderButton modal renders outside primary-sidebar (in document.body)", () => {
-    wrap(<NewFolderButton vault="test" />);
-    fireEvent.click(screen.getByRole("button", { name: /폴더 만들기/ }));
-    const modal = findModalContainer();
-    expect(modal).toBeTruthy();
-    const sidebar = document.getElementById("primary-sidebar");
-    if (sidebar) {
-      expect(sidebar.contains(modal!)).toBe(false);
-    }
     expect(modal!.parentElement).toBe(document.body);
   });
 
