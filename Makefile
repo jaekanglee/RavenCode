@@ -227,7 +227,8 @@ desktop-dmg: desktop-build ## Build DMG installer from release binary
 	@echo "✅ DMG: desktop/src-tauri/target/release/bundle/dmg/Raven_$(DESKTOP_VERSION)_aarch64.dmg"
 
 desktop-release: desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + TAURI_SIGNING_PRIVATE_KEY)
-	@VERSION="$(DESKTOP_VERSION)"; \
+	@set -e; \
+	VERSION="$(DESKTOP_VERSION)"; \
 	TAG="v$$VERSION"; \
 	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_$${VERSION}_aarch64.dmg"; \
 	git rev-parse "$$TAG" >/dev/null 2>&1 || { \
@@ -237,6 +238,9 @@ desktop-release: desktop-dmg ## Build DMG + signed auto-update artifact, upload 
 	bash scripts/sign-update.sh "$$VERSION" "$(GH_REPO)"; \
 	ARTIFACT="desktop/src-tauri/target/release/bundle/updater/Raven.app.tar.gz"; \
 	MANIFEST="desktop/src-tauri/target/release/bundle/updater/latest.json"; \
+	for f in "$$DMG" "$$ARTIFACT" "$$MANIFEST"; do \
+	  [ -f "$$f" ] || { echo "❌ 업로드할 파일이 없습니다: $$f"; exit 1; }; \
+	done; \
 	gh release view "$$TAG" --repo "$(GH_REPO)" >/dev/null 2>&1 || { \
 	  echo "📝 릴리스 $$TAG 가 없어 새로 만듭니다 ..."; \
 	  gh release create "$$TAG" --repo "$(GH_REPO)" --title "Raven $$TAG" --generate-notes; }; \
