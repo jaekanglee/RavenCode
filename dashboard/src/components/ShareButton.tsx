@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
+import { downloadPageMarkdown, printPageAsPdf, type PrintMeta } from "../lib/pageExport";
 import { Button } from "./ui/Button";
 
 // 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
@@ -9,8 +10,28 @@ import { Button } from "./ui/Button";
 const POPOVER_WIDTH = 320;
 const POPOVER_GAP = 6;
 const VIEWPORT_MARGIN = 8;
+// 첫 렌더에는 아직 실측 높이가 없다 — 대략값으로 배치하고 rAF에서 실측 보정.
+const POPOVER_ESTIMATED_HEIGHT = 340;
 
 const Icon = {
+  Download: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true" style={{ display: "block" }}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  ),
+  Printer: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true" style={{ display: "block" }}>
+      <polyline points="6 9 6 2 18 2 18 9" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
+    </svg>
+  ),
   Share: () => (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
@@ -108,12 +129,24 @@ function ShareRow({
   );
 }
 
-export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
+export interface ShareButtonProps {
+  vault: string;
+  slug: string;
+  /** 인쇄 머리글/파일명에 쓰는 문서 제목. 없으면 slug 마지막 segment. */
+  title?: string;
+  /** 인쇄용 본문 HTML 공급자 — 화면에 렌더된 마크다운 노드의 innerHTML.
+   *  없거나 null을 주면 PDF 버튼을 감춘다 (편집 모드 등 본문이 없는 상황). */
+  getPrintHtml?: () => string | null;
+  /** 인쇄 머리글에 함께 찍을 메타 (type/tags/updated 등). */
+  printMeta?: PrintMeta[];
+}
+
+export function ShareButton({ vault, slug, title, getPrintHtml, printMeta }: ShareButtonProps) {
   const [open, setOpen] = useState(false);
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -126,21 +159,42 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
   }, [open]);
 
   // 트리거 버튼 기준 viewport 좌표 계산 — 버튼 아래, 왼쪽 정렬, 우측 넘침은 클램프.
+  // v0.7.184+: 내보내기 섹션이 붙어 팝오버가 길어졌다. 아래 공간이 부족하면
+  // 트리거 위로 뒤집고, 그래도 안 들어가면 maxHeight + 내부 스크롤로 가둔다
+  // (이전에는 그대로 뷰포트 아래로 잘려 PDF 버튼이 보이지 않았다).
   useEffect(() => {
     if (!open) return;
+    let raf = 0;
     function place() {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
+      const height = popoverRef.current?.offsetHeight || POPOVER_ESTIMATED_HEIGHT;
+      const viewport = window.innerHeight;
+      const maxHeight = viewport - VIEWPORT_MARGIN * 2;
+      const spaceBelow = viewport - rect.bottom - POPOVER_GAP - VIEWPORT_MARGIN;
+      const spaceAbove = rect.top - POPOVER_GAP - VIEWPORT_MARGIN;
+      const flipUp = height > spaceBelow && spaceAbove > spaceBelow;
+      const top = flipUp
+        ? Math.max(VIEWPORT_MARGIN, rect.top - POPOVER_GAP - height)
+        : Math.max(
+            VIEWPORT_MARGIN,
+            Math.min(rect.bottom + POPOVER_GAP, viewport - height - VIEWPORT_MARGIN)
+          );
       const maxLeft = window.innerWidth - POPOVER_WIDTH - VIEWPORT_MARGIN;
-      setPos({
-        top: rect.bottom + POPOVER_GAP,
-        left: Math.max(VIEWPORT_MARGIN, Math.min(rect.left, maxLeft)),
-      });
+      const left = Math.max(VIEWPORT_MARGIN, Math.min(rect.left, maxLeft));
+      setPos((prev) =>
+        prev && prev.top === top && prev.left === left && prev.maxHeight === maxHeight
+          ? prev
+          : { top, left, maxHeight }
+      );
     }
     place();
+    // 두 번째 패스 — 팝오버가 마운트된 뒤 실측 높이로 다시 배치 (paint 전).
+    raf = requestAnimationFrame(place);
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
@@ -177,6 +231,47 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
     }
   }
 
+  // ── 내보내기 (v0.7.184+) ──
+  // md = API의 export.md (vault 원본 그대로, frontmatter 포함)
+  // pdf = 렌더된 본문을 격리 iframe + 인쇄 스타일시트로 옮겨 인쇄 대화상자
+  const [exporting, setExporting] = useState<"md" | "pdf" | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const docTitle = title?.trim() || slug.split("/").filter(Boolean).pop() || slug;
+
+  async function handleExportMarkdown() {
+    setExporting("md");
+    setExportError(null);
+    try {
+      await downloadPageMarkdown(vault, slug);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(null);
+    }
+  }
+
+  async function handleExportPdf() {
+    const bodyHtml = getPrintHtml?.() ?? null;
+    if (!bodyHtml) {
+      setExportError("인쇄할 본문을 찾지 못했습니다 — 보기 모드에서 다시 시도하세요.");
+      return;
+    }
+    setExporting("pdf");
+    setExportError(null);
+    try {
+      await printPageAsPdf({
+        title: docTitle,
+        bodyHtml,
+        meta: printMeta,
+        source: `${vault} / ${slug}`,
+      });
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(null);
+    }
+  }
+
   const lanUrl = sysInfo?.lan_api ? `${sysInfo.lan_api}/page/${vault}/${slug}` : null;
   const tsUrl = sysInfo?.tailscale_api ? `${sysInfo.tailscale_api}/page/${vault}/${slug}` : null;
 
@@ -203,6 +298,8 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
             top: pos.top,
             left: pos.left,
             width: POPOVER_WIDTH,
+            maxHeight: pos.maxHeight,
+            overflowY: "auto",
             background: "var(--color-canvas)",
             border: "1px solid var(--color-hairline-strong)",
             borderRadius: "var(--radius-md)",
@@ -249,6 +346,50 @@ export function ShareButton({ vault, slug }: { vault: string; slug: string }) {
               />
             </>
           )}
+
+          {/* ── 파일로 내보내기 (v0.7.184+) ── */}
+          <div className="share-export">
+            <div className="share-export-label">파일로 내보내기</div>
+            <div className="share-export-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                fullWidth
+                disabled={exporting !== null}
+                onClick={() => void handleExportMarkdown()}
+                aria-label="Markdown 파일로 저장"
+                style={{ justifyContent: "flex-start", gap: 8 }}
+              >
+                <Icon.Download />
+                {exporting === "md" ? "내보내는 중…" : "Markdown (.md) 파일로 저장"}
+              </Button>
+              {getPrintHtml && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  fullWidth
+                  disabled={exporting !== null}
+                  onClick={() => void handleExportPdf()}
+                  aria-label="PDF로 저장"
+                  style={{ justifyContent: "flex-start", gap: 8 }}
+                >
+                  <Icon.Printer />
+                  {exporting === "pdf" ? "인쇄 준비 중…" : "PDF로 저장 (인쇄 → PDF)"}
+                </Button>
+              )}
+            </div>
+            {exportError ? (
+              <div className="share-export-error">{exportError}</div>
+            ) : (
+              getPrintHtml && (
+                <div className="share-export-hint">
+                  인쇄 대화상자에서 대상을 &quot;PDF로 저장&quot;으로 고르세요.
+                </div>
+              )
+            )}
+          </div>
         </div>,
         document.body
       )}

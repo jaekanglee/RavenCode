@@ -3211,3 +3211,41 @@ a:focus-visible {
     width: 40%;
   }
 }
+
+/* ──────────────────────────────────────────────────────────────
+   공유 팝오버 — 파일로 내보내기 섹션 (v0.7.184+)
+   ────────────────────────────────────────────────────────────── */
+
+.share-export {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-hairline);
+}
+
+.share-export-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-muted);
+  margin-bottom: 6px;
+}
+
+.share-export-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.share-export-hint {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--color-muted-soft);
+}
+
+.share-export-error {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-danger-text);
+  word-break: break-word;
+}

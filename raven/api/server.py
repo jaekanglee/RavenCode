@@ -13,10 +13,11 @@ Design:
 from __future__ import annotations
 import json
 import os
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional, Any
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -130,6 +131,63 @@ def _safe_slug_or_400(slug: str, v: Vault) -> Path:
         return slug_module.validate(slug, vault_root=v.root)
     except slug_module.SlugError as e:
         raise HTTPException(status_code=400, detail=f"invalid slug: {e}")
+
+
+def _page_file_or_404(v: Vault, slug: str) -> Path:
+    """slug → 실제 .md 파일 경로.
+
+    옛 빌드 slug 호환 fuzzy fallback 포함 (짧은 slug로 호출 시 마지막 segment가
+    일치하는 페이지를 찾고, 여러 개면 root에 가까운 쪽을 canonical로 본다).
+    v0.7.184+: get_page가 갖고 있던 로직을 export.md와 공유하기 위해 추출.
+    """
+    fp = _safe_slug_or_400(slug, v).with_suffix(".md")
+    if fp.exists():
+        return fp
+    base = slug.rsplit("/", 1)[-1]  # 마지막 segment만
+    candidates = []
+    for fp_md in v.content_root.rglob("*.md"):
+        cand_slug = str(fp_md.relative_to(v.root))[:-3]
+        if cand_slug == base or cand_slug.endswith("/" + base):
+            candidates.append(fp_md)
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        # ambiguous — 가장 짧은 slug 우선 (root에 가까운 게 더 canonical)
+        return min(candidates, key=lambda p: len(p.relative_to(v.root).parts))
+    raise HTTPException(
+        status_code=404,
+        detail=f"page {slug!r} not found in vault {v.meta.name!r}",
+    )
+
+
+def _strip_frontmatter_block(text: str) -> str:
+    """YAML 머리말 블록만 잘라낸 본문. 본문 바이트는 그대로 보존한다.
+
+    `_split_fm`은 파싱용이라 body를 strip("\n")해서 원본 끝 개행이 사라진다 —
+    파일로 내보낼 때는 원본을 훼손하지 않아야 하므로 텍스트로만 자른다.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[i + 1:]).lstrip("\n")
+    return text
+
+
+def _attachment_disposition(filename: str) -> str:
+    """Content-Disposition attachment 헤더 — 한글 파일명 대응 (RFC 5987).
+
+    ascii filename은 filename*을 못 읽는 옛 클라이언트용 fallback이고, 실제
+    이름은 filename*의 UTF-8 percent-encoding으로 전달한다. 한글 제목이면
+    ascii 쪽에 하이픈·확장자만 남으므로 그때는 stem을 'page'로 바꾼다.
+    """
+    suffix = Path(filename).suffix or ".md"
+    ascii_stem = Path(filename).stem.encode("ascii", "ignore").decode().strip()
+    if not any(ch.isalnum() for ch in ascii_stem):
+        ascii_stem = "page"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_stem}{suffix}\"; filename*=UTF-8''{quoted}"
 
 
 def _with_lock_holder(response: dict, v: Vault, slug: str) -> dict:
@@ -1449,26 +1507,43 @@ def get_page_recommendations(name: str, slug: str, limit: int = Query(5, ge=1, l
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/vaults/{name}/pages/{slug:path}/export.md")
+def export_page_markdown(
+    name: str,
+    slug: str,
+    frontmatter: bool = Query(True, description="YAML 머리말 포함 여부"),
+):
+    """페이지를 .md 파일로 내려준다 (문서 공유/내보내기, v0.7.184+).
+
+    기본은 vault 원본 파일 그대로 — frontmatter까지 포함해서 다른 vault나
+    Obsidian으로 그대로 되돌릴 수 있게 한다. `?frontmatter=false`면 본문만.
+
+    `{slug:path}` catch-all보다 **먼저** 등록돼야 한다 (FastAPI는 등록 순서대로
+    매칭하므로, 뒤에 두면 catch-all이 'a/b/export.md'를 slug로 삼아 404가 난다).
+    """
+    v = _vault_or_404(name)
+    fp = _page_file_or_404(v, slug)
+    try:
+        text = fp.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"failed to read page: {e}")
+    if not frontmatter:
+        text = _strip_frontmatter_block(text)
+    return Response(
+        content=text,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": _attachment_disposition(fp.name),
+            # 원격 host(다른 origin)에서 fetch할 때 JS가 파일명을 읽을 수 있게.
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
+
 @app.get("/api/vaults/{name}/pages/{slug:path}")
 def get_page(name: str, slug: str):
     v = _vault_or_404(name)
-    fp = _safe_slug_or_400(slug, v).with_suffix(".md")
-    if not fp.exists():
-        # fuzzy fallback (옛 빌드 slug 호환): 짧은 slug로 호출 시 모든 pages 중
-        # slug의 마지막 segment로 끝나는 것 찾기. 예: 'vault-structure' → 'concept/vault-structure'
-        base = slug.rsplit("/", 1)[-1]  # 마지막 segment만
-        candidates = []
-        for fp_md in v.content_root.rglob("*.md"):
-            cand_slug = str(fp_md.relative_to(v.root))[:-3]
-            if cand_slug == base or cand_slug.endswith("/" + base):
-                candidates.append(fp_md)
-        if len(candidates) == 1:
-            fp = candidates[0]
-        elif len(candidates) > 1:
-            # ambiguous — 가장 짧은 slug 우선 (root에 가까운 게 더 canonical)
-            fp = min(candidates, key=lambda p: len(p.relative_to(v.root).parts))
-        else:
-            raise HTTPException(status_code=404, detail=f"page {slug!r} not found in vault {name!r}")
+    fp = _page_file_or_404(v, slug)
     text = fp.read_text()
     meta, body = _split_fm(text)
 

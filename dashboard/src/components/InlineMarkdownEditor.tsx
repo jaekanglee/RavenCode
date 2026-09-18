@@ -34,6 +34,7 @@
  import { Toast } from "./ui/Toast";
  import { AITagSuggestion } from "./AITagSuggestion";
 import { ShareButton } from "./ShareButton";
+import type { PrintMeta } from "../lib/pageExport";
 
  // Lucide-style SVG icons (MIT, public domain). 16x16 viewBox, currentColor 사용
  // → var(--color-ink) / hover 시 var(--color-accent) 자동 적용.
@@ -118,6 +119,8 @@ import { ShareButton } from "./ShareButton";
    precondition?: string;
    metaRow?: React.ReactNode;
    filePathRow?: React.ReactNode;
+   /** PDF(인쇄) 머리글에 함께 찍을 메타 — type/tags/updated 등 (v0.7.184+). */
+   printMeta?: PrintMeta[];
  }
  
  export function InlineMarkdownEditor({
@@ -128,6 +131,7 @@ import { ShareButton } from "./ShareButton";
    viewContent,
    onSaved,
    onDeleted,
+   printMeta,
    precondition,
    metaRow,
    filePathRow,
@@ -151,6 +155,8 @@ import { ShareButton } from "./ShareButton";
    const textareaRef = useRef<HTMLTextAreaElement>(null);
    const navigate = useNavigate();
    const containerRef = useRef<HTMLDivElement>(null);
+   // view mode 렌더된 마크다운 노드 — PDF 내보내기(인쇄)의 본문 출처 (v0.7.184+).
+   const viewBodyRef = useRef<HTMLDivElement>(null);
 
    // 외부 content/title 변경 (다른 vault에서 페이지 fetch) 시 draft/titleVal reset
    useEffect(() => {
@@ -399,7 +405,13 @@ import { ShareButton } from "./ShareButton";
        >
          {mode === "view" ? (
            <>
-             <ShareButton vault={vault} slug={slug} />
+             <ShareButton
+               vault={vault}
+               slug={slug}
+               title={titleVal}
+               printMeta={printMeta}
+               getPrintHtml={() => viewBodyRef.current?.innerHTML ?? null}
+             />
              <Button
                type="button"
                variant="primary"
@@ -519,13 +531,17 @@ import { ShareButton } from "./ShareButton";
     {/* Body: view vs edit */}
     <div className="inline-md-body">
          {mode === "view" ? (
-           <MDEditor.Markdown
-             source={displayContent ?? ""}
-             style={{
-               backgroundColor: "transparent",
-               color: "var(--color-body)",
-             }}
-           />
+           // ref는 PDF 내보내기용 — 이 노드의 innerHTML을 인쇄 iframe에 옮긴다
+           // (v0.7.184+). 마크다운을 다시 파싱하지 않으므로 화면과 종이가 일치한다.
+           <div ref={viewBodyRef}>
+             <MDEditor.Markdown
+               source={displayContent ?? ""}
+               style={{
+                 backgroundColor: "transparent",
+                 color: "var(--color-body)",
+               }}
+             />
+           </div>
          ) : (
            <div
              className="inline-md-editor"

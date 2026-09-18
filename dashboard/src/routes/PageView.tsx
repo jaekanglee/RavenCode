@@ -472,6 +472,12 @@ export function PageView() {
           content={page.content}
           viewContent={parsedData.body}
           precondition={page.precondition}
+          printMeta={[
+            page.type && page.type !== "?" ? { label: "분류", value: page.type } : null,
+            page.tags ? { label: "태그", value: page.tags } : null,
+            page.created ? { label: "작성", value: page.created } : null,
+            page.updated ? { label: "수정", value: page.updated } : null,
+          ].filter((m): m is { label: string; value: string } => m !== null)}
           onSaved={() => {
             setReloadKey((k) => k + 1);
             ctx?.refresh?.();
