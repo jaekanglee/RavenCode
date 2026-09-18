@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
+import { UpdatePanel } from "../components/UpdatePanel";
+import { useAppUpdater } from "../lib/useAppUpdater";
 import {
   fetchLinkCheck, runExport, repairVault, cloneVault,
   fetchLocks, releaseLock, apiFetch, formatApiError,
@@ -55,13 +57,10 @@ export function VaultManage() {
     setTimeout(() => setCopiedKey(null), 2000);
   }
 
-  // ── 데스크톱 업데이트 상태 ──
+  // ── 데스크톱 업데이트 상태 (v0.7.183+: useAppUpdater로 일원화) ──
+  // 확인/다운로드/설치/재시작 전 과정을 훅이 소유하고 UpdatePanel이 그린다.
+  const updater = useAppUpdater();
   const [appVersion, setAppVersion] = useState<string>("0.1.0");
-  const [updateChecked, setUpdateChecked] = useState(false);
-  const [updateAvailable, setUpdateAvailable] = useState<boolean>(false);
-  const [updateVersion, setUpdateVersion] = useState<string>("");
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isTauri) {
@@ -112,44 +111,6 @@ export function VaultManage() {
       setRestartMsg(`❌ 재시작 실패: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRestarting(false);
-    }
-  }
-
-  async function checkManualUpdate() {
-    if (!isTauri) return;
-    setCheckingUpdate(true);
-    setUpdateError(null);
-    setUpdateChecked(true);
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const result = await check();
-      if (result?.available) {
-        setUpdateAvailable(true);
-        setUpdateVersion(result.version);
-      } else {
-        setUpdateAvailable(false);
-      }
-    } catch (e: any) {
-      setUpdateError(e?.message || String(e));
-    } finally {
-      setCheckingUpdate(false);
-    }
-  }
-
-  async function installManualUpdate() {
-    if (!isTauri) return;
-    setCheckingUpdate(true);
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      const result = await check();
-      if (result?.available) {
-        await result.downloadAndInstall();
-        await relaunch();
-      }
-    } catch (e: any) {
-      setUpdateError(e?.message || String(e));
-      setCheckingUpdate(false);
     }
   }
 
@@ -871,63 +832,25 @@ export function VaultManage() {
               border: "1px solid var(--color-hairline)",
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <div>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>Raven Desktop</div>
                 <div style={{ fontSize: 12, color: "var(--color-muted)" }}>현재 버전: v{appVersion}</div>
               </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                {updateChecked && !updateAvailable && !checkingUpdate && (
-                  <span style={{ fontSize: 12, color: "var(--color-success-text)", marginRight: 8 }}>
-                    최신 버전을 사용 중입니다.
-                  </span>
-                )}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={checkingUpdate}
-                  onClick={() => void checkManualUpdate()}
-                >
-                  {checkingUpdate ? "확인 중..." : "업데이트 확인"}
-                </Button>
-              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={updater.busy}
+                onClick={() => void updater.check()}
+              >
+                {updater.phase === "checking" ? "확인 중…" : "업데이트 확인"}
+              </Button>
             </div>
 
-            {updateError && (
-              <div style={{ fontSize: 12, color: "var(--color-danger-text)" }}>
-                ❌ 업데이트 확인 실패: {updateError}
-              </div>
-            )}
-
-            {updateAvailable && (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  borderTop: "1px solid var(--color-hairline)",
-                  paddingTop: 12,
-                  marginTop: 4,
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: "var(--color-primary)" }}>
-                    새로운 버전 사용 가능: v{updateVersion}
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--color-muted)" }}>
-                    클릭하시면 즉시 업데이트를 다운로드하고 앱을 재실행합니다.
-                  </div>
-                </div>
-                <Button
-                  variant="pillPrimary"
-                  size="sm"
-                  disabled={checkingUpdate}
-                  onClick={() => void installManualUpdate()}
-                >
-                  지금 업데이트 및 재실행
-                </Button>
-              </div>
-            )}
+            {/* 확인 → 다운로드(진행률) → 설치 → 재시작을 한 자리에서 보여준다.
+                v0.7.183 이전에는 "업데이트 실행" 후 다운로드가 끝날 때까지
+                아무 변화가 없어 눌렸는지조차 알 수 없었다. */}
+            <UpdatePanel state={updater} currentVersion={appVersion} />
           </div>
         </div>
       )}
