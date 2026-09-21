@@ -3,7 +3,8 @@
 # and emit the latest.json manifest the desktop app polls at startup.
 #
 # Expects: make desktop-dmg already run (Raven.app present)
-# Requires env:
+# Requires env — 프로젝트 루트의 .env.release 에서 자동으로 읽는다
+# (없으면 셸에 이미 export 된 값을 쓴다). 최초 설정: make desktop-key-save
 #   TAURI_SIGNING_PRIVATE_KEY           개인키 — 파일 경로 또는 키 문자열 둘 다 허용
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  키 비밀번호. 없으면 빈 문자열로 간주한다
 #                                       (미지정 시 CLI가 TTY 프롬프트를 띄워 CI/make 에서 멈춘다)
@@ -13,9 +14,28 @@ set -euo pipefail
 
 VERSION="${1:?usage: sign-update.sh <version> <owner/repo>}"
 REPO_SLUG="${2:?usage: sign-update.sh <version> <owner/repo>}"
-: "${TAURI_SIGNING_PRIVATE_KEY:?TAURI_SIGNING_PRIVATE_KEY (개인키 경로 또는 키 문자열) must be set}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 서명 자격증명은 .env.release(gitignore 대상)에 기록해 두고 매번 재사용한다.
+# 셸에 이미 export 된 값이 있으면 그쪽을 우선한다 — CI 에서 secret 으로 주입할 때를 위해.
+ENV_FILE="$REPO_ROOT/.env.release"
+CRED_SOURCE="shell env"
+if [ -f "$ENV_FILE" ]; then
+  CRED_SOURCE="$ENV_FILE"
+  echo "=== Loading release env ($ENV_FILE) ==="
+  _pre_key="${TAURI_SIGNING_PRIVATE_KEY:-}"
+  _pre_pw="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-__unset__}"
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  if [ -n "$_pre_key" ]; then export TAURI_SIGNING_PRIVATE_KEY="$_pre_key"; fi
+  if [ "$_pre_pw" != "__unset__" ]; then export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$_pre_pw"; fi
+fi
+
+: "${TAURI_SIGNING_PRIVATE_KEY:?TAURI_SIGNING_PRIVATE_KEY 미설정 — 'make desktop-key-save' 로 .env.release 를 만드세요}"
+
 TAURI_DIR="$REPO_ROOT/desktop/src-tauri"
 APP_DIR="$TAURI_DIR/target/release/bundle/macos/Raven.app"
 UPDATE_DIR="$TAURI_DIR/target/release/bundle/updater"
@@ -46,10 +66,23 @@ fi
 # -p 를 생략하면 CLI가 TTY 프롬프트를 띄우고, make/CI 처럼 TTY 가 없으면
 # "incorrect updater private key password: Device not configured" 로 실패한다.
 # 비밀번호가 없는 키도 빈 문자열을 명시해야 통과한다.
-env -u TAURI_SIGNING_PRIVATE_KEY "$TAURI_CLI" signer sign \
+if ! env -u TAURI_SIGNING_PRIVATE_KEY "$TAURI_CLI" signer sign \
   "${KEY_ARGS[@]}" \
   -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-  "$ARTIFACT"
+  "$ARTIFACT"; then
+  echo ""
+  echo "❌ 서명 실패."
+  if [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+    echo "   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 가 비어 있습니다."
+    echo "   키에 비밀번호가 걸려 있으면 빈 값은 '틀린 비밀번호'로 취급되어"
+    echo "   'Wrong password for that key' 로 실패합니다."
+    echo "   → make desktop-key-save 로 비밀번호를 .env.release 에 기록하세요."
+  else
+    echo "   비밀번호가 키와 맞지 않습니다 (출처: $CRED_SOURCE)."
+    echo "   → make desktop-key-save 로 다시 기록하세요."
+  fi
+  exit 1
+fi
 
 [ -f "$ARTIFACT.sig" ] || { echo "❌ 서명 파일이 생성되지 않았습니다: $ARTIFACT.sig"; exit 1; }
 

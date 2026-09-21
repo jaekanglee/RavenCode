@@ -180,7 +180,7 @@ export PATH := $(HOME)/.cargo/bin:$(PATH)
 
 # ────────────────────────── desktop ──────────────────────────
 
-.PHONY: desktop-check desktop-dev desktop-rebuild desktop-bundle desktop-build desktop-dmg desktop-release
+.PHONY: desktop-check desktop-dev desktop-rebuild desktop-bundle desktop-build desktop-dmg desktop-key-save desktop-release-preflight desktop-release
 
 desktop-check: ## Check required tools (python venv, cargo, node, npm) for desktop app development and auto-install if missing
 	@if ! command -v python3 >/dev/null 2>&1; then \
@@ -248,15 +248,30 @@ desktop-dmg: desktop-build ## Build DMG installer from release binary
 	@bash scripts/make-dmg.sh
 	@echo "✅ DMG: desktop/src-tauri/target/release/bundle/dmg/Raven_$(DESKTOP_VERSION)_aarch64.dmg"
 
-desktop-release: desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + TAURI_SIGNING_PRIVATE_KEY)
+desktop-key-save: ## 업데이터 서명 키 경로+비밀번호를 .env.release 에 기록 (최초 1회. 검증 후 저장, gitignore 대상)
+	@bash scripts/save-release-key.sh
+
+desktop-release-preflight: ## 릴리스 전제조건 검사 (서명 자격증명·태그·gh) — 빌드 전에 먼저 실패시킨다
 	@set -e; \
 	VERSION="$(DESKTOP_VERSION)"; \
 	TAG="v$$VERSION"; \
-	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_$${VERSION}_aarch64.dmg"; \
+	echo "=== Release preflight ($$TAG) ==="; \
+	command -v gh >/dev/null 2>&1 || { \
+	  echo "❌ gh CLI 가 없습니다 — brew install gh && gh auth login"; exit 1; }; \
+	if [ ! -f .env.release ] && [ -z "$$TAURI_SIGNING_PRIVATE_KEY" ]; then \
+	  echo "❌ 서명 자격증명이 없습니다 — 'make desktop-key-save' 를 먼저 실행하세요."; exit 1; \
+	fi; \
 	git rev-parse "$$TAG" >/dev/null 2>&1 || { \
 	  echo "❌ 태그 $$TAG 가 없습니다 — 'make desktop-version VERSION=$$VERSION' 후 커밋/태그하세요."; exit 1; }; \
 	git ls-remote --tags origin "refs/tags/$$TAG" | grep -q . || { \
 	  echo "❌ 태그 $$TAG 가 원격에 없습니다 — 'git push origin --tags' 먼저 실행하세요."; exit 1; }; \
+	echo "✅ preflight 통과 — 빌드를 시작합니다."
+
+desktop-release: desktop-release-preflight desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + .env.release — make desktop-key-save)
+	@set -e; \
+	VERSION="$(DESKTOP_VERSION)"; \
+	TAG="v$$VERSION"; \
+	DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_$${VERSION}_aarch64.dmg"; \
 	bash scripts/sign-update.sh "$$VERSION" "$(GH_REPO)"; \
 	ARTIFACT="desktop/src-tauri/target/release/bundle/updater/Raven.app.tar.gz"; \
 	MANIFEST="desktop/src-tauri/target/release/bundle/updater/latest.json"; \

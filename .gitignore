@@ -38,6 +38,7 @@ Thumbs.db
 
 # Secrets
 .env
+.env.release
 *.key
 *.pem
 
