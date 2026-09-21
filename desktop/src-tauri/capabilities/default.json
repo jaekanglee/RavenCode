@@ -9,6 +9,7 @@
     "allow-mcp-endpoint",
     "allow-core-status",
     "allow-restart-core",
+    "allow-save-download-file",
     "updater:default",
     "process:allow-restart"
   ]

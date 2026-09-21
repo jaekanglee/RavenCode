@@ -120,6 +120,59 @@ fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
     do_restart_core(&app)
 }
 
+/// Resolves where an exported file should land inside `dir`.
+///
+/// 웹뷰가 준 이름은 신뢰하지 않는다 — 경로 성분을 버리고 파일명만 취하며,
+/// 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다 (wry 기본 다운로드 동작과 동일).
+fn resolve_download_target(dir: &std::path::Path, filename: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::Path;
+
+    let name = Path::new(filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .ok_or_else(|| format!("잘못된 파일명입니다: {filename:?}"))?;
+
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+
+    let mut target = dir.join(name);
+    let mut counter = 1;
+    while target.exists() {
+        target = dir.join(format!("{stem} ({counter}){ext}"));
+        counter += 1;
+    }
+    Ok(target)
+}
+
+/// Writes an exported file (문서 .md 내보내기 등) into the user's Downloads
+/// folder and returns the saved path.
+///
+/// 브라우저에서 통하는 Blob + `<a download>` 저장이 데스크톱 앱에서는 **조용히
+/// 아무 일도 하지 않는다**: wry 0.55의 `navigation_policy`는 다운로드 내비게이션을
+/// 만나면 `has_download_handler`가 false일 때 `WKNavigationActionPolicy::Cancel`을
+/// 돌려주고, 그 플래그는 웹뷰 빌더에 `on_download` 훅을 건 경우에만 true가 된다.
+/// Raven의 창은 tauri.conf.json이 만들기 때문에 빌더 훅을 걸 수 없으므로,
+/// 파일 저장을 커맨드로 처리한다 (신규 의존성 ❌ — `dirs`는 이미 쓰고 있다).
+#[command]
+fn save_download_file(filename: String, contents: String) -> Result<String, String> {
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "다운로드 폴더를 찾지 못했습니다.".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("폴더를 만들지 못했습니다: {e}"))?;
+    let target = resolve_download_target(&dir, &filename)?;
+    std::fs::write(&target, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))?;
+    Ok(target.display().to_string())
+}
+
 pub fn run() {
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
@@ -132,7 +185,8 @@ pub fn run() {
             mcp_endpoint,
             app_version,
             core_status,
-            restart_core
+            restart_core,
+            save_download_file
         ])
         .on_menu_event(|app, event| {
             if event.id.as_ref() == "reload" {
@@ -259,7 +313,58 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::core::{mcp_enabled_from_env, mcp_mode_from_env, runtime_launch_spec};
+    use super::resolve_download_target;
     use std::path::PathBuf;
+
+    // v0.7.184+: 문서 내보내기 파일 저장 경로 규칙.
+    // 웹뷰에서 온 파일명이라 경로 탈출을 허용하면 안 되고, 기존 파일을 덮어써서도 안 된다.
+
+    #[test]
+    fn download_target_keeps_korean_filename() {
+        let dir = std::env::temp_dir().join("raven-dl-test-korean");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = resolve_download_target(&dir, "내보내기-시험-문서.md").unwrap();
+        assert_eq!(target, dir.join("내보내기-시험-문서.md"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_target_strips_path_components() {
+        let dir = std::env::temp_dir().join("raven-dl-test-traversal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = resolve_download_target(&dir, "../../etc/passwd").unwrap();
+        assert_eq!(target, dir.join("passwd"));
+        let target = resolve_download_target(&dir, "/tmp/evil.md").unwrap();
+        assert_eq!(target, dir.join("evil.md"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_target_numbers_instead_of_overwriting() {
+        let dir = std::env::temp_dir().join("raven-dl-test-dedupe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.md"), "first").unwrap();
+        assert_eq!(resolve_download_target(&dir, "note.md").unwrap(), dir.join("note (1).md"));
+        std::fs::write(dir.join("note (1).md"), "second").unwrap();
+        assert_eq!(resolve_download_target(&dir, "note.md").unwrap(), dir.join("note (2).md"));
+        // 원본은 그대로 남아 있어야 한다.
+        assert_eq!(std::fs::read_to_string(dir.join("note.md")).unwrap(), "first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_target_rejects_empty_and_dot_names() {
+        let dir = std::env::temp_dir().join("raven-dl-test-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(resolve_download_target(&dir, "").is_err());
+        assert!(resolve_download_target(&dir, "..").is_err());
+        assert!(resolve_download_target(&dir, "/").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn runtime_launch_spec_invokes_python_desktop_module() {

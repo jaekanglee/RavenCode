@@ -3242,6 +3242,14 @@ a:focus-visible {
   color: var(--color-muted-soft);
 }
 
+.share-export-saved {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-success-text);
+  word-break: break-all;
+}
+
 .share-export-error {
   margin-top: 6px;
   font-size: 11px;

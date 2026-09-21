@@ -141,3 +141,52 @@ DB에 `failureKind=CONFLICT`만 적고 끝내면, 사용자 입장에서는 "저
 - 신규 테스트 9건 (`test_cli_version.py` 3, `test_mcp_schema_drift.py` 3, `test_db_schema_drift_contested.py` 3) + 관련 그룹 107 passed
 - `~/.local/bin/raven --version` → `raven 0.7.182`, help 유지
 - talkmmury 재빌드 후 `.schema pages`에 `contested` + `pages_fts` 확인, MCP `wiki_get_page`/`wiki_search` 정상 동작
+
+## 15. 데스크톱 업데이트 진행 상황 시각화 — 무반응 버튼 해소
+
+관리 → 업데이트 확인 → "지금 업데이트 및 재실행"을 눌러도 UI가 수십 초간 아무 반응이 없었다. 근본 원인은 `downloadAndInstall()`을 **진행 콜백 없이** 호출한 것 — 수십 MB 다운로드가 끝날 때까지 버튼만 disabled였고 화면엔 변화가 없어 눌렸는지조차 알 수 없었다. 덤으로 설치 직전 `check()`를 한 번 더 호출해 확인 단계에서 얻은 handle을 버리고 있었다.
+
+- **`useAppUpdater`** (신규): 확인→다운로드→설치→재시작 상태 기계. `Started`/`Progress`/`Finished` 이벤트로 바이트·%·속도·ETA를 계산한다. 진행률 state는 80ms throttle — Progress는 청크마다 오므로 그대로 setState하면 초당 수백 번 리렌더된다. 확인 단계 handle을 붙들어 중복 `check()` 제거
+- **`ProgressBar`** (신규, `ui/`): 공통 진행률 바. `value=null`이면 불확정 왕복 모드, `role="progressbar"` + `aria-valuenow`
+- **`UpdatePanel`** (신규): 상태 헤더(스피너+문구) / 진행률 바 / `12.4 MB / 19.3 MB · 2.1 MB/s · 약 3초 남음` / 3단계 레일(다운로드→설치→재시작) / 버전 칩 `v0.2.0 → v0.3.0`. 우하단 토스트(`UpdateChecker`)와 관리 화면(`VaultManage`)이 같은 몸통을 공유한다 (§13.1)
+- **`globals.css`**: `.progress-bar-*` / `.update-panel-*` + 키프레임, `prefers-reduced-motion` 대응. 색은 전부 토큰, 인라인 style은 구조 배치만 (§13.2)
+- **덤**: `@keyframes spin` 추가 — `SearchPage`가 정의도 없이 `animation: spin`을 써서 스피너가 돌지 않던 것을 함께 해결
+
+검증: 신규 테스트 12건 (상태 전이 / handle 재사용 / 총량 미제공 시 불확정 / 실패 메시지 보존 / 패널 렌더), vitest 전체 통과, `tsc -b` 0 에러, 라이트·다크 6개 상태 브라우저 렌더 확인. 커밋 `a9402c1`.
+
+## 16. vault 문서 내보내기 — Markdown 파일 저장 + PDF(인쇄)
+
+공유 팝오버에 "파일로 내보내기" 섹션을 추가했다. 그전까지는 내부망/Tailscale 링크 복사만 가능해서 **링크가 닿지 않는 상대에게 문서를 보낼 방법이 없었다**. PDF는 라이브러리 없이 인쇄 대화상자 방식으로 간다 (사용자 결정, AGENTS.md §10 의존성 승인).
+
+### API
+
+- `GET /api/vaults/{name}/pages/{slug}/export.md` — vault 원본 `.md` 그대로 (frontmatter 포함 → 다른 vault·Obsidian으로 되돌릴 수 있다). `?frontmatter=false`면 본문만
+- Content-Disposition은 한글 파일명을 RFC 5987 `filename*`로 전달하고 ascii fallback을 함께 준다. 원격 host(다른 origin) fetch용으로 `Access-Control-Expose-Headers`에 노출
+- **`{slug:path}` catch-all보다 먼저 등록**해야 한다 — FastAPI는 등록 순서대로 매칭하므로 뒤에 두면 catch-all이 `a/b/export.md`를 slug로 삼아 404가 난다. 등록 순서 회귀 가드 테스트 포함
+- `_page_file_or_404` 추출: `get_page`가 갖고 있던 옛 slug fuzzy fallback을 `export.md`와 공유
+- `_strip_frontmatter_block` 신설: `_split_fm`은 파싱용이라 body를 `strip("\n")`해 원본 끝 개행이 사라진다 — 파일로 내보낼 때는 본문 바이트를 보존해야 한다
+
+### Dashboard
+
+- **`pageExport`** (신규): `export.md` fetch → 파일 저장, 그리고 렌더된 본문을 **격리 iframe**에 옮겨 담고 A4 인쇄 스타일시트를 붙여 `window.print()` 호출
+- 인쇄 본문은 마크다운을 다시 파싱하지 않고 view mode 렌더 노드의 `innerHTML`을 쓴다 → 화면과 종이가 일치. 편집 모드에는 본문 노드가 없어 PDF 버튼을 감춘다. heading anchor(`.anchor`/`.octicon`)는 종이에서 숨김
+- 인쇄 머리글: 제목 + 분류/태그/작성/수정 + `vault / slug` 출처 한 줄
+- 팝오버 배치 수정: 섹션이 붙어 길어지면서 뷰포트 아래로 잘려 PDF 버튼이 안 보였다 — 아래 공간이 부족하면 트리거 위로 뒤집고, 그래도 넘치면 `maxHeight` + 내부 스크롤
+
+### 데스크톱에서 Blob 다운로드가 조용히 취소되던 문제
+
+브라우저에서 통하는 `Blob` + `<a download>` 저장이 **데스크톱 앱에서는 아무 일도 하지 않는다**. wry 0.55.1 `src/wkwebview/navigation.rs`의 `navigation_policy`가 다운로드 내비게이션(`shouldPerformDownload`)을 만나면 `has_download_handler`가 false일 때 `WKNavigationActionPolicy::Cancel`을 돌려준다. 그 플래그는 웹뷰 빌더에 `on_download` 훅을 건 경우에만 true가 되는데(`tauri-runtime-wry` 2.11.4 `lib.rs:5010` — `pending.download_handler`가 `Some`일 때만 `with_download_started_handler` 등록), Raven의 창은 `tauri.conf.json`이 만들어 빌더 훅을 걸 수 없다.
+
+→ **`save_download_file` 커맨드** 신설 (신규 의존성 ❌ — `dirs`는 이미 쓰고 있다). `~/Downloads`에 쓰고 저장 경로를 돌려주며, 프론트는 그 경로를 "✅ 저장됨: …"으로 보여준다. 웹뷰가 준 파일명은 신뢰하지 않고 경로 성분을 버리며, 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다 (wry 기본 다운로드 동작과 동일). `permissions/default.toml` + `capabilities/default.json`에 `allow-save-download-file` 등록.
+
+### 검증
+
+- pytest 8건 (원본 일치 / 한글 헤더 / `frontmatter=false` / fuzzy slug / 404 / 경로 탈출 / 등록 순서 / `get_page` 회귀)
+- vitest 12건 (URL 인코딩 / 파일명 / 인쇄문서 구성 / escape / iframe 수명 / 팝오버 두 버튼 / md 저장 / pdf 본문 전달 / PDF 버튼 숨김 / Tauri 커맨드 경로 / 브라우저 Blob 경로 / 저장 경로 전달)
+- cargo test 4건 (한글 파일명 보존 / 경로 탈출 차단 / 덮어쓰기 방지 / 잘못된 이름 거부) — 크레이트 전체 11 passed
+- pytest 829 passed, vitest 51 files 284 passed, `tsc -b` 0 에러, `cargo check` 0 에러, build 성공
+- 로컬 스택에서 `export.md` 실응답(헤더 + 원본 본문) 및 팝오버·인쇄문서 렌더 확인
+
+README endpoint 카운트 65 → 66 (`doc_count_guards`가 먼저 잡아줌).
+
+**남은 것**: 데스크톱 `.md` 저장은 코드 경로로만 검증했다 (Tauri 웹뷰는 Chrome 자동화로 클릭할 수 없다) — 실제 앱에서 한 번 눌러볼 것. PDF는 인쇄 대화상자에서 "PDF로 저장"을 사용자가 골라야 한다.

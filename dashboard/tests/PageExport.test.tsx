@@ -11,14 +11,19 @@
  *  4. printPageAsPdf가 iframe을 만들어 인쇄하고 정리한다
  *  5. 팝오버에 두 버튼이 뜨고, md는 fetch → 저장, pdf는 본문 HTML로 인쇄
  *  6. getPrintHtml이 없으면 PDF 버튼을 감춘다 (편집 모드 등)
+ *  7. 데스크톱(Tauri)에서는 Blob 대신 save_download_file 커맨드로 저장
+ *     — wry 0.55는 on_download 훅이 없는 웹뷰의 다운로드 내비게이션을
+ *       WKNavigationActionPolicy::Cancel로 조용히 취소한다 (회귀 가드)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import {
   buildPrintDocument,
+  downloadPageMarkdown,
   markdownFilename,
   pageMarkdownUrl,
   printPageAsPdf,
+  saveTextFile,
 } from "../src/lib/pageExport";
 import { ShareButton } from "../src/components/ShareButton";
 
@@ -195,5 +200,68 @@ describe("ShareButton 내보내기 섹션", () => {
     await openPopover();
     expect(screen.getByLabelText("Markdown 파일로 저장")).toBeTruthy();
     expect(screen.queryByLabelText("PDF로 저장")).toBeNull();
+  });
+});
+
+
+describe("데스크톱(Tauri) 저장 경로", () => {
+  afterEach(() => {
+    delete (window as any).__TAURI_INTERNALS__;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("Tauri 웹뷰에서는 Blob 대신 save_download_file 커맨드를 부른다", async () => {
+    const invoke = vi.fn(async () => "/Users/me/Downloads/시험-문서.md");
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    const createObjectURL = vi.fn(() => "blob:mock");
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+
+    const saved = await saveTextFile("시험-문서.md", "본문", "text/markdown");
+
+    expect(invoke).toHaveBeenCalledWith("save_download_file", {
+      filename: "시험-문서.md",
+      contents: "본문",
+    });
+    expect(saved.path).toBe("/Users/me/Downloads/시험-문서.md");
+    // 데스크톱에서는 취소되는 Blob 다운로드 경로를 타지 않아야 한다.
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+  });
+
+  it("브라우저에서는 Blob 다운로드를 그대로 쓰고 path는 null", async () => {
+    const createObjectURL = vi.fn(() => "blob:mock");
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    const names: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      names.push(this.download);
+    });
+
+    const saved = await saveTextFile("a.md", "본문", "text/markdown");
+
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(names).toEqual(["a.md"]);
+    expect(saved.path).toBeNull();
+  });
+
+  it("downloadPageMarkdown이 저장 결과(경로)를 그대로 넘긴다", async () => {
+    const invoke = vi.fn(async () => "/Users/me/Downloads/시험-문서.md");
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(RAW_MD, { status: 200 }))
+    );
+
+    const saved = await downloadPageMarkdown("v", "content/concept/시험-문서");
+
+    expect(saved).toEqual({
+      filename: "시험-문서.md",
+      path: "/Users/me/Downloads/시험-문서.md",
+    });
   });
 });

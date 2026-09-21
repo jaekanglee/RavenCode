@@ -1,6 +1,6 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core"]
+permissions = ["allow-core-endpoint", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
@@ -21,3 +21,8 @@ commands.allow = ["core_status"]
 identifier = "allow-restart-core"
 description = "Allow invoking the restart_core command."
 commands.allow = ["restart_core"]
+
+[[permission]]
+identifier = "allow-save-download-file"
+description = "Allow invoking the save_download_file command (문서 내보내기 파일 저장)."
+commands.allow = ["save_download_file"]

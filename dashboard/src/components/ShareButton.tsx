@@ -236,13 +236,18 @@ export function ShareButton({ vault, slug, title, getPrintHtml, printMeta }: Sha
   // pdf = 렌더된 본문을 격리 iframe + 인쇄 스타일시트로 옮겨 인쇄 대화상자
   const [exporting, setExporting] = useState<"md" | "pdf" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  // 데스크톱은 저장 경로를 돌려주므로 어디에 떨어졌는지 알려준다.
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const docTitle = title?.trim() || slug.split("/").filter(Boolean).pop() || slug;
 
   async function handleExportMarkdown() {
     setExporting("md");
     setExportError(null);
+    setSavedPath(null);
     try {
-      await downloadPageMarkdown(vault, slug);
+      const saved = await downloadPageMarkdown(vault, slug);
+      setSavedPath(saved.path ?? saved.filename);
+      setTimeout(() => setSavedPath(null), 6000);
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -258,6 +263,7 @@ export function ShareButton({ vault, slug, title, getPrintHtml, printMeta }: Sha
     }
     setExporting("pdf");
     setExportError(null);
+    setSavedPath(null);
     try {
       await printPageAsPdf({
         title: docTitle,
@@ -382,6 +388,8 @@ export function ShareButton({ vault, slug, title, getPrintHtml, printMeta }: Sha
             </div>
             {exportError ? (
               <div className="share-export-error">{exportError}</div>
+            ) : savedPath ? (
+              <div className="share-export-saved">✅ 저장됨: {savedPath}</div>
             ) : (
               getPrintHtml && (
                 <div className="share-export-hint">
