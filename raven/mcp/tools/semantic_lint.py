@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from raven.mcp.errors import InvalidToolArgument
 from raven.core import frontmatter as core_frontmatter
 from raven.core.lint import run_all
 from raven.core.registry import VaultMeta
@@ -68,7 +69,7 @@ def wiki_semantic_lint_queue(
     selected = list(checks) if checks is not None else list(ALLOWED_CHECKS)
     bad = [c for c in selected if c not in ALLOWED_CHECKS]
     if bad:
-        raise ValueError(
+        raise InvalidToolArgument(
             f"checks에 허용목록 밖 id가 있음: {bad}. "
             f"허용목록: {list(ALLOWED_CHECKS)}"
         )

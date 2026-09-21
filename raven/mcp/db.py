@@ -80,11 +80,11 @@ def get_db(vault: Optional[Path | str] = None) -> sqlite3.Connection:
     root = _resolve_vault(vault)
     db_path = root / "wiki.db"
     if not db_path.exists():
-        raise FileNotFoundError(
+        raise VaultDbMissing(
             f"wiki.db not found at {db_path}. Run scripts/build_db.py first."
         )
     if _schema_drifted(db_path):
-        raise RuntimeError(
+        raise VaultDbSchemaDrift(
             f"wiki.db at {db_path} uses an outdated schema (missing "
             f"pages.contested / pages_fts — built by a pre-v0.7.67 raven CLI). "
             f"Rebuild it with: raven build --vault {root.name}"
@@ -116,6 +116,7 @@ def list_pages(vault: Optional[Path | str] = None) -> list[dict]:
 # v0.7.68 (평가 B#2): relocated to raven.core.db — pure SQLite query with
 # no MCP-specific state. Re-exported here so existing MCP callers/imports
 # keep working unchanged.
+from raven.mcp.errors import VaultDbMissing, VaultDbSchemaDrift
 from raven.core.db import search_fts as search_fts  # noqa: E402,F401
 
 

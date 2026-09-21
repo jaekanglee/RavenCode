@@ -19,6 +19,7 @@ caller can decide whether to back off. This matches README.md §3's
 """
 from __future__ import annotations
 
+from raven.mcp.errors import ToolPermissionDenied, VaultNotFound
 import datetime as dt
 import hashlib
 import json
@@ -49,8 +50,13 @@ WRITE_TOOLS: frozenset[str] = frozenset({
 ADMIN_TOOLS: frozenset[str] = frozenset({"wiki_delete", "wiki_rename"})
 
 
-class PermissionError_(Exception):
-    """Raised when a tool is called in a mode that doesn't permit it."""
+class PermissionError_(ToolPermissionDenied):
+    """Raised when a tool is called in a mode that doesn't permit it.
+
+    v0.7.185: ToolPermissionDenied(= ToolError) 상속 추가. mcp 2.x는 ToolError가
+    아닌 예외의 메시지를 클라이언트에 전하지 않아, "--admin이 필요하다"는 안내가
+    통째로 사라지고 있었다. 기존 `except PermissionError_`는 그대로 동작한다.
+    """
 
 
 def check_permission(tool_name: str, mode: str) -> None:
@@ -118,7 +124,7 @@ def resolve_vault_path(name: str) -> Path:
     meta = reg.get(name)
     if meta is None:
         available = ", ".join(sorted(v.name for v in reg.list())) or "(none registered)"
-        raise ValueError(
+        raise VaultNotFound(
             f"vault {name!r} not found. Available vaults: {available}"
         )
     return meta.path

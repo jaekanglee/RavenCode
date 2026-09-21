@@ -28,21 +28,43 @@ help: ## Show this help message
 # ────────────────────────── setup ──────────────────────────
 
 .PHONY: install
+# v0.7.185+: venv 가 uv 로 만들어졌으면 pip 가 없다 (`uv venv` 는 pip 를 넣지 않는다).
+# 예전 install/venv-check 는 pip 존재만 보고 "venv 없음"으로 단정해서,
+#   - venv-check → 모든 타깃(up/test/…)이 "run 'make install' first" 로 막히고
+#   - install    → `rm -rf $(VENV)` 로 멀쩡한 venv 를 지우려 들었다
+# 그 바람에 의존성 동기화 명령이 아예 돌지 못해 mcp 가 1.29.0 에 멈춰 있었고,
+# requirements.txt 가 mcp>=2.0 을 가리키는데도 아무도 모르고 있었다.
+# → 이제 uv 가 있으면 uv 를, 없으면 pip 를 쓴다. 멀쩡한 venv 는 절대 지우지 않는다.
+UV := $(shell command -v uv 2>/dev/null)
+
 install: ## Create venv + install raven + dev deps (v0.7.55+ 기본 경로 — Docker는 deprecated)
-	@if [ ! -x $(PIP) ]; then \
+	@if [ ! -x $(PY) ]; then \
 		echo "📦 Creating Python venv in $(VENV)..."; \
-		rm -rf $(VENV); \
-		python3 -m venv $(VENV) || (echo "❌ python3 -m venv 실패"; exit 1); \
+		if [ -n "$(UV)" ]; then \
+			uv venv $(VENV) || (echo "❌ uv venv 실패"; exit 1); \
+		else \
+			python3 -m venv $(VENV) || (echo "❌ python3 -m venv 실패"; exit 1); \
+		fi; \
 	fi
-	$(PIP) install --quiet --upgrade pip
-	$(PIP) install --quiet -e ./scripts
-	$(PIP) install --quiet -r requirements.txt   # 런타임 핀 단일 소스
-	$(PIP) install --quiet pytest                # dev 전용
+	@if [ -n "$(UV)" ]; then \
+		echo "📦 uv 로 의존성 동기화..."; \
+		VIRTUAL_ENV=$(VENV) uv pip install --quiet -e ./scripts; \
+		VIRTUAL_ENV=$(VENV) uv pip install --quiet -r requirements.txt; \
+		VIRTUAL_ENV=$(VENV) uv pip install --quiet pytest; \
+	else \
+		$(PIP) install --quiet --upgrade pip; \
+		$(PIP) install --quiet -e ./scripts; \
+		$(PIP) install --quiet -r requirements.txt; \
+		$(PIP) install --quiet pytest; \
+	fi
 	@echo "✅ installed ($(VENV))"
 
-.PHONY: venv-check
+.PHONY: venv-check deps-check
 venv-check: ## Fail loudly if venv missing (so other targets work)
-	@test -x $(PIP) || (echo "❌ run 'make install' first"; exit 1)
+	@test -x $(PY) || (echo "❌ run 'make install' first"; exit 1)
+
+deps-check: venv-check ## requirements.txt 핀과 실제 설치본이 어긋났는지 확인
+	@$(PY) scripts/check-deps.py
 
 # ────────────────────────── Docker (v0.7.55+ deprecated) ──────────────────────
 # v0.7.12~54: Docker compose 표준이었음. v0.7.55+: local host stack(./raven.sh,

@@ -190,3 +190,41 @@ DB에 `failureKind=CONFLICT`만 적고 끝내면, 사용자 입장에서는 "저
 README endpoint 카운트 65 → 66 (`doc_count_guards`가 먼저 잡아줌).
 
 **남은 것**: 데스크톱 `.md` 저장은 코드 경로로만 검증했다 (Tauri 웹뷰는 Chrome 자동화로 클릭할 수 없다) — 실제 앱에서 한 번 눌러볼 것. PDF는 인쇄 대화상자에서 "PDF로 저장"을 사용자가 골라야 한다.
+
+## 17. mcp 버전 정리 — venv 1.29.0 고착 해소 + 2.x 에러 마스킹 회귀 수정
+
+MCP 테스트 10건(실패 8 + 수집 에러 2)이 깨진 채였다. 표면 원인은 "venv의 mcp가 1.29.0인데 코드는 `mcp.server.mcpserver`(2.x API)를 import"였지만, **왜 갱신이 안 됐는지**가 진짜 문제였다.
+
+### 근본 원인 — 의존성 동기화 명령이 아예 돌지 못했다
+
+venv가 `uv venv`로 만들어져 있었고(`pyvenv.cfg`에 `uv = 0.9.18`), `uv venv`는 pip를 넣지 않는다. 그런데 Makefile은 pip 존재로 venv 유무를 판정했다:
+
+- `venv-check`: `test -x $(PIP)` 실패 → `up`/`test` 등 **모든 타깃이 "run 'make install' first"로 차단**
+- `install`: 같은 판정으로 `rm -rf $(VENV)` 후 `python3 -m venv` 재생성을 시도 — 멀쩡한 3.14 venv를 지우려 드는 동작이라 사실상 아무도 실행하지 못했다
+
+그래서 `requirements.txt`가 `mcp>=2.0,<3.0`을 가리키는데도 venv는 1.29.0에 멈춰 있었고, 아무도 모르고 있었다. (PyPI 확인: mcp 2.x는 실재하며 최신 2.2.0 — 코드와 핀이 옳고 venv만 낡았다.)
+
+- **Makefile 수정**: venv 판정을 `$(PY)`(python 실행 파일) 기준으로 바꾸고, `uv`가 있으면 `uv pip`로, 없으면 `pip`로 동기화한다. **멀쩡한 venv는 절대 지우지 않는다**
+- **`make deps-check` + `scripts/check-deps.py` 신설**: `requirements.txt` 핀과 실제 설치본을 대조한다. 이번 drift(`mcp: 설치 1.29.0 ≠ 요구 <3.0,>=2.0`)를 재현해 실제로 잡는 것까지 역검증
+- venv 동기화: mcp 1.29.0 → 2.2.0 (+ `mcp-types`, `httpx2`, `httpcore2`, `opentelemetry-api`, `truststore`). 충돌 없음
+
+### 함께 드러난 실제 회귀 — mcp 2.x가 에러 메시지를 마스킹한다
+
+버전만 올리자 2건이 남았는데, 테스트 문제가 아니라 **런타임 동작 회귀**였다. mcp 2.x는 도구에서 올라온 예외를 두 갈래로 나눈다 (`mcp/server/mcpserver/tools/base.py`):
+
+- `ToolError` → 메시지가 그대로 클라이언트에 전달
+- 그 외 모든 예외 → `UnexpectedToolError`로 감싸이고 **`Error executing tool <name>`만 남는다**
+
+Raven의 MCP 실패 메시지는 전부 *에이전트가 읽고 스스로 고치라고* 쓴 안내다 — "사용 가능한 vault 목록", "허용된 체크 id", "`raven build --vault X`로 재빌드하라"(§14에서 일부러 추가한 것), "`--admin`이 필요하다". 평범한 `ValueError`/`RuntimeError`로 던지고 있어 **그 안내가 통째로 사라지고 있었다**. mcp 1.x에서는 새어나왔기 때문에 2.x로 올리기 전까지 드러나지 않았다.
+
+- **`raven/mcp/errors.py` 신설**: `VaultNotFound` / `InvalidToolArgument` / `ToolPermissionDenied` / `VaultDbMissing` / `VaultDbSchemaDrift`
+- **다중상속으로 기존 계약 보존**: 타입을 갈아치우지 않고 `ToolError`를 *더한다* (`VaultDbSchemaDrift(ToolError, RuntimeError)` 식). mcp 1.x 시절 `except ValueError`/`except PermissionError_` 호출부(`tools/stale.py`)와 회귀 테스트(`test_mcp_schema_drift.py`)가 그대로 동작한다
+- 적용: `tools/__init__.py`(vault 미발견, 권한), `tools/semantic_lint.py`(허용목록 밖 체크 id), `db.py`(wiki.db 부재, 스키마 drift)
+
+### 재발 방지
+
+`tests/test_mcp_tool_error_surfacing.py` 5건 — 안내 문구가 클라이언트에 실제로 도달하는지(`UnexpectedToolError`가 아닌지), 기존 예외 타입 계약이 유지되는지, 그리고 **AST로 `raven/mcp/` 안의 모든 `raise`를 훑어 `ToolError` 계열인지** 검사한다. 신규 도구가 평범한 예외를 던지면 런타임이 아니라 이 테스트에서 먼저 실패한다.
+
+### 검증
+
+`make test` → **853 passed, 1 skipped, 0 failed** (작업 전: 829 passed / 8 failed / 수집 에러 2). `make venv-check`·`make test`가 다시 동작한다 — 이전에는 둘 다 "run 'make install' first"로 막혀 있었다.
