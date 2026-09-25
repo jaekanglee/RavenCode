@@ -345,3 +345,34 @@ pytest 850 passed (MCP 1건은 venv mcp 2.0.0 별건). vitest 279 passed (삭제
 ### 별건 (미처리)
 
 - `raven/core/recommend.py:45`도 DB가 없을 때 lint 포함 빌드 후 결과를 버린다 (드문 경로)
+
+## 22. 남은 후보 정리 — 설치본 그래프 500 · mcp 2.0.0 · 재방문 즉시 표시 · 필터 자동 맞춤
+
+### 설치본 그래프 탭 500 — 번들에 `python-frontmatter` 부재 + 설치 스크립트 고장
+
+- **원인**: 설치된 Raven.app(9/22 기동)의 번들 Python에 `python-frontmatter`가 없어 `GET /graph`가 `ModuleNotFoundError: No module named 'frontmatter'`로 500 (번들 코드를 vault 사본에 직접 돌려 재현). `requirements.txt`에는 8/24부터 있었고 로컬 번들(9/16)에도 있었다 — 설치본은 다른 빌드(업데이터 경유로 추정)였다
+- **로컬 재설치가 안 되던 이유**: `scripts/install-desktop.sh`가 DMG 이름을 `Raven_0.1.0_aarch64.dmg`로 하드코딩 — 버전을 올린 뒤로 빌드가 끝나도 "DMG not found"로 멈췄다. `make-dmg.sh`와 같은 출처(`tauri.conf.json`)에서 버전을 읽도록 수정
+- `make desktop-install`로 현재 소스 재설치 → 그래프 200(0.50s), 번들 frontmatter 1.3.0 / mcp 2.2.0, MCP 8766 기동, 바이너리 임베드 에셋 이름이 현재 dist와 일치(새 UI 반영) 확인. 서명은 ad-hoc(`codesign --sign -`)이라 업데이터 서명 키 불필요
+
+### venv mcp 2.0.0 — `test_mcp_tool_error_surfacing.py` 수집 에러
+
+- `UnexpectedToolError`는 mcp **2.1.0**부터 있다 (2.1.0/2.2.0 wheel 대조). 핀 `mcp>=2.0`이 2.0.0을 허용해 `deps-check`도 통과했다
+- 핀 `mcp>=2.1,<3.0`으로 상향 → `deps-check`가 이제 drift를 잡는다(검증). venv 2.2.0 동기화(설치본과 동일). 핀 가드 테스트(`test_v0_7_184_mcp_pin_single_source`) 하한 갱신
+
+### 그래프 재방문 즉시 표시
+
+문서 수정 직후 응답(~1.4s)의 대부분은 DB 전체 재빌드(169문서 FTS 색인 포함, ~0.8s)다. in-process 전환·pragma 조정은 ~0.2s 이득에 반쯤 쓰인 DB 위험이 있어 보류 — 근본 해결은 변경 파일만 다시 색인하는 증분 빌드(아키텍처 변경, 후속).
+
+- 대신 체감 대기를 없앴다: vault별 마지막 그래프를 탭 세션 메모리에 두고, 재방문 시 즉시 그린 뒤 백그라운드에서 새로 받는다. 재방문 → 캔버스 79ms, 스피너 0. 캐시가 있을 때의 재조회 실패는 에러 대신 캐시 유지. 테스트 `GraphPage.cache.test.tsx`
+
+### 타입 필터 변경 시 자동 맞춤
+
+`GraphCanvas`에 `fitKey` prop — 값이 바뀌면 새 배치가 자리 잡은 뒤(1.5s) 화면을 맞춘다. 그래프 탭은 `fitKey={selectedType}`. 서로 연결이 적은 일지 80개가 넓게 퍼져 일부가 화면 밖에 남던 문제 — 전부 화면에 들어옴(34%) 확인. 검색 등 다른 필터 변경은 기존대로 카메라 보존
+
+### `recommend.py` 중복 빌드
+
+DB가 없을 때 `build_db(vault)`(lint 포함)를 부르고 결과를 버린 뒤 `connect()`가 또 확인했다. `connect()`가 이미 lint 없이 재빌드하므로 호출 제거. 테스트 `test_recommendations_build_missing_db_without_lint`
+
+### 검증
+
+pytest 856 passed (MCP 에러 표면화 테스트 포함 — 이번 세션 처음으로 전부 통과). vitest 283 passed.

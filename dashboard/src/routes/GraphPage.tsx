@@ -29,6 +29,11 @@ import {
 
 const GRAPH_SEED_ITERATIONS = 60;
 
+// vault별 마지막 그래프 — 다시 방문하면 즉시 그리고 백그라운드에서 새로 받는다.
+// 문서 수정 직후엔 서버가 DB를 통째로 재빌드해 응답이 ~1.4초 걸리므로, 그동안
+// 스피너 대신 직전 그래프를 보여준다. (탭 세션 메모리 — 새로고침하면 비워진다)
+const graphCache = new Map<string, Graph>();
+
 const RELATION_HELPERS = [
   { value: "wikilink", title: "링크", description: "문장/문맥 중심의 기본 연결" },
   { value: "uses", title: "Uses", description: "이 문서가 다른 문서를 사용함" },
@@ -125,14 +130,15 @@ function nodeSlug(node: GraphNode): string {
  *   graph colors are user-facing document type colors.
  */
 export function GraphPage() {
-  const [graph, setGraph] = useState<Graph>({ nodes: [], edges: [] });
+  const { vault } = useOutletContext<{ vault: string }>();
+  const [graph, setGraph] = useState<Graph>(() => graphCache.get(vault) ?? { nodes: [], edges: [] });
   // v0.7.144+: graphScope 토글 제거 — current 단일 vault만 표시.
   // v0.7.123+: 그래프 페이지 필터 상태(query/selectedType/hideOrphans/selectedNodeId)를
   // useReducer로 묶어 resetGraphFilters 등 다중 setState 시 동기화 + 의도 명시.
   // 인사이트 hover 2종 + 로딩/에러/showFullGraph는 데이터 라이프사이클/UI 토글로
   // 빈도가 낮아 그대로 useState 유지.
   const [filters, dispatchFilters] = useReducer(filterReducer, initialFilters);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !graphCache.has(vault));
   const [loadError, setLoadError] = useState(false);
   const [hoveredInsightNodeId, setHoveredInsightNodeId] = useState<string | null>(null);
   const [hoveredInsightType, setHoveredInsightType] = useState<string | null>(null);
@@ -141,7 +147,6 @@ export function GraphPage() {
   // B3: 선택 노드로부터 몇 촌까지 강조할지. 이전에는 3촌 하드코딩이었다.
   const [focusDepth, setFocusDepth] = useState<number>(DEFAULT_FOCUS_DEPTH);
   const navigate = useNavigate();
-  const { vault } = useOutletContext<{ vault: string }>();
 
   const { query, selectedType, hideOrphans, selectedNodeId, visibleRelations } = filters;
 
@@ -168,15 +173,25 @@ export function GraphPage() {
 
   const loadGraph = () => {
     if (!vault) return;
-    setLoading(true);
+    const cached = graphCache.get(vault);
+    if (cached) {
+      setGraph(cached);
+    }
+    setLoading(!cached);
     setLoadError(false);
     // v0.7.144+: ?scope= 쿼리 제거 — current만 사용.
     // 서버 ForceAtlas 좌표는 클라이언트 물리의 출발점일 뿐이라 거칠어도 된다.
     // 기본 500회는 169문서 vault에서 ~2.8초, 60회는 ~0.3초.
     apiFetch(`/api/vaults/${encodeURIComponent(vault)}/graph?iterations=${GRAPH_SEED_ITERATIONS}`)
       .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
-      .then((d) => setGraph({ nodes: d.nodes ?? [], edges: d.edges ?? [] }))
+      .then((d) => {
+        const next = { nodes: d.nodes ?? [], edges: d.edges ?? [] };
+        graphCache.set(vault, next);
+        setGraph(next);
+      })
       .catch(() => {
+        // 캐시가 있으면 그대로 보여주고, 처음 받는 중에 실패했을 때만 에러를 띄운다.
+        if (cached) return;
         setGraph({ nodes: [], edges: [] });
         setLoadError(true);
       })
@@ -455,6 +470,7 @@ export function GraphPage() {
             externalHighlightType={hoveredInsightType}
             density="normal"
             focusDepthLimit={focusDepth}
+            fitKey={selectedType}
             onFullscreen={() => setShowFullGraph(true)}
             onResetLayout={resetLayout}
           />

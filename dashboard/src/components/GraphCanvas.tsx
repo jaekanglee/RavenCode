@@ -43,6 +43,8 @@ interface Props {
   density?: "normal" | "dense";
   /** "리셋" 버튼 클릭 시 호출 — 저장된 드래그 좌표를 버리고 서버 원본(ForceAtlas2) 배치로 되돌린다 */
   onResetLayout?: () => void;
+  /** 이 값이 바뀌면(예: 타입 필터) 새 배치가 자리 잡은 뒤 화면을 다시 맞춘다. */
+  fitKey?: string;
   /** 캔버스 빈 공간 클릭 시 호출 */
   onBackgroundClick?: () => void;
   /** 그래프 캔버스의 용도 (기본형 vs 미니맵용) */
@@ -383,6 +385,7 @@ export function GraphCanvas({
   onFullscreen,
   density = "normal",
   onResetLayout,
+  fitKey,
   onBackgroundClick,
   variant = "default",
   focusDepthLimit = DEFAULT_FOCUS_DEPTH,
@@ -1332,6 +1335,20 @@ export function GraphCanvas({
     // d3 리히트를 유발하지 않는다.
     onNodeInspect,
   ]);
+
+  // 필터로 노드 집합이 크게 바뀌면(연결이 적은 타입은 넓게 퍼진다) 일부가 화면 밖에
+  // 남는다. 평소 필터 변경은 카메라를 보존하지만, fitKey가 바뀔 때만 다시 맞춘다.
+  const fitKeyMountedRef = useRef(false);
+  useEffect(() => {
+    if (!fitKeyMountedRef.current) {
+      fitKeyMountedRef.current = true;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      graphInstanceRef.current?.zoomToFit(600, 96);
+    }, SETTLED_FIT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [fitKey]);
 
   const fitGraph = () => {
     if (graphInstanceRef.current) {
