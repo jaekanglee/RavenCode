@@ -1202,6 +1202,7 @@ def vault_graph(
                     xy = user_pos.get(node["slug"])
                     if xy is not None:
                         layout_coords[node["id"]] = xy
+                        node["pinned"] = True
             for node in nodes:
                 xy = layout_coords.get(node["id"], (0.0, 0.0))
                 node["x"] = xy[0]
@@ -1385,6 +1386,7 @@ def vault_graph(
             xy = user_pos.get(node["slug"])
             if xy is not None:
                 layout_coords[node["id"]] = xy
+                node["pinned"] = True
     for node in nodes:
         xy = layout_coords.get(node["id"], (0.0, 0.0))
         node["x"] = xy[0]

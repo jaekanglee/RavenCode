@@ -229,6 +229,40 @@ Raven의 MCP 실패 메시지는 전부 *에이전트가 읽고 스스로 고치
 
 `make test` → **853 passed, 1 skipped, 0 failed** (작업 전: 829 passed / 8 failed / 수집 에러 2). `make venv-check`·`make test`가 다시 동작한다 — 이전에는 둘 다 "run 'make install' first"로 막혀 있었다.
 
+## 18. 그래프 — 살아 있는 물리 + Obsidian식 작은 점 노드
+
+데스크톱 그래프 탭이 "정적인 2D 그림"처럼 보였다. `force-graph`(d3-force + 캔버스, Obsidian 그래프와 같은 계열)를 쓰면서도 시뮬레이션을 사실상 꺼두고 있었기 때문이다.
+
+### 원인
+
+- **전 노드 고정**: force 모드가 서버 ForceAtlas 좌표를 모든 노드의 `fx/fy`로 박았다. 드래그해도 이웃이 따라오지 않았다
+- `cooldownTime(600)` — 0.6초 만에 정지
+- 노드가 반지름 14~36의 큰 원 + centrality 비례 흰 테두리 → 버튼처럼 보였고, 넓게 흩어진 좌표(×2.8) 사이로 긴 직선 거미줄만 도드라졌다
+
+### 변경
+
+- **API**: `.graph_positions.json`에 저장된 노드에만 `pinned: true` (`GET /api/vaults/{name}/graph` 두 분기 모두). 리셋(`DELETE .../graph/positions`)하면 사라진다
+- **드래그 = Obsidian식 (사용자 결정)**: 놓으면 풀어서 전체가 다시 자리를 잡는다. **드래그 좌표 저장은 중단** — `GraphPage.persistPositions`와 `GraphCanvas.onPositionsChange` prop 제거. 이미 저장된 좌표는 pinned로 계속 고정되고, 드래그하면 이번 세션에서만 풀린다. `POST .../graph/positions` endpoint는 남아 있지만 dashboard는 더 이상 호출하지 않는다
+- **`seedForceNodes`** (`dashboard/src/lib/graph/render.ts`, 순수 함수): 서버 pinned만 고정, 나머지는 ForceAtlas 좌표를 출발점으로만 쓴다. 서버 좌표가 직전과 같은 노드는 직전 프레임 위치를 이어받아 필터·재조회 때 튀지 않고, 서버 좌표가 바뀐 노드(리셋)는 새 좌표에서 출발한다 — 처음 구현은 직전 위치를 무조건 이어받아 **리셋이 화면에 아무 효과가 없었다** (자체 발견, 테스트로 고정)
+- **물리**: 원점 중력 `0.03` + 무게중심 복원(recenter) + charge `-200`(distanceMax 800) + link distance `40` + **link strength `0.5` 균일** + velocity decay `0.3` + cooldown 8초. 좌표 배율 2.8 → 0.8로 평형 크기에 맞춰 첫 로드 때 폭발/수축 없이 자리만 잡는다
+  - 링크 장력: d3 기본값 `1/min(양 끝 연결 수)`는 링크 553개 vault에서 링크 하나가 ~1/20 힘이라, 드래그해도 이웃이 안 따라오고 선만 늘어났다 (프레임 캡처로 확인)
+  - recenter: d3 link force는 연결 수가 적은 끝을 더 움직여 운동량이 보존되지 않는다. 장력을 균일하게 올리자 그 치우침이 쌓여(순 속도 합 -1657) 그래프 전체가 원점에서 (-299, 98)까지 흘러갔다. `d3.forceCenter`처럼 매 tick 무게중심을 원점으로 되돌린다 → (0, 0) 유지 측정
+- **노드 모양**: `nodeSize` = `3 + √w·1.6` (leaf 4.6, w=24 → 10.8), 테두리는 zoom 무관 1px 머리카락 윤곽, 포커스 노드만 같은 색 glow(`shadowBlur`) + 얇은 링. centrality 비례 흰 테두리 제거
+- **라벨**: zoom ≥ 2.5면 모든 라벨 표시 (겹침은 기존 라벨 점유 격자가 거름)
+- **끝점 없는 edge 제거 (기존 버그)**: API edge 중 노드 목록에 없는 문서를 가리키는 것이 있으면 force-graph가 `node not found`로 **링크 전체를 버렸다** — 전체보기 모달에서 선이 하나도 안 그려지고 있었다. 링크 id(`e<원래 인덱스>`)는 하이라이트 계산과 맞물리므로 부여 후에 거른다
+
+### 검증
+
+- pytest: `test_graph_marks_only_user_positioned_nodes_as_pinned` 신규(RED→GREEN), 849 passed (MCP 1건은 아래 별건)
+- vitest: 290 passed — `seedForceNodes` 5건(리셋 후 재출발 포함), 확대 라벨 1건 신규. `nodeSize`/hit 테스트는 새 크기 스펙으로 갱신
+- 브라우저(vault 사본 + 현재 코드, 측정용 임시 hook은 제거): 드래그 시 군집이 따라오고 놓으면 전체 재배치, 무게중심 (0, 0) 유지, hover 시 비이웃 흐림 + glow, 다크/라이트, 전체보기 모달(동심원/force) 선 복구·`PAGEERR` 0건
+
+### 별건 (미처리)
+
+- 첫 로드 zoomToFit이 그래프보다 크게 잡혀 위쪽이 잘린다 (변경 전에도 동일, 72%) — "맞춤" 버튼으로는 정상
+- 메인 그래프에는 `layoutMode`가 전달되지 않는다 — 레이아웃 모드 선택은 전체보기 모달에만 적용 (`GraphPage.tsx`)
+- venv mcp가 2.0.0 — `UnexpectedToolError` 부재로 `test_mcp_tool_error_surfacing.py` 수집 에러. 핀 `mcp>=2.0`이 이를 허용해 `deps-check`도 통과한다
+
 ## 19. `make desktop-dev`가 dev 서버 대신 낡은 dist를 띄우던 문제 — §13 회귀
 
 §18 그래프 변경을 `make desktop-dev`에서 확인하려 했으나 화면이 바뀌지 않았다. webview에서 vite(5173)로 들어온 연결이 0이었다.
@@ -239,3 +273,30 @@ Raven의 MCP 실패 메시지는 전부 *에이전트가 읽고 스스로 고치
   - 릴리스, 기존 설정: 30 / 릴리스, 새 설정: **30** → §13 하얀 화면 재발 없음
   - dev, 새 설정: **0** → `devUrl`(vite) 사용
   - 수정 전 dev(실행 중이던 앱): 52 → 낡은 dist 임베드 확인
+
+## 20. 그래프 — 별자리 톤 (목차 바큇살 제거 + 옅은 선 + 허브만 빛남)
+
+사용자: "Obsidian은 신경망·별자리처럼 보이는데". 원인은 세 가지였다.
+
+- **목차 페이지가 거미줄을 만들었다**: 연결 수 1·2위가 `index_builder`의 자동 목차(`_index/journal` 81, `_index/concept` 54). 목차 7개가 **링크 595개 중 172개(29%)** — 한 점에서 수십 개 선이 뻗는 바큇살이 화면을 덮었다
+- 선이 점보다 도드라졌고, 타입 색 네 가지가 같은 비중이라 "분류 차트"로 읽혔다
+
+### 변경
+
+- **`isIndexPage`** (`render.ts`, 순수 함수): `content/index`·`content/_index/*` — 서버 `advice.py`/`db.py`가 목차를 빼는 규칙과 동일. `__canonical/*`는 목차가 아니다
+- **목차 링크**: 선 alpha 0.04·폭 0.5, 물리 장력 `0.2` (일반 `0.5`). 0.03은 목차에만 걸린 저널이 멀리 흩어졌고(맞춤 26%), 0.5는 다시 뭉쳤다 — 4단계 스크린샷 비교로 결정
+- **선**: `--graph-edge` 토큰 alpha 절반(테마 6곳), 폭 1.05→0.6(의미 관계 1.5→1.0). 포커스 중 물러나는 선 0.1→0.06 (라이트 테마에서 일반 선 0.11보다 진해지는 역전 방지)
+- **노드**: 목차 링크를 뺀 실제 연결 수 상위 4%(최소 6)를 허브로 — 허브만 원색 + 은은한 glow, 나머지는 타입 색을 `--graph-node-neutral`(신규 토큰)과 50% 섞어 차분하게. 목차 노드 자체도 45% 투명
+- **`mixHex`** (`render.ts`): 두 #rrggbb 혼합
+
+### 함께 고친 기존 버그 — 첫 로드 맞춤이 dev에서 한 번도 실행되지 않았다
+
+그래프 탭을 열면 항상 72%(force-graph 기본값)로 일부만 보였다. 로그로 추적한 결과 React StrictMode의 dev 재마운트가 원인이었다: 맞춤 timer를 예약한 직후 가짜 unmount가 timer를 취소하고, 재마운트된 effect는 `prevNodeCountRef`가 살아남아 "첫 로드"가 아니라고 보고 다시 예약하지 않았다. 게다가 데이터 effect가 첫 로드 직후 80ms 안에 3회 재실행되며 매번 cleanup에서 timer를 취소했다.
+
+- 새 그래프 인스턴스 생성 시 `prevNodeCountRef = 0` — 새 인스턴스는 카메라를 맞춘 적이 없다
+- 초기 맞춤 timer 취소는 데이터 effect cleanup이 아니라 언마운트(인스턴스 effect cleanup)와 사용자 클릭만
+- 물리가 첫 1~2초 동안 평형 크기로 펴지므로 1.5초 뒤 한 번 더 맞춤 (그 사이 노드 클릭 시 건너뜀)
+
+### 검증
+
+vitest 292 passed (`isIndexPage`·`mixHex` 신규). 브라우저(vault 사본): 다크/라이트 × 기본/확대 — 첫 로드에 전체가 화면에 맞음(38%), 허브 glow, 목차 바큇살 사라짐.

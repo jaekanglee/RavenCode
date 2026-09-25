@@ -263,45 +263,6 @@ export function GraphPage() {
     [dispatchFilters]
   );
 
-  // v0.7.127+: current scope뿐 아니라 all-scope도 vault별로 분배 저장.
-  // node.id는 current=slug, all-scope="{vault}:{slug}" 이므로 graphNodeMap의
-  // node.vault/node.slug를 우선 신뢰한다. fetch 실패는 silent.
-  const persistPositions = useCallback(
-    (positions: Record<string, { x: number; y: number }>) => {
-      if (!vault) return;
-      const byVault: Record<string, Record<string, { x: number; y: number }>> = {};
-      for (const [id, xy] of Object.entries(positions)) {
-        const node = graphNodeMap.get(id);
-        const targetVault = nodeVault(node ?? ({ id } as GraphNode), vault);
-        const slug = nodeSlug(node ?? ({ id } as GraphNode));
-        if (!targetVault || !slug) continue;
-        byVault[targetVault] ??= {};
-        byVault[targetVault][slug] = xy;
-      }
-      const entries = Object.entries(byVault).filter(([, pos]) => Object.keys(pos).length > 0);
-      if (entries.length === 0) return;
-      // 서버 저장은 fire-and-forget이라 로컬 graph 상태를 즉시 갱신해두지 않으면,
-      // 드래그 직후 노드 클릭(→ externalHighlightNodeId 변경)이 GraphCanvas의
-      // graphData 재생성 effect를 트리거해 옛 좌표(props 기준)로 되돌려버린다.
-      setGraph((prev) => ({
-        ...prev,
-        nodes: prev.nodes.map((n) =>
-          positions[n.id] ? { ...n, x: positions[n.id].x, y: positions[n.id].y } : n
-        ),
-      }));
-      void Promise.allSettled(
-        entries.map(([targetVault, pos]) =>
-          apiFetch(`/api/vaults/${encodeURIComponent(targetVault)}/graph/positions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ positions: pos }),
-          })
-        )
-      );
-    },
-    [vault, graphNodeMap]
-  );
-
   // v0.7.151+: "리셋" 버튼 — 드래그로 저장된 좌표(.graph_positions.json)를 모두
   // 지우고 서버 원본 ForceAtlas2 배치로 되돌린다. 되돌릴 수 없는 동작이라 확인을 거친다.
   const resetLayout = useCallback(() => {
@@ -525,7 +486,6 @@ export function GraphPage() {
             density="normal"
             focusDepthLimit={focusDepth}
             onFullscreen={() => setShowFullGraph(true)}
-            onPositionsChange={persistPositions}
             onResetLayout={resetLayout}
           />
         )}

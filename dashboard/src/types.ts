@@ -66,6 +66,8 @@ export interface GraphNode {
   weight?: number;
   x?: number;
   y?: number;
+  /** 사용자가 드래그로 저장한 좌표 — force 레이아웃에서 이 노드만 고정된다. */
+  pinned?: boolean;
   /** v0.6.15+ — Louvain-style community id (0..K-1) when ?community=modularity. */
   community?: number;
   folder_group?: string;

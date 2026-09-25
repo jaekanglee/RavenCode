@@ -438,3 +438,72 @@ export function resolveTypePalette(read: (name: string) => string): Record<strin
   }
   return palette;
 }
+
+export interface SeededForceNode extends GraphNode {
+  x: number;
+  y: number;
+  fx?: number;
+  fy?: number;
+  /** 이 시작 좌표를 만든 서버 좌표 — 다음 재조회 때 "서버 좌표가 바뀌었나" 판단용 */
+  __srcX?: number;
+  __srcY?: number;
+}
+
+/**
+ * force 레이아웃의 시작 좌표를 정한다. 사용자가 저장한 노드(서버 pinned)만 fx/fy로
+ * 고정하고, 나머지는 서버 ForceAtlas 좌표를 출발점으로만 써서 d3 시뮬레이션이
+ * 계속 움직이게 한다. 서버 좌표가 직전과 같은 노드는 직전 프레임 위치를 이어받아
+ * 필터·재조회 때 레이아웃이 튀지 않고, 서버 좌표가 바뀐 노드(레이아웃 리셋 등)는
+ * 새 좌표에서 다시 출발한다.
+ */
+export function seedForceNodes(
+  nodes: GraphNode[],
+  previous: Map<string, { x?: number; y?: number; __srcX?: number; __srcY?: number }>,
+  scale: number,
+  random: () => number = Math.random
+): SeededForceNode[] {
+  return nodes.map((n) => {
+    const hasPos = typeof n.x === "number" && typeof n.y === "number";
+    const src = { __srcX: n.x, __srcY: n.y };
+    if (hasPos && n.pinned === true) {
+      const x = (n.x as number) * scale;
+      const y = (n.y as number) * scale;
+      return { ...n, ...src, x, y, fx: x, fy: y };
+    }
+    const prev = previous.get(n.id);
+    if (
+      prev &&
+      Number.isFinite(prev.x) &&
+      Number.isFinite(prev.y) &&
+      prev.__srcX === n.x &&
+      prev.__srcY === n.y
+    ) {
+      return { ...n, ...src, x: prev.x as number, y: prev.y as number, fx: undefined, fy: undefined };
+    }
+    const x = hasPos ? (n.x as number) * scale : (random() - 0.5) * 16;
+    const y = hasPos ? (n.y as number) * scale : (random() - 0.5) * 16;
+    return { ...n, ...src, x, y, fx: undefined, fy: undefined };
+  });
+}
+
+/**
+ * index_builder가 자동 생성하는 목차 페이지(`content/index`, `content/_index/*`).
+ * 같은 타입 문서 전부로 링크를 뻗어 그래프에 바큇살 모양을 만들므로, 선을 흐리고
+ * 물리 장력을 약하게 준다. (서버 advice/lint도 같은 규칙으로 목차를 제외한다.)
+ */
+export function isIndexPage(slug: string): boolean {
+  return slug === "content/index" || slug.startsWith("content/_index/");
+}
+
+/** 두 #rrggbb 색을 t(0=a, 1=b) 비율로 섞는다. 형식이 다르면 a를 그대로 돌려준다. */
+export function mixHex(a: string, b: string, t: number): string {
+  const parse = (hex: string) => {
+    const m = hex.trim().replace("#", "").match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
+  };
+  const ca = parse(a);
+  const cb = parse(b);
+  if (!ca || !cb) return a;
+  const mixed = ca.map((v, i) => Math.round(v + (cb[i] - v) * t));
+  return `#${mixed.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}

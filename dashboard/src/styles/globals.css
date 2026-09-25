@@ -135,7 +135,9 @@
   --graph-node-glow: 0 0 0 1px rgba(59, 130, 246, 0.22), 0 0 14px rgba(59, 130, 246, 0.16);
   --graph-label-color: #0f172a;
   --graph-label-shadow: none;
-  --graph-edge: rgba(71, 85, 105, 0.22);
+  --graph-edge: rgba(71, 85, 105, 0.11);
+  /* 허브가 아닌 노드의 타입 색을 섞는 중립색 — 별자리 대비 (허브만 원색 + glow) */
+  --graph-node-neutral: #64748b;
   --graph-edge-highlight: rgba(109, 40, 217, 0.68);
   --graph-tooltip-bg: rgba(255, 255, 255, 0.96);
   --graph-tooltip-border: rgba(148, 163, 184, 0.42);
@@ -325,7 +327,7 @@ body {
   --graph-node-glow: 0 0 0 1px rgba(59, 130, 246, 0.22), 0 0 14px rgba(59, 130, 246, 0.16);
   --graph-label-color: var(--fg-ink);
   --graph-label-shadow: 0 1px 3px rgba(255, 255, 255, 0.92);
-  --graph-edge: rgba(100, 116, 139, 0.28);
+  --graph-edge: rgba(100, 116, 139, 0.14);
   --graph-edge-highlight: var(--fg-ink);
   --graph-tooltip-bg: var(--bg-surface);
   --graph-tooltip-border: var(--border-subtle);
@@ -406,7 +408,7 @@ body {
   --graph-type-journal: #22d3ee;
   --graph-type-issue: #c084fc;
   --graph-label-shadow: none;
-  --graph-edge: rgba(226, 232, 240, 0.34);
+  --graph-edge: rgba(226, 232, 240, 0.17);
   --graph-edge-highlight: rgba(221, 214, 254, 0.96);
   --graph-tooltip-bg: var(--slate-900);
   --graph-tooltip-border: var(--slate-700);
@@ -464,7 +466,7 @@ body {
   --code-inline-fg: var(--sky-300);
 
   --graph-bg: var(--slate-800);
-  --graph-edge: rgba(203, 213, 225, 0.42);
+  --graph-edge: rgba(203, 213, 225, 0.21);
 
   /* v0.7.59+ phase 2 alpha 토큰 — 다크 override (alpha 진하게, 다크모드 명도).
      라이트와 의미 일치 (Xdanger-bg-soft" = "약한 위험 배경") — 색/명도/alpha 모두 다크에 적합. */
@@ -556,7 +558,7 @@ body {
   --graph-type-journal: #22d3ee;
   --graph-type-issue: #c084fc;
   --graph-label-shadow: none;
-  --graph-edge: rgba(226, 232, 240, 0.34);
+  --graph-edge: rgba(226, 232, 240, 0.17);
   --graph-edge-highlight: rgba(221, 214, 254, 0.96);
   --graph-tooltip-bg: rgba(17, 24, 39, 0.95);
   --graph-tooltip-border: #374151;
@@ -646,7 +648,7 @@ html.dark {
   --graph-type-journal: #22d3ee;
   --graph-type-issue: #c084fc;
   --graph-label-shadow: none;
-  --graph-edge: rgba(226, 232, 240, 0.34);
+  --graph-edge: rgba(226, 232, 240, 0.17);
   --graph-edge-highlight: rgba(221, 214, 254, 0.96);
   --graph-tooltip-bg: rgba(17, 24, 39, 0.95);
   --graph-tooltip-border: #374151;

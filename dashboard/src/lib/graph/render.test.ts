@@ -7,9 +7,12 @@ import {
   computeTimelineLayout,
   createLabelMetricsCache,
   createLabelOccupancyGrid,
+  isIndexPage,
   isWithinViewport,
+  mixHex,
   resolveDisplayLabel,
   resolveTypePalette,
+  seedForceNodes,
   TYPE_COLOR_FALLBACK,
 } from "./render";
 import type { GraphNode } from "../../types";
@@ -237,5 +240,79 @@ describe("resolveTypePalette — 색 토큰화 (B2)", () => {
     for (const type of ["concept", "person", "tool", "comparison", "project", "rule", "query", "journal", "issue"]) {
       expect(palette[type]).toMatch(/^#[0-9a-f]{6}$/i);
     }
+  });
+});
+
+describe("seedForceNodes", () => {
+  const scale = 2;
+  const noRandom = () => 0.5;
+
+  it("사용자가 저장한 노드(pinned)만 고정하고 나머지는 시뮬레이션에 맡긴다", () => {
+    const seeded = seedForceNodes(
+      [
+        { id: "a", title: "A", x: 10, y: -5, pinned: true },
+        { id: "b", title: "B", x: 3, y: 4 },
+      ],
+      new Map(),
+      scale,
+      noRandom
+    );
+    expect(seeded[0]).toMatchObject({ x: 20, y: -10, fx: 20, fy: -10 });
+    expect(seeded[1]).toMatchObject({ x: 6, y: 8 });
+    expect(seeded[1].fx).toBeUndefined();
+    expect(seeded[1].fy).toBeUndefined();
+  });
+
+  it("서버 좌표가 그대로인 노드는 직전 프레임 위치를 이어받는다 (필터·재조회)", () => {
+    const previous = new Map([["a", { x: 100, y: 200, __srcX: 1, __srcY: 1 }]]);
+    const [node] = seedForceNodes([{ id: "a", title: "A", x: 1, y: 1 }], previous, scale, noRandom);
+    expect(node).toMatchObject({ x: 100, y: 200 });
+    expect(node.fx).toBeUndefined();
+  });
+
+  it("서버 좌표가 바뀐 노드(리셋 등)는 새 서버 좌표에서 다시 출발한다", () => {
+    const previous = new Map([["a", { x: 100, y: 200, fx: 100, fy: 200, __srcX: 50, __srcY: 100 }]]);
+    const [node] = seedForceNodes([{ id: "a", title: "A", x: 3, y: 4 }], previous, scale, noRandom);
+    expect(node).toMatchObject({ x: 6, y: 8 });
+    expect(node.fx).toBeUndefined();
+  });
+
+  it("고정 여부는 서버 pinned만 따른다 — 직전 프레임의 fx/fy는 이어받지 않는다", () => {
+    const previous = new Map([["a", { x: 100, y: 200, fx: 100, fy: 200, __srcX: 1, __srcY: 1 }]]);
+    const [node] = seedForceNodes([{ id: "a", title: "A", x: 1, y: 1 }], previous, scale, noRandom);
+    expect(node.fx).toBeUndefined();
+    const [pinned] = seedForceNodes(
+      [{ id: "a", title: "A", x: 1, y: 1, pinned: true }],
+      previous,
+      scale,
+      noRandom
+    );
+    expect(pinned).toMatchObject({ x: 2, y: 2, fx: 2, fy: 2 });
+  });
+
+  it("좌표가 없는 노드는 원점 근처에 뿌린다", () => {
+    const [node] = seedForceNodes([{ id: "c", title: "C" }], new Map(), scale, () => 1);
+    expect(node.x).toBe(8);
+    expect(node.y).toBe(8);
+    expect(node.fx).toBeUndefined();
+  });
+});
+
+describe("isIndexPage", () => {
+  it("index_builder가 만드는 목차 페이지만 목차로 본다", () => {
+    expect(isIndexPage("content/index")).toBe(true);
+    expect(isIndexPage("content/_index/journal")).toBe(true);
+    expect(isIndexPage("content/journal/2026-09-08-회의")).toBe(false);
+    expect(isIndexPage("content/__canonical/issue")).toBe(false);
+    expect(isIndexPage("content/indexing-guide")).toBe(false);
+  });
+});
+
+describe("mixHex", () => {
+  it("두 색을 비율대로 섞고, 형식이 다르면 원래 색을 돌려준다", () => {
+    expect(mixHex("#000000", "#ffffff", 0.5)).toBe("#808080");
+    expect(mixHex("#22c55e", "#64748b", 0)).toBe("#22c55e");
+    expect(mixHex("#22c55e", "#64748b", 1)).toBe("#64748b");
+    expect(mixHex("rgba(1,2,3,0.5)", "#64748b", 0.5)).toBe("rgba(1,2,3,0.5)");
   });
 });

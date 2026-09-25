@@ -9,9 +9,12 @@ import {
   computeTimelineLayout,
   createLabelMetricsCache,
   createLabelOccupancyGrid,
+  isIndexPage,
+  mixHex,
   isWithinViewport,
   resolveDisplayLabel,
   resolveTypePalette,
+  seedForceNodes,
   TIMELINE_TYPE_LANES,
   TYPE_COLOR_FALLBACK,
   withAlpha,
@@ -44,8 +47,6 @@ interface Props {
   /** all-vault 등 고밀도 그래프에서는 기본 라벨/엣지를 낮춰 지도 시인성을 우선한다.
    * v0.7.144+: all-scope 모드 제거되어 더 이상 사용처 없음 — 보존 (재사용 가능). */
   density?: "normal" | "dense";
-  /** 노드 드래그 종료 시점에 호출 */
-  onPositionsChange?: (positions: Record<string, { x: number; y: number }>) => void;
   /** "리셋" 버튼 클릭 시 호출 — 저장된 드래그 좌표를 버리고 서버 원본(ForceAtlas2) 배치로 되돌린다 */
   onResetLayout?: () => void;
   /** 캔버스 빈 공간 클릭 시 호출 */
@@ -91,10 +92,11 @@ export function nodeSize(
   importance?: number | null,
   totalNodes?: number
 ): number {
+  // 연결 수의 제곱근에 비례하는 작은 점 (Obsidian식) — 허브만 눈에 띄게 커진다.
   const w = Math.max(weight ?? 1, 1);
-  const multiplier = density === "dense" ? 4 : 6;
-  const base = density === "dense" ? 7 : 8;
-  const baseSize = base + Math.log2(1 + w) * multiplier;
+  const multiplier = density === "dense" ? 1.3 : 1.6;
+  const base = density === "dense" ? 2.5 : 3;
+  const baseSize = base + Math.sqrt(w) * multiplier;
 
   if (typeof importance === "number" && typeof totalNodes === "number" && totalNodes > 0) {
     // PageRank 값은 평균 1.0/N 이다.
@@ -255,7 +257,26 @@ const isJSDOM =
   (window.navigator.userAgent.includes("jsdom") ||
     window.navigator.userAgent.includes("Node.js"));
 
-const GRAPH_SCALE_MULTIPLIER = 2.8;
+// 서버 ForceAtlas 좌표 → 캔버스 좌표 배율. 아래 d3 힘의 평형 간격과 비슷하게 맞춰
+// 두어야 첫 로드 때 레이아웃이 폭발/수축하지 않고 제자리에서 자리만 잡는다.
+const GRAPH_SCALE_MULTIPLIER = 0.8;
+const FORCE_GRAVITY = 0.03;
+const FORCE_CHARGE = -200;
+const FORCE_CHARGE_DISTANCE_MAX = 800;
+const FORCE_LINK_DISTANCE = 40;
+// d3 기본값(1/min(양 끝 연결 수))은 촘촘한 vault에서 링크 하나가 1/20 힘밖에 못 내
+// 드래그해도 이웃이 안 따라오고 선만 늘어난다. Obsidian처럼 링크마다 같은 장력을 준다.
+const FORCE_LINK_STRENGTH = 0.5;
+// 목차 페이지 링크는 약하게 당긴다 — 목차 하나가 수십 개 문서를 한 점으로 끌어모아
+// 바큇살 모양을 만드는 것을 막되, 목차에만 걸린 문서(저널 등)가 멀리 흩어지지 않을
+// 만큼은 남긴다 (0.03은 흩어지고 0.5는 다시 뭉쳤다).
+const FORCE_INDEX_LINK_STRENGTH = 0.2;
+const LABEL_ALL_ZOOM = 2.5;
+const SETTLED_FIT_DELAY_MS = 1500;
+const HUB_TOP_RATIO = 0.04;
+const HUB_MIN_DEGREE = 6;
+// 허브가 아닌 점은 타입 색을 이 중립색 쪽으로 섞어 차분하게 둔다 (허브만 원색 + glow).
+const NODE_MUTE_RATIO = 0.5;
 const DIRECT_CLICK_PADDING_PX = 0;
 const DIRECT_MOUSE_HIT_RADIUS_PX = 0;
 const DIRECT_TOUCH_HIT_RADIUS_PX = 0;
@@ -335,6 +356,8 @@ export function shouldShowLabel(
 ): boolean {
   if (isFocused || isHighlighted) return true;
   if (scale < 0.7) return false;
+  // 충분히 확대하면 모든 라벨을 보여준다 — 겹침은 라벨 점유 격자가 걸러낸다.
+  if (scale >= LABEL_ALL_ZOOM) return true;
 
   const isIssue = node.type === "issue";
   if (isDense) {
@@ -401,7 +424,6 @@ export function GraphCanvas({
   externalHighlightType,
   onFullscreen,
   density = "normal",
-  onPositionsChange,
   onResetLayout,
   onBackgroundClick,
   variant = "default",
@@ -421,6 +443,8 @@ export function GraphCanvas({
   const initialFitTimerRef = useRef<number | null>(null);
   const initialFitCancelledRef = useRef(false);
   const graphNodesRef = useRef<any[]>([]);
+  // 직전 graphData가 force 배치였는지 — 다른 모드의 fx/fy를 드래그 고정으로 오인하지 않게 한다.
+  const lastSeededModeRef = useRef<GraphLayoutMode | null>(null);
   const pressStartRef = useRef<{ point: CanvasPoint; pointerType: "mouse" | "touch" } | null>(null);
   const pendingClickRef = useRef<{ nodeId: string; timeoutId: number; startedAt: number } | null>(null);
   const clickHandlersRef = useRef({
@@ -472,6 +496,8 @@ export function GraphCanvas({
   const resolvedEdgeColorRef = useRef<string>("rgba(148, 163, 184, 0.38)");
   const resolvedEdgeHighlightRef = useRef<string>("rgba(196, 181, 253, 0.94)");
   const resolvedEdgeFadedRef = useRef<string>("rgba(148, 163, 184, 0.04)");
+  const resolvedEdgeIndexRef = useRef<string>("rgba(148, 163, 184, 0.05)");
+  const resolvedNodeNeutralRef = useRef<string>("#64748b");
   const focusDepthMap = useMemo(
     () => computeFocusDepthMap(nodes, edges, focusNodeId, focusDepthLimit),
     [nodes, edges, focusNodeId, focusDepthLimit]
@@ -495,7 +521,9 @@ export function GraphCanvas({
       resolvedEdgeHighlightRef.current = style.getPropertyValue("--graph-edge-highlight").trim() || "rgba(196, 181, 253, 0.94)";
       // 포커스 중 물러나는 엣지 색도 1회 조립 — 이전에는 링크마다 매 프레임
       // withAlpha(정규식)를 호출했다.
-      resolvedEdgeFadedRef.current = withAlpha(resolvedEdgeColorRef.current, 0.1);
+      resolvedEdgeFadedRef.current = withAlpha(resolvedEdgeColorRef.current, 0.06);
+      resolvedEdgeIndexRef.current = withAlpha(resolvedEdgeColorRef.current, 0.04);
+      resolvedNodeNeutralRef.current = style.getPropertyValue("--graph-node-neutral").trim() || "#64748b";
       // B2: 문서 타입 색과 커뮤니티 구획 색을 CSS 변수에서 해석 (없으면 fallback).
       const readVar = (name: string) => style.getPropertyValue(name);
       syncTypePalette(readVar);
@@ -598,14 +626,60 @@ export function GraphCanvas({
 
     const graph = (ForceGraphConstructor as any)()(containerRef.current);
     graphInstanceRef.current = graph;
+    // 새 인스턴스는 카메라를 한 번도 맞춘 적이 없다 — 첫 데이터를 다시 "첫 로드"로 보게 한다.
+    // (StrictMode dev 재마운트에서 ref만 살아남아 초기 맞춤이 영영 건너뛰어지던 문제)
+    prevNodeCountRef.current = 0;
 
     // v0.7.149+: D3 center force를 제거하여 force-graph가 렌더 틱마다 중심을 (width/2, height/2)로
     // 강제 덮어쓰고 우측 하단으로 노드들을 끌어당기는 현상을 원천 차단.
     // charge 및 link 힘은 살려두어, 좌표가 고정되지 않은 신규 노드들이 겹치지 않고 흩어지도록 구성.
     graph.d3Force("center", null);
-    // 드래그 직후 연결 노드가 자연스럽게 안정화할 짧은 시간은 남긴다.
-    // 0ms면 native drag가 reset한 simulation이 첫 tick 전에 멈출 수 있다.
-    graph.cooldownTime(600);
+    // 살아 있는 물리 (Obsidian식): 원점으로 당기는 약한 중력 + 반발 + 링크 장력.
+    // center force와 달리 중력은 노드마다 원점 쪽 속도만 더하므로 화면 쏠림이 없고,
+    // 떨어진 섬들이 멀리 도망가지 않고 은하처럼 모인다.
+    let gravityNodes: any[] = [];
+    const gravity = Object.assign(
+      (alpha: number) => {
+        for (const n of gravityNodes) {
+          n.vx -= n.x * FORCE_GRAVITY * alpha;
+          n.vy -= n.y * FORCE_GRAVITY * alpha;
+        }
+      },
+      { initialize: (ns: any[]) => { gravityNodes = ns; } }
+    );
+    graph.d3Force("gravity", gravity);
+    // d3 link force는 연결 수가 적은 쪽 끝을 더 많이 움직여 운동량이 보존되지 않는다.
+    // 링크 장력을 균일하게 올리면 그 치우침이 쌓여 그래프 전체가 한쪽으로 흘러가므로,
+    // d3.forceCenter처럼 매 tick 무게중심을 원점으로 되돌린다 (고정 노드는 제외).
+    let recenterNodes: any[] = [];
+    const recenter = Object.assign(
+      () => {
+        if (recenterNodes.length === 0) return;
+        let mx = 0;
+        let my = 0;
+        for (const n of recenterNodes) {
+          mx += n.x;
+          my += n.y;
+        }
+        mx /= recenterNodes.length;
+        my /= recenterNodes.length;
+        for (const n of recenterNodes) {
+          if (n.fx != null) continue;
+          n.x -= mx;
+          n.y -= my;
+        }
+      },
+      { initialize: (ns: any[]) => { recenterNodes = ns; } }
+    );
+    graph.d3Force("recenter", recenter);
+    graph.d3Force("charge")?.strength(FORCE_CHARGE).distanceMax(FORCE_CHARGE_DISTANCE_MAX);
+    graph
+      .d3Force("link")
+      ?.distance(FORCE_LINK_DISTANCE)
+      .strength((l: any) => (l.__index ? FORCE_INDEX_LINK_STRENGTH : FORCE_LINK_STRENGTH));
+    // 낮은 감쇠 = 드래그하면 이웃이 출렁이며 따라오는 관성. 몇 초에 걸쳐 가라앉는다.
+    graph.d3VelocityDecay(0.3);
+    graph.cooldownTime(8000);
 
     // 인터랙션 기본 설정
     graph.enableZoomInteraction(true);
@@ -630,6 +704,10 @@ export function GraphCanvas({
     resizeObserver.observe(containerRef.current);
 
     return () => {
+      if (initialFitTimerRef.current !== null) {
+        window.clearTimeout(initialFitTimerRef.current);
+        initialFitTimerRef.current = null;
+      }
       resizeObserver.disconnect();
       if (graphInstanceRef.current) {
         graphInstanceRef.current._destructor?.();
@@ -647,18 +725,13 @@ export function GraphCanvas({
     let formattedNodes: any[] = [];
 
     if (layoutMode === "force") {
-      formattedNodes = nodes.map((n) => {
-        const hasPos = typeof n.x === "number" && typeof n.y === "number";
-        const scaledX = hasPos ? (n.x as number) * GRAPH_SCALE_MULTIPLIER : (Math.random() - 0.5) * 16;
-        const scaledY = hasPos ? (n.y as number) * GRAPH_SCALE_MULTIPLIER : (Math.random() - 0.5) * 16;
-        return {
-          ...n,
-          x: scaledX,
-          y: scaledY,
-          fx: hasPos ? scaledX : undefined,
-          fy: hasPos ? scaledY : undefined,
-        };
-      });
+      // 저장된 노드만 고정하고 나머지는 살아 있는 시뮬레이션에 맡긴다 (Obsidian식).
+      const previous = new Map<string, any>(
+        lastSeededModeRef.current === "force"
+          ? graphNodesRef.current.map((n) => [n.id, n])
+          : []
+      );
+      formattedNodes = seedForceNodes(nodes, previous, GRAPH_SCALE_MULTIPLIER);
     } else if (layoutMode === "concentric") {
       // 1) Concentric View: 특정 노드(또는 중요도가 가장 높은 노드)를 중심으로 N촌 동심원 배치
       const centerId =
@@ -847,6 +920,11 @@ export function GraphCanvas({
     // 링크 스타일(색 3종/점선/화살표 길이)은 여기서 1회 조립해 링크 객체에 붙인다.
     // force-graph의 accessor는 매 프레임 링크마다 호출되므로, 여기서 미리 만들어
     // 두지 않으면 정규식과 문자열 조립이 프레임당 E번 반복된다.
+    // 끝점이 노드 목록에 없는 edge가 하나라도 있으면 force-graph가 "node not found"로
+    // 링크 전체를 버린다 (전체보기 모달에서 선이 사라지고 물리가 덩어리로 뭉침).
+    // id(e<원래 인덱스>)는 하이라이트 계산과 맞물리므로 부여한 뒤에 거른다.
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const slugById = new Map(nodes.map((n) => [n.id, n.slug ?? n.id]));
     const formattedLinks = edges.map((e, idx) => {
       const relationType = e.relation_type;
       const arrowRelation =
@@ -862,11 +940,28 @@ export function GraphCanvas({
         __style: buildLinkStyle(e as never),
         __dash: relationType ? RELATION_DASHES[relationType] ?? [] : [],
         __arrowLength: arrowRelation ? 5.5 : 0,
+        __index:
+          isIndexPage(slugById.get(String(e.source)) ?? String(e.source)) ||
+          isIndexPage(slugById.get(String(e.target)) ?? String(e.target)),
       };
-    });
+    }).filter((l) => nodeIds.has(String(l.source)) && nodeIds.has(String(l.target)));
+
+    // 별자리 대비: 목차 링크를 뺀 실제 연결 수로 허브(상위 ~4%)를 골라 은은하게 빛낸다.
+    const degree = new Map<string, number>();
+    for (const l of formattedLinks) {
+      if (l.__index) continue;
+      for (const end of [String(l.source), String(l.target)]) degree.set(end, (degree.get(end) ?? 0) + 1);
+    }
+    const sortedDegrees = [...degree.values()].sort((a, b) => b - a);
+    const hubThreshold = Math.max(HUB_MIN_DEGREE, sortedDegrees[Math.floor(sortedDegrees.length * HUB_TOP_RATIO)] ?? 0);
+    for (const n of formattedNodes) {
+      n.__index = isIndexPage(n.slug ?? n.id);
+      n.__hub = !n.__index && (degree.get(n.id) ?? 0) >= hubThreshold;
+    }
 
     graph.graphData({ nodes: formattedNodes, links: formattedLinks });
     graphNodesRef.current = formattedNodes;
+    lastSeededModeRef.current = layoutMode;
 
     // A4: 페인트 루프가 프레임마다 다시 계산하던 것들을 여기서 1회 계산한다.
     communityLabelsRef.current = layoutMode === "domain" ? computeCommunityLabels(nodes) : new Map();
@@ -906,16 +1001,11 @@ export function GraphCanvas({
         requestRepaint();
       })
       .onNodeDragEnd((node: any) => {
+        // Obsidian식: 놓으면 풀어서 전체가 다시 자리를 잡게 한다. 저장된 좌표로
+        // 고정돼 있던 노드도 이번 세션에서는 풀린다 (저장 좌표 삭제는 "리셋").
         if (layoutMode !== "force") return;
-        if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
-        node.fx = node.x;
-        node.fy = node.y;
-        onPositionsChange?.({
-          [node.id]: {
-            x: node.x / GRAPH_SCALE_MULTIPLIER,
-            y: node.y / GRAPH_SCALE_MULTIPLIER,
-          },
-        });
+        node.fx = undefined;
+        node.fy = undefined;
       })
       // v0.7.139+: zoom 변경 시 배율 표시 갱신 (pinch / ctrl+wheel / programmatic).
       .onZoom(({ k }: { k: number }) => {
@@ -1073,12 +1163,14 @@ export function GraphCanvas({
         }
 
         if (isHighlighted) return resolvedEdgeHighlightRef.current;
+        if (link.__index) return resolvedEdgeIndexRef.current;
         return hasFocusActive ? resolvedEdgeFadedRef.current : resolvedEdgeColorRef.current;
       })
       .linkWidth((link: any) => {
         const isHighlighted = highlightLinksRef.current.has(link.id) || link.broken_dependency;
         const isSemantic = !!link.relation_type;
-        const baseWidth = isSemantic ? 1.5 : 1.05;
+        // 선은 점(별) 사이의 희미한 흔적 — 강조된 선만 또렷하게.
+        const baseWidth = link.__index ? 0.5 : isSemantic ? 1 : 0.6;
         return isHighlighted ? baseWidth + 1.15 : baseWidth;
       })
       .linkLineDash((link: any) => link.__dash ?? [])
@@ -1200,13 +1292,7 @@ export function GraphCanvas({
         isHovered || isPersistent || externalHighlightIdRef.current === node.id;
       const fillOpacity = nodeOpacity(node.freshness);
 
-      // 1. 노드 본체 (원) — zoom 보정 없이 픽셀 그대로 그린다.
-      // force-graph의 `nodeVal/nodeRelSize` 자동 보정에 의존하지 않으므로
-      // baseSize를 zoom-out에서도 가독성 있게 키웠다 (옛 공식 대비 1.7~2배).
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, renderedSize, 0, 2 * Math.PI, false);
-
-      // 흐릿한 비포커스 처리
+      // 1. 노드 본체 — 테두리 없는 평면 점. 포커스된 노드만 같은 색으로 은은하게 빛난다.
       const hasFocusActive = isFocusActive() || currentHover;
       const baseAlpha = hasFocusActive && !isFocused && !isHighlighted
         ? fillOpacity * 0.28
@@ -1214,37 +1300,41 @@ export function GraphCanvas({
       const depthAlpha = typeof focusDepth === "number"
         ? Math.max(0.28, 1 - focusDepth * 0.18)
         : (depthMap.size > 0 ? 0.72 : 1);
-      ctx.fillStyle = hexToRgba(nodeColor(node.type), baseAlpha);
+      const typeColor = nodeColor(node.type);
+      const color = !node.__hub && !isFocused && !isHighlighted
+        ? mixHex(typeColor, resolvedNodeNeutralRef.current, NODE_MUTE_RATIO)
+        : typeColor;
+      const indexAlpha = node.__index && !isFocused ? 0.45 : 1;
+
+      ctx.save();
+      if (isFocused) {
+        // shadowBlur는 화면 픽셀 단위라 zoom과 무관하게 같은 크기로 번진다.
+        ctx.shadowColor = hexToRgba(color, 0.85);
+        ctx.shadowBlur = 18;
+      } else if (node.__hub && !hasFocusActive) {
+        ctx.shadowColor = hexToRgba(color, 0.55);
+        ctx.shadowBlur = 12;
+      }
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, renderedSize, 0, 2 * Math.PI, false);
+      ctx.fillStyle = hexToRgba(color, baseAlpha * indexAlpha);
       ctx.globalAlpha = depthAlpha;
       ctx.fill();
+      ctx.restore();
+
+      // 겹친 점끼리 경계가 뭉개지지 않게 하는 머리카락 두께 윤곽 (zoom 무관 1px).
+      ctx.lineWidth = 1 / scale;
+      ctx.strokeStyle = resolvedNodeOutlineRef.current;
+      ctx.globalAlpha = hasFocusActive && !isFocused && !isHighlighted ? 0.3 : 1;
+      ctx.stroke();
       ctx.globalAlpha = 1;
 
-      // 테두리 선 굵기 및 스타일을 centrality에 매핑
-      let borderThickness = isFocused ? 2 : 0.8;
-      if (node.centrality !== undefined && node.centrality !== null) {
-        const centralityFactor = Math.min(node.centrality, 0.2) / 0.2;
-        borderThickness += centralityFactor * 2.5;
-      }
-      ctx.lineWidth = borderThickness / scale;
-
-      let strokeStyle = resolvedNodeOutlineRef.current;
-      if (isFocused) {
-        strokeStyle = resolvedEdgeHighlightRef.current;
-      } else if (isHighlighted) {
-        strokeStyle = "rgba(255, 255, 255, 0.72)";
-      } else if (node.centrality !== undefined && node.centrality !== null && node.centrality > 0.01) {
-        const alpha = Math.min(0.2 + (node.centrality * 10), 0.95);
-        strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-      }
-      ctx.strokeStyle = strokeStyle;
-      ctx.stroke();
-
-      // 이중 링 효과 (focused)
+      // 포커스 링 — 점과 살짝 띄운 얇은 고리
       if (isFocused) {
         ctx.beginPath();
-        ctx.arc(node.x, node.y, renderedSize + 2.5 / scale, 0, 2 * Math.PI, false);
+        ctx.arc(node.x, node.y, renderedSize + 3 / scale, 0, 2 * Math.PI, false);
         ctx.strokeStyle = resolvedEdgeHighlightRef.current;
-        ctx.lineWidth = 0.8 / scale;
+        ctx.lineWidth = 1.5 / scale;
         ctx.stroke();
       }
 
@@ -1589,6 +1679,11 @@ export function GraphCanvas({
             // 초기 맞춤은 애니메이션하지 않는다. 선택 직후 detail 패널이 캔버스 폭을
             // 바꾸는 동안 진행 중인 zoomToFit 트윈이 카메라를 다시 덮어쓰지 않게 한다.
             g.zoomToFit(0, 96);
+            // 살아 있는 물리가 첫 1~2초 동안 서버 좌표에서 평형 크기로 펴지므로,
+            // 자리 잡은 뒤 한 번 더 맞춘다. 사용자가 그 사이 조작했으면 건너뛴다.
+            initialFitTimerRef.current = window.setTimeout(() => {
+              initialFitTimerRef.current = null;
+            }, SETTLED_FIT_DELAY_MS);
           } else if (retryCount < 10) {
             // 크기 대기 재시도 (최대 10회, 1초)
             initialFitTimerRef.current = window.setTimeout(() => tryFit(retryCount + 1), 100);
@@ -1601,10 +1696,10 @@ export function GraphCanvas({
     prevNodeCountRef.current = nodes.length;
 
     return () => {
-      if (initialFitTimerRef.current !== null) {
-        window.clearTimeout(initialFitTimerRef.current);
-        initialFitTimerRef.current = null;
-      }
+      // 초기 맞춤 timer는 여기서 취소하지 않는다. 첫 로드 직후 이 effect가 콜백 deps
+      // 변화로 연달아 재실행되는데(측정: 80ms 안에 3회), 그때마다 취소하면 firstLoad가
+      // 아닌 재실행은 다시 예약하지 않아 초기 맞춤이 한 번도 실행되지 않았다.
+      // 취소는 언마운트(인스턴스 생성 effect의 cleanup)와 사용자 클릭이 맡는다.
       container?.removeEventListener("mousedown", handleMouseDown);
       container?.removeEventListener("touchstart", handleTouchStart);
       container?.removeEventListener("mouseup", handleMouseUp);
@@ -1623,8 +1718,7 @@ export function GraphCanvas({
     // 좌표를 다시 깔아야 하므로, 그 모드에서만 중심 id를 dep으로 남긴다.
     concentricCenterDep,
     onNodeInspect,
-    onPositionsChange,
-    layoutMode,
+      layoutMode,
   ]);
 
   const fitGraph = () => {

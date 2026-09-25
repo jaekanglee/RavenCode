@@ -133,6 +133,22 @@ def test_graph_positions_roundtrip_and_reset(client, isolated_vault):
     assert not positions_file.exists() or json.loads(positions_file.read_text())["positions"] == {}
 
 
+def test_graph_marks_only_user_positioned_nodes_as_pinned(client, isolated_vault):
+    """드래그로 저장한 노드만 pinned — 나머지는 dashboard 물리 시뮬레이션이 움직인다."""
+    name = isolated_vault.meta.name
+    client.post(
+        f"/api/vaults/{name}/graph/positions",
+        json={"positions": {"content/linked": {"x": 1.5, "y": -2.0}}},
+    )
+    nodes = client.get(f"/api/vaults/{name}/graph").json()["nodes"]
+    pinned = {n["slug"] for n in nodes if n.get("pinned")}
+    assert pinned == {"content/linked"}
+
+    client.delete(f"/api/vaults/{name}/graph/positions")
+    nodes = client.get(f"/api/vaults/{name}/graph").json()["nodes"]
+    assert not any(n.get("pinned") for n in nodes)
+
+
 def test_export_writes_static_json_to_out_dir(client, isolated_vault, tmp_path):
     out_dir = tmp_path / "export-out"
     resp = client.post(

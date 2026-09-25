@@ -12,7 +12,7 @@ describe("GraphCanvas direct click hit detection", () => {
         { id: "a", x: 100, y: 100, weight: 1 },
         { id: "b", x: 140, y: 100, weight: 8 },
       ],
-      { x: 132, y: 100 },
+      { x: 134, y: 100 },
       "normal"
     );
 
@@ -20,11 +20,11 @@ describe("GraphCanvas direct click hit detection", () => {
   });
 
   it("matches the visual node circle instead of adding a large invisible halo", () => {
-    // Node size at weight 1 is 14. With zero padding and multiplier=1,
+    // Node size at weight 1 is 4.6. With zero padding and multiplier=1,
     // hit detection should follow the actual drawn node radius exactly.
     const edgeHit = findClosestNodeHit(
       [{ id: "a", x: 100, y: 100, weight: 1 }],
-      { x: 114, y: 100 },
+      { x: 104.5, y: 100 },
       "normal",
       0,
       1
@@ -33,7 +33,7 @@ describe("GraphCanvas direct click hit detection", () => {
 
     const justOutside = findClosestNodeHit(
       [{ id: "a", x: 100, y: 100, weight: 1 }],
-      { x: 115, y: 100 },
+      { x: 104.7, y: 100 },
       "normal",
       0,
       1
@@ -44,8 +44,8 @@ describe("GraphCanvas direct click hit detection", () => {
   it("does not make touch targets larger than the visible node circle", () => {
     const nodes = [{ id: "a", x: 100, y: 100, weight: 1 }];
 
-    expect(findClosestNodeHit(nodes, { x: 114, y: 100 }, "normal", 0, 1, 0)?.id).toBe("a");
-    expect(findClosestNodeHit(nodes, { x: 115, y: 100 }, "normal", 0, 1, 0)).toBeNull();
+    expect(findClosestNodeHit(nodes, { x: 104.5, y: 100 }, "normal", 0, 1, 0)?.id).toBe("a");
+    expect(findClosestNodeHit(nodes, { x: 104.7, y: 100 }, "normal", 0, 1, 0)).toBeNull();
   });
 
   it("uses fx/fy when live force-graph nodes have no stable x/y yet", () => {
@@ -125,6 +125,13 @@ describe("GraphCanvas direct click hit detection", () => {
       expect(shouldShowLabel(conceptNodeWeight3, 1.1, false, false, false)).toBe(true);
       // Weight 1 never shows unless focused/highlighted
       expect(shouldShowLabel(conceptNodeWeight1, 1.5, false, false, false)).toBe(false);
+    });
+
+    it("shows every label once zoomed in close (Obsidian-style)", () => {
+      const leaf = { type: "concept", weight: 1 };
+      expect(shouldShowLabel(leaf, 2.4, false, false, false)).toBe(false);
+      expect(shouldShowLabel(leaf, 2.5, false, false, false)).toBe(true);
+      expect(shouldShowLabel(leaf, 2.5, true, false, false)).toBe(true);
     });
   });
 });
