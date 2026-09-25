@@ -35,7 +35,10 @@ echo "  ✓ Xcode Command Line Tools"
 echo "[2/4] Building Raven.app (bundle + cargo build + dmg)..."
 make -C "$REPO_ROOT" desktop-dmg
 
-DMG="$REPO_ROOT/desktop/src-tauri/target/release/bundle/dmg/Raven_0.1.0_aarch64.dmg"
+# make-dmg.sh와 같은 출처(tauri.conf.json)에서 버전을 읽는다. 0.1.0 하드코딩 탓에
+# 버전을 올린 뒤로는 빌드가 끝나도 "DMG not found"로 설치가 멈췄다.
+VERSION="$(python3 -c "import json;print(json.load(open('$REPO_ROOT/desktop/src-tauri/tauri.conf.json'))['version'])")"
+DMG="$REPO_ROOT/desktop/src-tauri/target/release/bundle/dmg/Raven_${VERSION}_aarch64.dmg"
 [ -f "$DMG" ] || { echo "❌ DMG not found: $DMG"; exit 1; }
 
 echo "[3/4] Quitting any running Raven instance..."
