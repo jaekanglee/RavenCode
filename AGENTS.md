@@ -109,7 +109,8 @@ SCHEMA.md   → 데이터 계약 (frontmatter/type/tag/wikilink/raw 권한/lint)
 TOOLS.md    → MCP 도구 surface (도구 목록 + 입출력 schema)
 ```
 
-→ **vault 운영 지침, 에이전트 행동 철학, 판단 프레임워크는 Raven 영역 ❌**. 각 vault owner + 외부 에이전트 프로필이 합의하여 관리.
+→ **vault 운영 지침, 에이전트 행동 철학, 판단 프레임워크의 _내용_ 은 Raven 영역 ❌**. 각 vault owner + 외부 에이전트 프로필이 합의하여 관리.
+→ 단, Raven은 사용자가 쓴 지침을 둘 **자리**(`_meta/policy/VAULT-POLICY.md`)와 **전달 경로**(MCP `wiki_get_policy`)는 제공한다. 내용을 생성·동기화·신선도 검사하지 않는다 (`_meta/decisions/adr-2026-09-25-vault-policy-slot-and-mcp-delivery.md`).
 → Lite bootstrap은 위 2종만 자동 복사. `log.md`는 선택적 (vault owner 결정).
 
 ### 4.5 Audience 라우팅 표 (v0.6.35+)
