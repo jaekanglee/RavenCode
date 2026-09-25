@@ -3,10 +3,6 @@ import ForceGraph from "force-graph";
 import type { GraphNode, GraphEdge } from "../types";
 import {
   buildLinkStyle,
-  computeCommunityLabels,
-  computeLayeredAxis,
-  computeTimelineGrid,
-  computeTimelineLayout,
   createLabelMetricsCache,
   createLabelOccupancyGrid,
   isIndexPage,
@@ -15,13 +11,11 @@ import {
   resolveDisplayLabel,
   resolveTypePalette,
   seedForceNodes,
-  TIMELINE_TYPE_LANES,
   TYPE_COLOR_FALLBACK,
   withAlpha,
   type LabelMetricsCache,
   type LabelOccupancyGrid,
   type LinkStyle,
-  type TimelineGridPoint,
   type ViewportBounds,
 } from "../lib/graph/render";
 
@@ -54,12 +48,10 @@ interface Props {
   /** 그래프 캔버스의 용도 (기본형 vs 미니맵용) */
   variant?: "default" | "minimap";
   /** 그래프 시각화 레이아웃 모드 (기본 force-directed) */
-  layoutMode?: GraphLayoutMode;
   /** B3: 선택 노드로부터 몇 촌까지 강조/유지할지. 기본 3촌. */
   focusDepthLimit?: number;
 }
 
-export type GraphLayoutMode = "force" | "concentric" | "domain" | "timeline" | "layered";
 
 // SCHEMA 9종(v0.7.44+) — type별 노드 색상. 미분류/미인식 → default gray.
 // AGENTS.md §13.2: 색은 CSS 변수(--graph-type-<type>)를 1차 소스로 쓰고, 변수가
@@ -145,6 +137,31 @@ export function typeLabel(type: string | undefined): string {
   return TYPE_LABELS[type] ?? "";
 }
 
+// 포커스 중 물러난 노드의 최소 투명도 — 별자리 톤(중립색 혼합) 위에서도 점이 보이게.
+const DIM_NODE_ALPHA_MIN = 0.2;
+
+/**
+ * 노드 본체 투명도. 포커스 밖(dimmed)은 0.28배 + 깊이 밖 0.72배로 물러나되, 오래된
+ * 문서(freshness)까지 곱해져 0.065처럼 사라지지 않도록 DIM_NODE_ALPHA_MIN에서 멈춘다.
+ */
+export function computeNodeAlpha({
+  fillOpacity,
+  dimmed,
+  focusDepth,
+  depthMapSize,
+}: {
+  fillOpacity: number;
+  dimmed: boolean;
+  focusDepth: number | undefined;
+  depthMapSize: number;
+}): number {
+  const depthAlpha = typeof focusDepth === "number"
+    ? Math.max(0.28, 1 - focusDepth * 0.18)
+    : (depthMapSize > 0 ? 0.72 : 1);
+  if (!dimmed) return fillOpacity * depthAlpha;
+  return Math.max(DIM_NODE_ALPHA_MIN, fillOpacity * 0.28 * depthAlpha);
+}
+
 export function nodeOpacity(freshness: number | null | undefined): number {
   if (typeof freshness !== "number" || Number.isNaN(freshness)) return 1;
   const normalized = Math.max(0, Math.min(freshness, 1));
@@ -198,58 +215,6 @@ export function computeFocusDepthMap(
   }
 
   return depthMap;
-}
-
-export function computeLayeredLayout(nodes: GraphNode[]): Record<string, { x: number; y: number }> {
-  const layers = new Map<number, GraphNode[]>();
-  let minLayer = Number.POSITIVE_INFINITY;
-  let maxLayer = Number.NEGATIVE_INFINITY;
-
-  nodes.forEach((node) => {
-    const layerValue = typeof node.layer === "number" && Number.isFinite(node.layer)
-      ? node.layer
-      : 0;
-    const bucket = Math.max(0, Math.round(layerValue));
-    minLayer = Math.min(minLayer, bucket);
-    maxLayer = Math.max(maxLayer, bucket);
-    const group = layers.get(bucket) ?? [];
-    group.push(node);
-    layers.set(bucket, group);
-  });
-
-  if (!Number.isFinite(minLayer) || !Number.isFinite(maxLayer)) {
-    return {};
-  }
-
-  const xStart = -430;
-  const xEnd = 430;
-  const layerSpan = Math.max(1, maxLayer - minLayer);
-  const layerCoords: Record<string, { x: number; y: number }> = {};
-
-  [...layers.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .forEach(([layer, group]) => {
-      const ratio = (layer - minLayer) / layerSpan;
-      const x = xStart + ratio * (xEnd - xStart);
-      const sortedGroup = [...group].sort((a, b) => {
-        const importanceDiff = (b.importance ?? 0) - (a.importance ?? 0);
-        if (importanceDiff !== 0) return importanceDiff;
-        return a.id.localeCompare(b.id);
-      });
-      const count = sortedGroup.length;
-      const spacing = Math.min(90, Math.max(42, 340 / Math.max(1, count)));
-
-      sortedGroup.forEach((node, idx) => {
-        const offsetIndex = idx - (count - 1) / 2;
-        const curvature = count > 1 ? Math.sin((idx / Math.max(1, count - 1)) * Math.PI) : 0;
-        layerCoords[node.id] = {
-          x,
-          y: offsetIndex * spacing + curvature * 18,
-        };
-      });
-    });
-
-  return layerCoords;
 }
 
 const isJSDOM =
@@ -391,13 +356,6 @@ function hexToRgba(hex: string, alpha: number): string {
 
 
 
-// Louvain community id별 구획 색 — 구조적 다양성 팔레트(AGENTS.md §13.2 예외).
-// GraphCanvas onRenderFramePre의 domain 뷰 구획(원)과 대표 라벨에 쓰인다.
-// CSS 변수 --graph-community-0..9가 있으면 그 값이 우선한다.
-const COMMUNITY_COLOR_FALLBACK = [
-  "#3b82f6", "#ef4444", "#a855f7", "#10b981", "#f59e0b",
-  "#ec4899", "#14b8a6", "#6366f1", "#8b5cf6", "#f97316",
-];
 const GRAPH_LABEL_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const HUD_LABEL_FONT = GRAPH_LABEL_FONT;
 const HUD_LABEL_BASE_SIZE = 17; // 더 크게 (14 -> 17)
@@ -427,7 +385,6 @@ export function GraphCanvas({
   onResetLayout,
   onBackgroundClick,
   variant = "default",
-  layoutMode = "force",
   focusDepthLimit = DEFAULT_FOCUS_DEPTH,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -443,8 +400,6 @@ export function GraphCanvas({
   const initialFitTimerRef = useRef<number | null>(null);
   const initialFitCancelledRef = useRef(false);
   const graphNodesRef = useRef<any[]>([]);
-  // 직전 graphData가 force 배치였는지 — 다른 모드의 fx/fy를 드래그 고정으로 오인하지 않게 한다.
-  const lastSeededModeRef = useRef<GraphLayoutMode | null>(null);
   const pressStartRef = useRef<{ point: CanvasPoint; pointerType: "mouse" | "touch" } | null>(null);
   const pendingClickRef = useRef<{ nodeId: string; timeoutId: number; startedAt: number } | null>(null);
   const clickHandlersRef = useRef({
@@ -470,10 +425,6 @@ export function GraphCanvas({
   const labelMetricsCacheRef = useRef<LabelMetricsCache>(createLabelMetricsCache());
   const labelGridRef = useRef<LabelOccupancyGrid>(createLabelOccupancyGrid(LABEL_GRID_CELL_PX));
   const viewportRef = useRef<ViewportBounds | null>(null);
-  const communityLabelsRef = useRef<Map<number, string>>(new Map());
-  const communityPaletteRef = useRef<string[]>(COMMUNITY_COLOR_FALLBACK);
-  const timelineGridRef = useRef<TimelineGridPoint[]>([]);
-  const layeredAxisRef = useRef<number[]>([]);
   // A3: 하이라이트 3종은 ref로 읽는다 — 클릭/호버가 데이터 동기화 effect를
   // 재실행하지 않게 해서 graphData() 재설정과 d3 리히트를 막는다.
   // 포커스 깊이 맵도 ref로 읽는다 — 깊이 슬라이더(B3)와 선택 변경이 데이터
@@ -503,11 +454,6 @@ export function GraphCanvas({
     [nodes, edges, focusNodeId, focusDepthLimit]
   );
 
-  // concentric 뷰에서만 선택 노드가 좌표 재산출을 유발한다 (A3 deps 참조).
-  const concentricCenterDep =
-    layoutMode === "concentric"
-      ? (externalHighlightNodeId ?? persistentHighlightNodeId ?? null)
-      : null;
 
   // DOM Container 변경 및 테마 변경 시 Computed Style 캐싱
   useEffect(() => {
@@ -527,9 +473,6 @@ export function GraphCanvas({
       // B2: 문서 타입 색과 커뮤니티 구획 색을 CSS 변수에서 해석 (없으면 fallback).
       const readVar = (name: string) => style.getPropertyValue(name);
       syncTypePalette(readVar);
-      communityPaletteRef.current = COMMUNITY_COLOR_FALLBACK.map(
-        (fallback, index) => readVar(`--graph-community-${index}`).trim() || fallback
-      );
     } catch (e) {
       // fallback
     }
@@ -721,201 +664,9 @@ export function GraphCanvas({
     const graph = graphInstanceRef.current;
     if (!graph) return;
 
-    // layoutMode에 따라 노드 배치 좌표를 실시간 산출
-    let formattedNodes: any[] = [];
-
-    if (layoutMode === "force") {
-      // 저장된 노드만 고정하고 나머지는 살아 있는 시뮬레이션에 맡긴다 (Obsidian식).
-      const previous = new Map<string, any>(
-        lastSeededModeRef.current === "force"
-          ? graphNodesRef.current.map((n) => [n.id, n])
-          : []
-      );
-      formattedNodes = seedForceNodes(nodes, previous, GRAPH_SCALE_MULTIPLIER);
-    } else if (layoutMode === "concentric") {
-      // 1) Concentric View: 특정 노드(또는 중요도가 가장 높은 노드)를 중심으로 N촌 동심원 배치
-      const centerId =
-        externalHighlightNodeId && nodes.some(n => n.id === externalHighlightNodeId)
-          ? externalHighlightNodeId
-          : (persistentHighlightNodeId && nodes.some(n => n.id === persistentHighlightNodeId)
-            ? persistentHighlightNodeId
-            : (nodes.length > 0
-              ? [...nodes].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))[0].id
-              : ""));
-
-      // Adjacency 빌드 (무방향)
-      const adj: Record<string, string[]> = {};
-      nodes.forEach(n => { adj[n.id] = []; });
-      edges.forEach(e => {
-        const u = typeof e.source === "object" ? (e.source as any).id : e.source;
-        const v = typeof e.target === "object" ? (e.target as any).id : e.target;
-        if (adj[u] && adj[v]) {
-          if (!adj[u].includes(v)) adj[u].push(v);
-          if (!adj[v].includes(u)) adj[v].push(u);
-        }
-      });
-
-      // BFS 최단거리 계산
-      const dists: Record<string, number> = {};
-      nodes.forEach(n => { dists[n.id] = 999999; });
-
-      if (centerId && adj[centerId]) {
-        dists[centerId] = 0;
-        const queue = [centerId];
-        let head = 0;
-        while (head < queue.length) {
-          const u = queue[head++];
-          const currentDist = dists[u];
-          for (const v of adj[u]) {
-            if (dists[v] === 999999) {
-              dists[v] = currentDist + 1;
-              queue.push(v);
-            }
-          }
-        }
-      }
-
-      // 거리 그룹화
-      const distanceGroups: Record<number, string[]> = {};
-      nodes.forEach(n => {
-        const d = dists[n.id];
-        distanceGroups[d] ??= [];
-        distanceGroups[d].push(n.id);
-      });
-
-      const nodeCoords: Record<string, { x: number; y: number }> = {};
-      if (centerId) {
-        nodeCoords[centerId] = { x: 0, y: 0 };
-      }
-
-      const sortedDistances = Object.keys(distanceGroups)
-        .map(Number)
-        .filter(d => d > 0 && d !== 999999)
-        .sort((a, b) => a - b);
-
-      sortedDistances.forEach((d) => {
-        const group = distanceGroups[d];
-        const count = group.length;
-        const radius = d * 180;
-        group.forEach((nodeId, idx) => {
-          const theta = (2 * Math.PI * idx) / count;
-          nodeCoords[nodeId] = {
-            x: radius * Math.cos(theta),
-            y: radius * Math.sin(theta),
-          };
-        });
-      });
-
-      const disconnected = distanceGroups[999999] || [];
-      if (disconnected.length > 0) {
-        const maxD = sortedDistances.length > 0 ? sortedDistances[sortedDistances.length - 1] : 0;
-        const radius = (maxD + 1.2) * 190;
-        disconnected.forEach((nodeId, idx) => {
-          const theta = (2 * Math.PI * idx) / disconnected.length;
-          nodeCoords[nodeId] = {
-            x: radius * Math.cos(theta),
-            y: radius * Math.sin(theta),
-          };
-        });
-      }
-
-      formattedNodes = nodes.map((n) => {
-        const coord = nodeCoords[n.id] || { x: 0, y: 0 };
-        return {
-          ...n,
-          x: coord.x,
-          y: coord.y,
-          fx: coord.x,
-          fy: coord.y,
-        };
-      });
-    } else if (layoutMode === "domain") {
-      // 2) Domain View: Louvain community ID별 노드 분산 배치
-      const communities: Record<number, string[]> = {};
-      nodes.forEach((n) => {
-        const c = n.community ?? 0;
-        communities[c] ??= [];
-        communities[c].push(n.id);
-      });
-
-      const communityIds = Object.keys(communities).map(Number).sort((a, b) => a - b);
-      const K = communityIds.length;
-
-      const centerCoords: Record<number, { x: number; y: number }> = {};
-      if (K <= 1) {
-        centerCoords[communityIds[0] ?? 0] = { x: 0, y: 0 };
-      } else {
-        const ringRadius = Math.max(300, K * 75);
-        communityIds.forEach((cid, idx) => {
-          const theta = (2 * Math.PI * idx) / K;
-          centerCoords[cid] = {
-            x: ringRadius * Math.cos(theta),
-            y: ringRadius * Math.sin(theta),
-          };
-        });
-      }
-
-      const nodeCoords: Record<string, { x: number; y: number }> = {};
-      communityIds.forEach((cid) => {
-        const group = communities[cid];
-        const count = group.length;
-        const center = centerCoords[cid];
-        const clusterRadius = 45 + Math.sqrt(count) * 15;
-
-        group.forEach((nodeId, idx) => {
-          if (count === 1) {
-            nodeCoords[nodeId] = { x: center.x, y: center.y };
-          } else {
-            const theta = (2 * Math.PI * idx) / count;
-            nodeCoords[nodeId] = {
-              x: center.x + clusterRadius * Math.cos(theta),
-              y: center.y + clusterRadius * Math.sin(theta),
-            };
-          }
-        });
-      });
-
-      formattedNodes = nodes.map((n) => {
-        const coord = nodeCoords[n.id] || { x: 0, y: 0 };
-        return {
-          ...n,
-          x: coord.x,
-          y: coord.y,
-          fx: coord.x,
-          fy: coord.y,
-        };
-      });
-    } else if (layoutMode === "timeline") {
-      // 3) Timeline View: 작성일/수정일 기준 가로 축 정렬 배치.
-      // 좌표 산출은 lib/graph/render.ts의 computeTimelineLayout으로 옮겼다 —
-      // 이전 구현은 nodes.forEach 안에서 nodeTimes.find()를 돌려 O(n^2)였다.
-      const nodeCoords = computeTimelineLayout(nodes);
-      formattedNodes = nodes.map((n) => {
-        const coord = nodeCoords[n.id] || { x: 0, y: 0 };
-        return {
-          ...n,
-          x: coord.x,
-          y: coord.y,
-          fx: coord.x,
-          fy: coord.y,
-        };
-      });
-    } else if (layoutMode === "layered") {
-      // 4) Layered View: 분석된 layer 값을 가로축 깊이로 사용.
-      // Concentric가 "선택 중심으로부터의 거리"라면, layered는
-      // "그래프 전체에서 계산된 논리적 깊이"를 보여주는 별도 분석 뷰다.
-      const nodeCoords = computeLayeredLayout(nodes);
-      formattedNodes = nodes.map((n) => {
-        const coord = nodeCoords[n.id] || { x: 0, y: 0 };
-        return {
-          ...n,
-          x: coord.x,
-          y: coord.y,
-          fx: coord.x,
-          fy: coord.y,
-        };
-      });
-    }
+    // 저장된 노드만 고정하고 나머지는 살아 있는 시뮬레이션에 맡긴다 (Obsidian식).
+    const previous = new Map<string, any>(graphNodesRef.current.map((n) => [n.id, n]));
+    const formattedNodes: any[] = seedForceNodes(nodes, previous, GRAPH_SCALE_MULTIPLIER);
 
     // 링크 스타일(색 3종/점선/화살표 길이)은 여기서 1회 조립해 링크 객체에 붙인다.
     // force-graph의 accessor는 매 프레임 링크마다 호출되므로, 여기서 미리 만들어
@@ -961,12 +712,7 @@ export function GraphCanvas({
 
     graph.graphData({ nodes: formattedNodes, links: formattedLinks });
     graphNodesRef.current = formattedNodes;
-    lastSeededModeRef.current = layoutMode;
 
-    // A4: 페인트 루프가 프레임마다 다시 계산하던 것들을 여기서 1회 계산한다.
-    communityLabelsRef.current = layoutMode === "domain" ? computeCommunityLabels(nodes) : new Map();
-    timelineGridRef.current = layoutMode === "timeline" ? computeTimelineGrid(nodes) : [];
-    layeredAxisRef.current = layoutMode === "layered" ? computeLayeredAxis(nodes) : [];
     // 라벨 문자열 캐시는 노드 집합이 바뀌면 버린다 (제목 변경 반영).
     labelMetricsCacheRef.current = createLabelMetricsCache();
 
@@ -977,9 +723,8 @@ export function GraphCanvas({
     // pan/zoom 위치와 클릭 상태가 보존된다.
     recomputeHighlights(hoveredNodeRef.current, externalHighlightNodeId, edges);
 
-    // force layout에서만 드래그를 열어 노드 위치를 직접 조정할 수 있게 한다.
     // force-graph native drag가 fx/fy와 simulation reheat를 직접 처리한다.
-    graph.enableNodeDrag(layoutMode === "force");
+    graph.enableNodeDrag(true);
 
     // 이벤트 리스너 바인딩
     graph
@@ -1003,7 +748,6 @@ export function GraphCanvas({
       .onNodeDragEnd((node: any) => {
         // Obsidian식: 놓으면 풀어서 전체가 다시 자리를 잡게 한다. 저장된 좌표로
         // 고정돼 있던 노드도 이번 세션에서는 풀린다 (저장 좌표 삭제는 "리셋").
-        if (layoutMode !== "force") return;
         node.fx = undefined;
         node.fy = undefined;
       })
@@ -1294,12 +1038,12 @@ export function GraphCanvas({
 
       // 1. 노드 본체 — 테두리 없는 평면 점. 포커스된 노드만 같은 색으로 은은하게 빛난다.
       const hasFocusActive = isFocusActive() || currentHover;
-      const baseAlpha = hasFocusActive && !isFocused && !isHighlighted
-        ? fillOpacity * 0.28
-        : fillOpacity;
-      const depthAlpha = typeof focusDepth === "number"
-        ? Math.max(0.28, 1 - focusDepth * 0.18)
-        : (depthMap.size > 0 ? 0.72 : 1);
+      const nodeAlpha = computeNodeAlpha({
+        fillOpacity,
+        dimmed: !!hasFocusActive && !isFocused && !isHighlighted,
+        focusDepth,
+        depthMapSize: depthMap.size,
+      });
       const typeColor = nodeColor(node.type);
       const color = !node.__hub && !isFocused && !isHighlighted
         ? mixHex(typeColor, resolvedNodeNeutralRef.current, NODE_MUTE_RATIO)
@@ -1317,8 +1061,7 @@ export function GraphCanvas({
       }
       ctx.beginPath();
       ctx.arc(node.x, node.y, renderedSize, 0, 2 * Math.PI, false);
-      ctx.fillStyle = hexToRgba(color, baseAlpha * indexAlpha);
-      ctx.globalAlpha = depthAlpha;
+      ctx.fillStyle = hexToRgba(color, nodeAlpha * indexAlpha);
       ctx.fill();
       ctx.restore();
 
@@ -1465,138 +1208,7 @@ export function GraphCanvas({
       }
       labelGridRef.current.reset();
 
-      // 1. Domain View일 때 커뮤니티별 반투명 구획(Onion bound) 그리기.
-      // 커뮤니티 대표 라벨은 데이터 변경 시 1회 계산해둔 communityLabelsRef를 읽는다
-      // (이전 구현은 매 프레임 전 노드 제목을 정규식 토크나이즈 + 빈도 정렬했다).
-      if (layoutMode === "domain") {
-        const groupStats: Record<number, { xSum: number; ySum: number; count: number; xMin: number; xMax: number; yMin: number; yMax: number }> = {};
-        const currentNodes = graph.graphData().nodes;
-
-        currentNodes.forEach((node: any) => {
-          const c = node.community ?? 0;
-          if (!groupStats[c]) {
-            groupStats[c] = { xSum: 0, ySum: 0, count: 0, xMin: 99999, xMax: -99999, yMin: 99999, yMax: -99999 };
-          }
-          groupStats[c].xSum += node.x;
-          groupStats[c].ySum += node.y;
-          groupStats[c].count += 1;
-          if (node.x < groupStats[c].xMin) groupStats[c].xMin = node.x;
-          if (node.x > groupStats[c].xMax) groupStats[c].xMax = node.x;
-          if (node.y < groupStats[c].yMin) groupStats[c].yMin = node.y;
-          if (node.y > groupStats[c].yMax) groupStats[c].yMax = node.y;
-        });
-
-        ctx.save();
-        for (const cidStr in groupStats) {
-          const cid = Number(cidStr);
-          const stat = groupStats[cid];
-          if (stat.count === 0) continue;
-          const cx = stat.xSum / stat.count;
-          const cy = stat.ySum / stat.count;
-
-          const dx = stat.xMax - stat.xMin;
-          const dy = stat.yMax - stat.yMin;
-          const radius = Math.max(38, Math.hypot(dx, dy) / 2 + 35);
-
-          ctx.beginPath();
-          ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-          const color = communityPaletteRef.current[cid % communityPaletteRef.current.length];
-
-          // LOD 줌 연동: 줌 레벨에 따라 채우기 및 테두리 투명도 보정
-          const bgOpacity = Math.max(0.01, Math.min(0.06, (0.85 - scale) * 0.08));
-          const borderOpacity = Math.max(0.05, Math.min(0.24, (0.85 - scale) * 0.3));
-
-          ctx.fillStyle = hexToRgba(color, bgOpacity);
-          ctx.fill();
-          ctx.lineWidth = 0.8 / scale;
-          ctx.strokeStyle = hexToRgba(color, borderOpacity);
-          ctx.stroke();
-
-          // 축소 수준이 높을 때(scale < 0.85)만 대표 도메인 레이블을 투사한다.
-          if (scale < 0.85) {
-            const labelText = communityLabelsRef.current.get(cid) ?? `Community ${cid}`;
-            const textOpacity = Math.min(0.75, (0.85 - scale) * 1.15);
-            const fontSize = Math.max(10, Math.min(14, 14 - scale * 4));
-
-            ctx.save();
-            ctx.font = `600 ${fontSize / scale}px ${HUD_LABEL_FONT}`;
-            ctx.fillStyle = color;
-            ctx.globalAlpha = textOpacity;
-            ctx.textAlign = "center";
-            ctx.shadowColor = "rgba(0, 0, 0, 0.4)";
-            ctx.shadowBlur = 4 / scale;
-            ctx.fillText(labelText, cx, cy - radius - 8 / scale);
-            ctx.restore();
-          }
-        }
-        ctx.restore();
-        return;
-      }
-
-      // 2. Timeline View 가이드 라인 — 축 격자는 데이터 변경 시 1회 계산해둔
-      // timelineGridRef를 읽는다 (이전 구현은 매 프레임 Math.min(...times) 스프레드와
-      // 격자 재생성을 수행했다).
-      if (layoutMode === "timeline" && nodes.length > 0) {
-        ctx.save();
-        ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
-        ctx.lineWidth = 0.8 / scale;
-        ctx.font = `600 ${10 / scale}px ${HUD_LABEL_FONT}`;
-        ctx.fillStyle = "rgba(148, 163, 184, 0.4)";
-
-        for (const [typeName, yVal] of Object.entries(TIMELINE_TYPE_LANES)) {
-          ctx.beginPath();
-          ctx.moveTo(-500, yVal);
-          ctx.lineTo(500, yVal);
-          ctx.stroke();
-
-          ctx.textAlign = "left";
-          ctx.fillText(typeLabel(typeName) || typeName, -485, yVal - 8 / scale);
-        }
-
-        ctx.strokeStyle = "rgba(148, 163, 184, 0.06)";
-        timelineGridRef.current.forEach(({ x, label }) => {
-          ctx.beginPath();
-          ctx.moveTo(x, -250);
-          ctx.lineTo(x, 200);
-          ctx.stroke();
-
-          ctx.textAlign = "center";
-          ctx.fillText(label, x, 215 / scale);
-        });
-        ctx.restore();
-        return;
-      }
-
-      if (layoutMode === "layered" && nodes.length > 0) {
-        const layers = layeredAxisRef.current;
-        if (layers.length === 0) return;
-
-        ctx.save();
-        ctx.strokeStyle = "rgba(148, 163, 184, 0.08)";
-        ctx.lineWidth = 0.9 / scale;
-        ctx.font = `600 ${10 / scale}px ${HUD_LABEL_FONT}`;
-        ctx.fillStyle = "rgba(148, 163, 184, 0.5)";
-        ctx.textAlign = "center";
-
-        const xStart = -430;
-        const xEnd = 430;
-        const span = Math.max(1, layers[layers.length - 1] - layers[0]);
-
-        layers.forEach((layer) => {
-          const ratio = (layer - layers[0]) / span;
-          const x = xStart + ratio * (xEnd - xStart);
-          ctx.beginPath();
-          ctx.moveTo(x, -260);
-          ctx.lineTo(x, 260);
-          ctx.stroke();
-          ctx.fillText(`Layer ${layer}`, x, 276 / scale);
-        });
-
-        ctx.restore();
-        return;
-      }
-
-      // 3. Force-directed 모드일 때 Centroid LOD HUD 라벨 연산
+      // 줌 아웃 시 폴더 그룹 중심에 LOD HUD 라벨
       const labelOpacity = Math.max(0, Math.min(1, (0.75 - scale) / 0.25));
       if (labelOpacity <= 0.05) return;
 
@@ -1613,6 +1225,9 @@ export function GraphCanvas({
         groupCoords[gid].ySum += node.y;
         groupCoords[gid].count += 1;
       }
+
+      // 폴더가 하나뿐이면 그래프 한가운데 같은 라벨 하나만 떠서 잡음이 된다.
+      if (Object.keys(groupCoords).length < 2) return;
 
       ctx.save();
       ctx.textAlign = "center";
@@ -1714,11 +1329,8 @@ export function GraphCanvas({
     edges,
     isDense,
     // A3: 하이라이트 3종은 deps에서 빠졌다 — 클릭/호버가 graphData 재설정과
-    // d3 리히트를 유발하지 않는다. 다만 concentric 뷰는 "선택 노드"를 중심으로
-    // 좌표를 다시 깔아야 하므로, 그 모드에서만 중심 id를 dep으로 남긴다.
-    concentricCenterDep,
+    // d3 리히트를 유발하지 않는다.
     onNodeInspect,
-      layoutMode,
   ]);
 
   const fitGraph = () => {
@@ -1765,6 +1377,7 @@ export function GraphCanvas({
   };
 
   const hasSelection = !!(focusNodeId ?? persistentHighlightNodeId ?? externalHighlightNodeId);
+  const hasPinnedNodes = useMemo(() => nodes.some((n) => n.pinned), [nodes]);
 
   // 배율 표시 — 1.0 = 100%. 줌이 1 근처일 때만 "100%"로 단순화, 그 외엔 백분율로 표시.
   const zoomPercent = Math.round(zoomLevel * 100);
@@ -1821,13 +1434,14 @@ export function GraphCanvas({
         >
           선택 위치
         </button>
-        {onResetLayout && (
+        {/* 드래그 좌표는 더 이상 저장하지 않으므로, 예전에 저장된 좌표가 남아 있을 때만 */}
+        {onResetLayout && hasPinnedNodes && (
           <button
             type="button"
             onClick={onResetLayout}
             className="graph-canvas-btn"
             aria-label="그래프 레이아웃 리셋"
-            title="드래그로 옮긴 노드 위치를 모두 버리고 서버 원본 배치로 되돌립니다"
+            title="예전에 저장된 노드 위치를 모두 버리고 자동 배치로 되돌립니다"
           >
             리셋
           </button>

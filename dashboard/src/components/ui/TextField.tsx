@@ -6,6 +6,7 @@
 // Contract:
 //  - label: 필드 위에 표시되는 라벨
 //  - required: true면 라벨 옆에 * 표시
+//  - hideLabel: true면 라벨을 화면에서 숨기고 스크린리더에만 남긴다 (툴바 검색창 등)
 //  - helper: 입력 아래 회색 도움말
 //  - error: 입력 아래 빨간 에러 (있으면 helper 대신 표시)
 //  - multiline: true면 textarea, 아니면 input
@@ -22,6 +23,7 @@ export interface TextFieldProps
   helper?: string;
   error?: string | null;
   required?: boolean;
+  hideLabel?: boolean;
   /** true면 textarea, 아니면 input. textarea일 때 textarea attrs도 위임됨. */
   multiline?: boolean;
   rows?: number;
@@ -34,6 +36,7 @@ export const TextField = forwardRef<HTMLInputElement | HTMLTextAreaElement, Text
       helper,
       error,
       required,
+      hideLabel,
       multiline,
       rows = 4,
       id,
@@ -47,7 +50,7 @@ export const TextField = forwardRef<HTMLInputElement | HTMLTextAreaElement, Text
 
     const labelStyle: React.CSSProperties = {
       display: "block",
-      marginBottom: 16,
+      marginBottom: hideLabel ? 0 : 16,
     };
     const labelTextStyle: React.CSSProperties = {
       display: "block",
@@ -67,7 +70,7 @@ export const TextField = forwardRef<HTMLInputElement | HTMLTextAreaElement, Text
 
     return (
       <label htmlFor={fieldId} style={labelStyle}>
-        <span style={labelTextStyle}>
+        <span style={labelTextStyle} className={hideLabel ? "sr-only" : undefined}>
           {label}
           {required && " *"}
         </span>

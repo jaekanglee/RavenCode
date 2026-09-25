@@ -1187,7 +1187,8 @@ mark {
    taller than the viewport, .page-content's own overflow-y-auto scrolls the page —
    overflow:hidden here used to clip that content invisibly instead. */
 .graph-page-shell {
-  min-height: 100%;
+  /* 페이지 높이에 고정해야 워크스페이스가 남은 높이를 나눠 받는다 (모바일은 아래 media에서 auto) */
+  height: 100%;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -1231,124 +1232,21 @@ mark {
   user-select: none;
   white-space: nowrap;
 }
-.graph-page-control-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr) auto;
-  gap: 10px;
-  align-items: start;
-}
-.graph-page-control-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-md);
-  background: var(--graph-surface-strong);
-}
-.graph-page-control-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-.graph-page-control-heading strong {
-  font-size: 13px;
-  color: var(--color-ink);
-}
-.graph-page-control-heading span {
-  font-size: 12px;
-  color: var(--color-muted);
-}
-.graph-page-relation-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.graph-page-relation-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border: 1px solid var(--color-hairline);
-  border-radius: 8px;
-  background: var(--graph-surface);
-  cursor: pointer;
-  user-select: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
-}
-.graph-page-relation-toggle:hover {
-  transform: translateY(-1px);
-  border-color: var(--color-info-border);
-  background: var(--graph-surface-strong);
-}
-.graph-page-relation-toggle.active {
-  border-color: var(--color-info-border);
-  background: var(--cds-background-brand);
-}
-.graph-page-relation-toggle input {
-  margin: 0;
-  width: 13px;
-  height: 13px;
-  accent-color: var(--color-primary);
-}
-.graph-page-relation-toggle-copy {
-  min-width: 0;
-}
-.graph-page-relation-toggle-copy strong {
-  font-size: 12px;
-  color: var(--color-ink);
-  white-space: nowrap;
-}
-.graph-page-relation-toggle-copy span {
-  font-size: 11px;
-  color: var(--color-muted);
-  line-height: 1.25;
-}
-.graph-desktop-only {
-  display: contents;
-}
-.graph-mobile-only {
-  display: none;
-}
-.graph-page-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: flex-end;
-  min-height: 40px;
-}
 .graph-page-insights {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .graph-page-workspace {
-  flex: 0 0 clamp(420px, 54dvh, 680px);
+  /* 필터가 캔버스 위 한 줄로 올라가서, 그래프가 남은 높이를 모두 쓴다.
+     행을 minmax(0, 1fr)로 두지 않으면 force-graph 캔버스 기본 높이(창 높이)가
+     행을 늘려 페이지 스크롤이 생긴다. */
+  flex: 1 1 0;
   min-height: 420px;
+  grid-template-rows: minmax(0, 1fr);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 288px;
   gap: 12px;
-}
-.graph-mobile-panel {
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-md);
-  background: var(--graph-surface-strong);
-  overflow: hidden;
-}
-.graph-mobile-panel summary {
-  cursor: pointer;
-  padding: 12px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-ink);
-  list-style: none;
-}
-.graph-mobile-panel summary::-webkit-details-marker {
-  display: none;
-}
-.graph-mobile-panel-body {
-  padding: 0 14px 14px;
 }
 .graph-insight-card {
   background: linear-gradient(180deg, var(--graph-surface-strong), var(--graph-surface));
@@ -2209,17 +2107,10 @@ mark {
   .page-content {
     padding: 24px 24px !important;
   }
-  .graph-page-actions {
-    padding-top: 0;
-    justify-content: flex-start;
-  }
   .graph-page-insights {
     grid-template-columns: 1fr;
   }
   .graph-page-workspace {
-    grid-template-columns: 1fr;
-  }
-  .graph-page-control-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -2231,12 +2122,6 @@ mark {
     height: auto;
     max-height: none;
     overflow: visible;
-  }
-  .graph-desktop-only {
-    display: none;
-  }
-  .graph-mobile-only {
-    display: block;
   }
   .graph-page-toolbar {
     gap: 10px;
@@ -2255,17 +2140,6 @@ mark {
   }
   .graph-canvas-frame {
     min-height: 52dvh;
-  }
-  .graph-page-control-grid {
-    grid-template-columns: 1fr;
-  }
-  .graph-page-control-heading {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .graph-page-actions {
-    flex-wrap: wrap;
-    justify-content: stretch;
   }
   .graph-insight-card-header {
     flex-direction: column;
@@ -2288,9 +2162,6 @@ mark {
   .graph-detail-link {
     align-items: flex-start;
     flex-direction: column;
-  }
-  .graph-mobile-panel-body .graph-page-insights {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -2479,6 +2350,7 @@ mark {
 }
 
 .graph-canvas-btn {
+  white-space: nowrap;
   border: 1px solid var(--graph-border);
   background: var(--graph-surface);
   color: var(--graph-text);
@@ -3258,4 +3130,63 @@ a:focus-visible {
   line-height: 1.45;
   color: var(--color-danger-text);
   word-break: break-word;
+}
+
+/* 그래프 필터 바 — 검색 + 타입 범례 칩 + (의미 관계가 있을 때만) 관계 칩 */
+.graph-filter-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.graph-filter-search {
+  flex: 0 1 280px;
+  min-width: 200px;
+}
+.graph-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.graph-filter-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* FilterChip — 켜고 끄는 필터 칩 */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+.filter-chip:hover {
+  border-color: var(--color-info-border);
+  color: var(--color-ink);
+}
+.filter-chip.active {
+  border-color: var(--color-info-border);
+  background: var(--cds-background-brand);
+  color: var(--color-ink);
+}
+.filter-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.filter-chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }

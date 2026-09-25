@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { GraphCanvas, type GraphLayoutMode } from "./GraphCanvas";
+import { GraphCanvas } from "./GraphCanvas";
 import type { GraphNode, GraphEdge } from "../types";
 
 interface FullscreenGraphModalProps {
@@ -10,7 +10,6 @@ interface FullscreenGraphModalProps {
   currentNodeId?: string | null;
   centerTitle: string;
   onClose: () => void;
-  layoutMode?: GraphLayoutMode;
 }
 
 /**
@@ -25,7 +24,6 @@ export function FullscreenGraphModal({
   currentNodeId,
   centerTitle,
   onClose,
-  layoutMode,
 }: FullscreenGraphModalProps) {
   // Escape closes the modal; lock body scroll while open.
   useEffect(() => {
@@ -78,7 +76,6 @@ export function FullscreenGraphModal({
             persistentHighlightNodeId={currentNodeId}
             onNodeClick={(slug) => window.location.assign(`/page/${vault}/${slug}`)}
             onNodeDoubleClick={(slug) => window.location.assign(`/page/${vault}/${slug}`)}
-            layoutMode={layoutMode}
           />
         </div>
         <footer className="fullscreen-graph-modal-footer">

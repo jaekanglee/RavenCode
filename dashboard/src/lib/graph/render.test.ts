@@ -1,10 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   buildLinkStyle,
-  computeCommunityLabels,
-  computeLayeredAxis,
-  computeTimelineGrid,
-  computeTimelineLayout,
   createLabelMetricsCache,
   createLabelOccupancyGrid,
   isIndexPage,
@@ -97,107 +93,6 @@ describe("isWithinViewport — 뷰포트 컬링 (B1)", () => {
   it("경계에 반쯤 걸친 노드는 반지름만큼 여유를 두고 살린다", () => {
     expect(isWithinViewport(-4, 50, 6, bounds)).toBe(true);
     expect(isWithinViewport(104, 50, 6, bounds)).toBe(true);
-  });
-});
-
-describe("computeTimelineLayout — O(n^2) find 제거 (A5)", () => {
-  const nodes = [
-    node({ id: "old", type: "concept", created: "2026-01-01" }),
-    node({ id: "mid", type: "project", created: "2026-06-01" }),
-    node({ id: "new", type: "concept", created: "2026-12-01" }),
-  ];
-
-  it("시간 순서대로 x가 증가하고 타입별로 y가 갈린다", () => {
-    const coords = computeTimelineLayout(nodes);
-    expect(Object.keys(coords).sort()).toEqual(["mid", "new", "old"]);
-    expect(coords.old.x).toBeLessThan(coords.mid.x);
-    expect(coords.mid.x).toBeLessThan(coords.new.x);
-    expect(coords.old.y).not.toBe(coords.mid.y);
-  });
-
-  it("같은 결과를 결정론적으로 반환한다", () => {
-    expect(computeTimelineLayout(nodes)).toEqual(computeTimelineLayout(nodes));
-  });
-
-  it("같은 날짜에 몰린 노드는 좌우로 흩어 놓는다", () => {
-    const sameDay = [
-      node({ id: "a", type: "concept", created: "2026-05-05" }),
-      node({ id: "b", type: "concept", created: "2026-05-05" }),
-      node({ id: "c", type: "concept", created: "2026-05-05" }),
-    ];
-    const coords = computeTimelineLayout(sameDay);
-    const xs = new Set([coords.a.x, coords.b.x, coords.c.x]);
-    expect(xs.size).toBe(3);
-  });
-
-  it("노드 2000개도 전부 좌표를 받는다", () => {
-    const many = Array.from({ length: 2000 }, (_unused, i) =>
-      node({ id: `n${i}`, type: "concept", created: "2026-03-03" })
-    );
-    expect(Object.keys(computeTimelineLayout(many))).toHaveLength(2000);
-  });
-});
-
-describe("computeTimelineGrid — 프레임당 격자 재생성 제거 (A4)", () => {
-  const spread = [
-    node({ id: "a", created: "2025-01-01" }),
-    node({ id: "b", created: "2026-12-31" }),
-  ];
-
-  it("연 단위로 벌어진 범위는 5등분 날짜 눈금을 만든다", () => {
-    const grid = computeTimelineGrid(spread);
-    expect(grid).toHaveLength(5);
-    expect(grid[0].x).toBeLessThan(grid[4].x);
-    expect(grid[0].label).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-  });
-
-  it("눈금 x는 타임라인 좌표축 범위 안에 있다", () => {
-    for (const point of computeTimelineGrid(spread)) {
-      expect(point.x).toBeGreaterThanOrEqual(-460);
-      expect(point.x).toBeLessThanOrEqual(460);
-    }
-  });
-
-  it("빈 입력에는 눈금이 없다", () => {
-    expect(computeTimelineGrid([])).toEqual([]);
-  });
-
-  it("같은 입력에 같은 격자를 돌려준다", () => {
-    expect(computeTimelineGrid(spread)).toEqual(computeTimelineGrid(spread));
-  });
-});
-
-describe("computeLayeredAxis — 레이어 축 1회 계산 (A4)", () => {
-  it("존재하는 layer 값만 오름차순 중복 없이 모은다", () => {
-    const axis = computeLayeredAxis([
-      node({ id: "a", layer: 2 }),
-      node({ id: "b", layer: 0 }),
-      node({ id: "c", layer: 2 }),
-      node({ id: "d", layer: 1.4 }),
-    ]);
-    expect(axis).toEqual([0, 1, 2]);
-  });
-
-  it("layer가 없으면 빈 축이다", () => {
-    expect(computeLayeredAxis([node({ id: "a" })])).toEqual([]);
-  });
-});
-
-describe("computeCommunityLabels — 프레임당 키워드 분석 제거 (A4)", () => {
-  it("커뮤니티별로 대표 키워드가 붙은 라벨을 1회 계산한다", () => {
-    const nodes = [
-      node({ id: "1", title: "Raven 그래프 렌더러", community: 0, importance: 0.9 }),
-      node({ id: "2", title: "Raven 그래프 캐시", community: 0, importance: 0.2 }),
-      node({ id: "3", title: "모바일 오프라인", community: 1, importance: 0.5 }),
-    ];
-    const labels = computeCommunityLabels(nodes);
-    expect(labels.get(0)).toContain("Community 0");
-    expect(labels.get(0)?.toLowerCase()).toContain("raven");
-    expect(labels.get(1)).toContain("Community 1");
-  });
-
-  it("빈 입력에도 안전하다", () => {
-    expect(computeCommunityLabels([]).size).toBe(0);
   });
 });
 

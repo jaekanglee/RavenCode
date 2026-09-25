@@ -7,16 +7,16 @@ import {
   MAX_FOCUS_DEPTH,
   MIN_FOCUS_DEPTH,
   typeLabel,
-  type GraphLayoutMode,
 } from "../components/GraphCanvas";
 import { FullscreenGraphModal } from "../components/FullscreenGraphModal";
 import type { Graph, GraphNode } from "../types";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { TextField } from "../components/ui/TextField";
-import { SelectField } from "../components/ui/SelectField";
+import { FilterChip } from "../components/ui/FilterChip";
 import { Button } from "../components/ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
+import { RELATION_COLOR_FALLBACK, TYPE_COLOR_FALLBACK } from "../lib/graph/render";
 import {
   deriveCommunityOptions,
   deriveGraphInsights,
@@ -27,8 +27,10 @@ import {
   type GraphNodeDetail,
 } from "../lib/graph/derive";
 
+const GRAPH_SEED_ITERATIONS = 60;
+
 const RELATION_HELPERS = [
-  { value: "wikilink", title: "일반 링크", description: "문장/문맥 중심의 기본 연결" },
+  { value: "wikilink", title: "링크", description: "문장/문맥 중심의 기본 연결" },
   { value: "uses", title: "Uses", description: "이 문서가 다른 문서를 사용함" },
   { value: "depends_on", title: "Depends on", description: "이 문서가 선행 문서에 의존함" },
   { value: "implements", title: "Implements", description: "이 문서가 개념이나 설계를 구현함" },
@@ -136,7 +138,6 @@ export function GraphPage() {
   const [hoveredInsightType, setHoveredInsightType] = useState<string | null>(null);
   const [showFullGraph, setShowFullGraph] = useState(false);
   const [activeTab, setActiveTab] = useState<"inbound" | "outbound" | "neighbors">("inbound");
-  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>("force");
   // B3: 선택 노드로부터 몇 촌까지 강조할지. 이전에는 3촌 하드코딩이었다.
   const [focusDepth, setFocusDepth] = useState<number>(DEFAULT_FOCUS_DEPTH);
   const navigate = useNavigate();
@@ -146,7 +147,6 @@ export function GraphPage() {
 
   const resetGraphFilters = () => {
     dispatchFilters({ type: "reset" });
-    setLayoutMode("force");
     setFocusDepth(DEFAULT_FOCUS_DEPTH);
   };
 
@@ -171,7 +171,9 @@ export function GraphPage() {
     setLoading(true);
     setLoadError(false);
     // v0.7.144+: ?scope= 쿼리 제거 — current만 사용.
-    apiFetch(`/api/vaults/${encodeURIComponent(vault)}/graph`)
+    // 서버 ForceAtlas 좌표는 클라이언트 물리의 출발점일 뿐이라 거칠어도 된다.
+    // 기본 500회는 169문서 vault에서 ~2.8초, 60회는 ~0.3초.
+    apiFetch(`/api/vaults/${encodeURIComponent(vault)}/graph?iterations=${GRAPH_SEED_ITERATIONS}`)
       .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
       .then((d) => setGraph({ nodes: d.nodes ?? [], edges: d.edges ?? [] }))
       .catch(() => {
@@ -211,16 +213,18 @@ export function GraphPage() {
     [graph, selectedNodeId]
   );
 
-  const typeOptions = useMemo(
-    () => [
-      { value: "all", label: "전체 타입" },
-      ...graphInsights.typeBreakdown.map(({ type, count }) => ({
-        value: type,
-        label: `${typeLabel(type) || type} (${count})`,
-      })),
-    ],
-    [graphInsights.typeBreakdown]
-  );
+  // 관계 칩은 실제로 존재하는 관계 타입만, 의미 관계가 하나라도 있을 때만 보인다.
+  // (hub-control-room: 링크 592 / 의미 관계 3 — 여섯 토글이 늘 켜져만 있었다)
+  const relationCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const e of graph.edges) {
+      const key = e.relation_type || "wikilink";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [graph.edges]);
+  const presentRelations = RELATION_HELPERS.filter((item) => (relationCounts.get(item.value) ?? 0) > 0);
+  const showRelationChips = presentRelations.some((item) => item.value !== "wikilink");
 
   const hasAnyNodes = graph.nodes.length > 0;
   const hasVisibleNodes = visibleNodes.length > 0;
@@ -273,100 +277,64 @@ export function GraphPage() {
       .finally(() => loadGraph());
   }, [vault]);
 
-  const controlsSection = (
-    <div className="graph-page-control-grid">
-      <section className="graph-page-control-block">
-        <div className="graph-page-control-heading">
-          <strong>탐색</strong>
-          <span>문서와 그래프의 범위를 좁히는 기본 필터</span>
-        </div>
-        <SelectField
-          label="레이아웃 모드"
-          value={layoutMode}
-          onChange={(e) => setLayoutMode(e.target.value as GraphLayoutMode)}
-          options={[
-            { value: "force", label: "기본 (Force-Directed)" },
-            { value: "concentric", label: "동심원 (Concentric)" },
-            { value: "domain", label: "도메인 (Domain/Community)" },
-            { value: "timeline", label: "타입별 타임라인 (Timeline)" },
-            { value: "layered", label: "레이어 깊이 (Layered)" },
-          ]}
-          helper="동심원은 선택 중심 거리, Layered는 계산된 논리 layer 깊이입니다."
-        />
-        <div className="graph-page-depth-field">
-          <label className="graph-page-depth-head" htmlFor="graph-focus-depth">
-            <strong>이웃 깊이</strong>
-            <span>{focusDepth}촌</span>
-          </label>
-          <input
-            id="graph-focus-depth"
-            type="range"
-            min={MIN_FOCUS_DEPTH}
-            max={MAX_FOCUS_DEPTH}
-            step={1}
-            value={focusDepth}
-            onChange={(e) => setFocusDepth(Number(e.target.value))}
-            aria-describedby="graph-focus-depth-helper"
-          />
-          <span className="graph-page-depth-helper" id="graph-focus-depth-helper">
-            문서를 선택하면 이 촌수까지 밝게 남기고 나머지는 뒤로 물립니다.
-          </span>
-        </div>
+  // 타입을 고르면 그 타입 전체를 보려는 것 — 남아 있던 문서 선택이 포커스 모드로
+  // 나머지를 물려서 "80개인데 하나만 보이는" 상태가 되지 않게 선택을 푼다.
+  const selectType = (type: string) => {
+    dispatchFilters({ type: "setSelectedNodeId", value: null });
+    dispatchFilters({ type: "setSelectedType", value: type });
+  };
+
+  const filterBar = (
+    <div className="graph-filter-bar" role="toolbar" aria-label="그래프 필터">
+      <div className="graph-filter-search">
         <TextField
           label="문서 검색"
+          hideLabel
           value={query}
           onChange={(e) => dispatchFilters({ type: "setQuery", value: e.target.value })}
-          placeholder="제목, slug, type으로 필터"
-          helper="검색 시 일치 문서와 1-hop 이웃만 남겨 맥락을 유지합니다."
+          placeholder="문서 검색 — 일치 문서와 1촌 이웃만 남김"
         />
-        <SelectField
-          label="타입 필터"
-          value={selectedType}
-          onChange={(e) => dispatchFilters({ type: "setSelectedType", value: e.target.value })}
-          options={typeOptions}
-          helper="특정 문서 타입만 남겨 구조를 집중 탐색합니다."
+      </div>
+      <div className="graph-filter-chips" aria-label="문서 타입">
+        <FilterChip
+          label="전체"
+          count={graph.nodes.length}
+          active={selectedType === "all"}
+          onClick={() => selectType("all")}
         />
-      </section>
-
-      <section className="graph-page-control-block">
-        <div className="graph-page-control-heading">
-          <strong>관계</strong>
-          <span>필요한 연결만 남기고 의미망을 정리</span>
+        {graphInsights.typeBreakdown.map(({ type, count }) => (
+          <FilterChip
+            key={type}
+            label={typeLabel(type) || type}
+            count={count}
+            active={selectedType === type}
+            dotColor={`var(--graph-type-${type}, ${TYPE_COLOR_FALLBACK[type] ?? "var(--color-muted)"})`}
+            onClick={() => selectType(selectedType === type ? "all" : type)}
+          />
+        ))}
+      </div>
+      {showRelationChips && (
+        <div className="graph-filter-chips" aria-label="관계">
+          {presentRelations.map((item) => (
+            <FilterChip
+              key={item.value}
+              label={item.title}
+              count={relationCounts.get(item.value)}
+              active={visibleRelations.includes(item.value)}
+              dotColor={RELATION_COLOR_FALLBACK[item.value]}
+              title={item.description}
+              onClick={() => dispatchFilters({ type: "toggleRelation", relation: item.value })}
+            />
+          ))}
         </div>
-        <div className="graph-page-relation-grid">
-          {RELATION_HELPERS.map((item) => {
-            const active = visibleRelations.includes(item.value);
-            return (
-              <label
-                key={item.value}
-                className={`graph-page-relation-toggle${active ? " active" : ""}`}
-                title={item.description}
-              >
-                <input
-                  type="checkbox"
-                  checked={active}
-                  onChange={() => dispatchFilters({ type: "toggleRelation", relation: item.value })}
-                />
-                <span className="graph-page-relation-toggle-copy">
-                  <strong>{item.title}</strong>
-                </span>
-              </label>
-            );
-          })}
-        </div>
-      </section>
-
-      <div className="graph-page-actions">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={resetGraphFilters}
-          disabled={!hasActiveFilter}
-        >
-          필터 초기화
-        </Button>
-        <Button type="button" variant="ghost" size="sm" onClick={loadGraph}>
+      )}
+      <div className="graph-filter-actions">
+        {hasActiveFilter && (
+          <Button type="button" variant="ghost" size="sm" onClick={resetGraphFilters}>
+            필터 초기화
+          </Button>
+        )}
+        <Button type="button" variant="ghost" size="sm" onClick={loadGraph} title="그래프 다시 불러오기">
           새로고침
         </Button>
       </div>
@@ -402,6 +370,8 @@ export function GraphPage() {
           연결 없는 문서 숨김
         </label>
       </div>
+
+      {filterBar}
 
       <div className="graph-page-workspace">
       <div className="graph-canvas-frame">
@@ -556,6 +526,27 @@ export function GraphPage() {
               </Button>
             </div>
 
+            {/* 이웃 깊이 — 선택한 문서가 있을 때만 의미가 있어 상세 패널에 둔다 */}
+            <div className="graph-page-depth-field">
+              <label className="graph-page-depth-head" htmlFor="graph-focus-depth">
+                <strong>이웃 깊이</strong>
+                <span>{focusDepth}촌</span>
+              </label>
+              <input
+                id="graph-focus-depth"
+                type="range"
+                min={MIN_FOCUS_DEPTH}
+                max={MAX_FOCUS_DEPTH}
+                step={1}
+                value={focusDepth}
+                onChange={(e) => setFocusDepth(Number(e.target.value))}
+                aria-describedby="graph-focus-depth-helper"
+              />
+              <span className="graph-page-depth-helper" id="graph-focus-depth-helper">
+                이 촌수까지 밝게 남기고 나머지는 뒤로 물립니다.
+              </span>
+            </div>
+
             {/* 통계 기반 클릭 인터랙티브 탭 카드 */}
             <div className="graph-detail-stats">
               <button
@@ -678,17 +669,6 @@ export function GraphPage() {
       </aside>
       </div>
 
-      <div className="graph-desktop-only">
-        {controlsSection}
-      </div>
-
-      <details className="graph-mobile-panel graph-mobile-only">
-        <summary>모바일 세부 옵션</summary>
-        <div className="graph-mobile-panel-body">
-          {controlsSection}
-        </div>
-      </details>
-
       {showFullGraph && graph.nodes.length > 0 && (
         <FullscreenGraphModal
           vault={vault}
@@ -696,7 +676,6 @@ export function GraphPage() {
           edges={graph.edges}
           centerTitle={`${vault} 전체 그래프`}
           onClose={() => setShowFullGraph(false)}
-          layoutMode={layoutMode}
         />
       )}
     </div>

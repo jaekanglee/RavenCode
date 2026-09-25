@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   computeFocusDepthMap,
-  computeLayeredLayout,
   nodeColor,
   nodeOpacity,
+  computeNodeAlpha,
   nodeSize,
 } from "../src/components/GraphCanvas";
 
@@ -104,20 +104,6 @@ describe("GraphCanvas v0.6.11 Obsidian-style", () => {
       expect(nodeOpacity(2)).toBeCloseTo(1, 5);
     });
 
-    it("layered 레이아웃은 낮은 layer를 더 왼쪽에 배치하고 같은 layer는 세로로 분산한다", () => {
-      const coords = computeLayeredLayout([
-        { id: "core", title: "Core", layer: 0, importance: 0.8 },
-        { id: "api", title: "API", layer: 1, importance: 0.6 },
-        { id: "dashboard", title: "Dashboard", layer: 2, importance: 0.4 },
-        { id: "dashboard-2", title: "Dashboard 2", layer: 2, importance: 0.2 },
-      ]);
-
-      expect(coords["core"].x).toBeLessThan(coords["api"].x);
-      expect(coords["api"].x).toBeLessThan(coords["dashboard"].x);
-      expect(coords["dashboard"].x).toBeCloseTo(coords["dashboard-2"].x, 5);
-      expect(coords["dashboard"].y).not.toBe(coords["dashboard-2"].y);
-    });
-
     it("focus depth map is BFS-based and caps traversal depth", () => {
       const nodes = [
         { id: "a", title: "A" },
@@ -138,5 +124,26 @@ describe("GraphCanvas v0.6.11 Obsidian-style", () => {
       expect(depthMap.get("c")).toBe(1);
       expect(depthMap.get("d")).toBeUndefined();
     });
+  });
+});
+
+describe("computeNodeAlpha — 포커스 중 물러난 노드도 보이게", () => {
+  it("포커스 밖 노드는 최소 투명도 아래로 내려가지 않는다", () => {
+    // 오래된 문서(freshness 0 → 0.32) + 포커스 밖 + 깊이 밖이 곱해져 0.065까지 내려가
+    // 별자리 톤 위에서 사실상 사라졌다 ("80개인데 하나만 보인다").
+    const dimmed = computeNodeAlpha({ fillOpacity: 0.32, dimmed: true, focusDepth: undefined, depthMapSize: 5 });
+    expect(dimmed).toBeGreaterThanOrEqual(0.2);
+  });
+
+  it("포커스가 없으면 freshness 투명도를 그대로 쓴다", () => {
+    expect(computeNodeAlpha({ fillOpacity: 0.66, dimmed: false, focusDepth: undefined, depthMapSize: 0 })).toBeCloseTo(0.66, 5);
+  });
+
+  it("깊이 안의 노드는 촌수가 멀수록 옅어지지만 물러난 노드보다는 진하다", () => {
+    const near = computeNodeAlpha({ fillOpacity: 1, dimmed: false, focusDepth: 1, depthMapSize: 5 });
+    const far = computeNodeAlpha({ fillOpacity: 1, dimmed: false, focusDepth: 3, depthMapSize: 5 });
+    const out = computeNodeAlpha({ fillOpacity: 1, dimmed: true, focusDepth: undefined, depthMapSize: 5 });
+    expect(near).toBeGreaterThan(far);
+    expect(far).toBeGreaterThan(out);
   });
 });
