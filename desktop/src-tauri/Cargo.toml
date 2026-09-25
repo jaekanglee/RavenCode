@@ -16,6 +16,12 @@ tauri-build = { version = "2", features = [] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["tray-icon", "custom-protocol"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+# 릴리스 빌드(`cargo build --release --features custom-protocol`)에서만 켠다.
+# 이 피처가 켜지면 프론트엔드가 dashboard/dist로 임베드되고 devUrl을 무시하므로,
+# 항상 켜 두면 `tauri dev`가 dev 서버 대신 낡은 dist를 띄운다.
+[features]
+custom-protocol = ["tauri/custom-protocol"]

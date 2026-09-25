@@ -228,3 +228,14 @@ Raven의 MCP 실패 메시지는 전부 *에이전트가 읽고 스스로 고치
 ### 검증
 
 `make test` → **853 passed, 1 skipped, 0 failed** (작업 전: 829 passed / 8 failed / 수집 에러 2). `make venv-check`·`make test`가 다시 동작한다 — 이전에는 둘 다 "run 'make install' first"로 막혀 있었다.
+
+## 19. `make desktop-dev`가 dev 서버 대신 낡은 dist를 띄우던 문제 — §13 회귀
+
+§18 그래프 변경을 `make desktop-dev`에서 확인하려 했으나 화면이 바뀌지 않았다. webview에서 vite(5173)로 들어온 연결이 0이었다.
+
+- **원인**: §13이 하얀 화면을 고치려고 `tauri`의 `custom-protocol` 피처를 `[dependencies]`에 **항상** 켰다. 이 피처가 켜지면 dev 빌드도 `dashboard/dist`를 임베드하고 `devUrl`을 무시한다. 그래서 dev 창은 마지막으로 `npm run build`한 dist(9/16)를 보여주고 있었고, HMR도 없었다. §13 이후 모든 프론트 변경이 dev 창에 보이지 않았다
+- **수정**: 크레이트 피처 `custom-protocol = ["tauri/custom-protocol"]`로 옮기고, 릴리스 빌드가 명시적으로 켠다 — `Makefile` `desktop-build`, `.github/workflows/desktop-release.yml`의 `cargo build --release --features custom-protocol`. (`tauri build` CLI를 쓰지 않고 `cargo build`를 직접 부르기 때문에 필요)
+- **검증** (`target/*/build/raven-desktop-*/out/tauri-codegen-assets` 개수 — 바이너리 문자열 검사는 에셋이 압축돼 판별 불가였다):
+  - 릴리스, 기존 설정: 30 / 릴리스, 새 설정: **30** → §13 하얀 화면 재발 없음
+  - dev, 새 설정: **0** → `devUrl`(vite) 사용
+  - 수정 전 dev(실행 중이던 앱): 52 → 낡은 dist 임베드 확인

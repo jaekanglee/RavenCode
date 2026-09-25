@@ -237,7 +237,7 @@ desktop-bundle: ## Prepare bundled Python + Raven source for Tauri .app
 
 desktop-build: desktop-check desktop-bundle ## Build Tauri desktop app (release binary + .app)
 	cd dashboard && npm ci && npm run build
-	cd desktop/src-tauri && cargo build --release
+	cd desktop/src-tauri && cargo build --release --features custom-protocol
 	@echo "✅ Binary: desktop/src-tauri/target/release/raven-desktop"
 
 desktop-version: ## Bump desktop app version (usage: make desktop-version VERSION=0.2.0)

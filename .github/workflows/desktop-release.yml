@@ -30,7 +30,7 @@ jobs:
 
       - name: Build Tauri binary
         working-directory: desktop/src-tauri
-        run: cargo build --release
+        run: cargo build --release --features custom-protocol
 
       - name: Build DMG
         run: bash scripts/make-dmg.sh
