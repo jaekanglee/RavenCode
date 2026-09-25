@@ -44,8 +44,9 @@ def test_requirements_declares_the_mcp_pin():
     pins = [ln for ln in lines if _MCP_PIN.search(ln)]
     assert len(pins) == 1, f"requirements.txt의 mcp 핀은 정확히 1줄이어야 한다: {pins}"
     pin = pins[0]
-    assert ">=2.0" in pin and "<3.0" in pin, (
-        f"mcp 2.x로 고정되어야 한다 (1.x는 MCPServer 부재, 3.0은 미검증): {pin!r}"
+    assert ">=2.1" in pin and "<3.0" in pin, (
+        f"mcp 2.1+로 고정되어야 한다 (1.x는 MCPServer 부재, 2.0.0은 UnexpectedToolError 부재, "
+        f"3.0은 미검증): {pin!r}"
     )
 
 

@@ -41,9 +41,8 @@ def get_recommendations(
             "centrality": Optional[float],   # Future expansion (Post-MVP)
         }
     """
-    if not vault.db_path.exists():
-        db_module.build_db(vault)
-
+    # connect()가 DB 부재/stale 시 lint 없이 재빌드한다 — 여기서 따로 build_db(lint 포함)를
+    # 부르면 결과를 버리는 lint가 한 번 더 돌았다.
     conn = db_module.connect(vault)
     conn.row_factory = sqlite3.Row
 

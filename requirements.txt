@@ -5,7 +5,7 @@
 # 번들만 mcp 2.0을 물어 fastmcp import가 깨진 사고의 원인이었다.
 fastapi>=0.115
 uvicorn[standard]>=0.34
-mcp>=2.0,<3.0  # 2.0에서 mcp.server.fastmcp → mcp.server.mcpserver.MCPServer
+mcp>=2.1,<3.0  # 2.0에서 mcp.server.fastmcp → mcp.server.mcpserver.MCPServer. 2.1부터 UnexpectedToolError(에러 마스킹 경계) — 2.0.0은 raven/mcp/errors.py 계약과 맞지 않는다
 starlette>=0.46
 pydantic>=2.11
 httpx>=0.28

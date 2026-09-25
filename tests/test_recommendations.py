@@ -142,3 +142,17 @@ def test_recommendation_api(client, isolated_vault: Vault) -> None:
     assert data["recommendations"][0]["tag_overlap_score"] == 1
     assert isinstance(data["recommendations"][0]["importance"], float)
     assert isinstance(data["recommendations"][0]["centrality"], float)
+
+
+def test_recommendations_build_missing_db_without_lint(isolated_vault: Vault, monkeypatch) -> None:
+    """DB가 없을 때 추천 경로가 lint 포함 빌드를 돌리고 결과를 버리지 않는다."""
+    from raven.core import lint as lint_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(lint_module, "run_all", lambda v: calls.append(v.meta.name) or {})
+    if isolated_vault.db_path.exists():
+        isolated_vault.db_path.unlink()
+
+    get_recommendations(isolated_vault, "content/any", top_k=3)
+
+    assert calls == []
