@@ -119,3 +119,28 @@ def test_garden_detects_stale_db(vault: Vault):
     future = time.time() + 5
     os.utime(fp, (future, future))
     assert db_is_stale(vault) is True
+
+
+def test_connect_rebuilds_stale_db_without_running_lint(vault: Vault, monkeypatch: pytest.MonkeyPatch):
+    """읽기 경로(connect)의 지연 재빌드는 lint를 돌리지 않는다.
+
+    connect()는 build_db 결과를 버리므로 lint는 순수 낭비였다 — 그래프 탭을 여는
+    읽기 요청마다 전체 lint(중복 제목 O(n²) 포함, 169문서 vault에서 수 초)가 돌았다.
+    """
+    import os, time
+    from raven.core import lint as lint_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(lint_module, "run_all", lambda v: calls.append(v.meta.name) or {})
+
+    db_module.connect(vault).close()  # DB 없음 → 빌드
+    fp = vault.root / "content" / "새파일.md"
+    fp.write_text(
+        "---\ntitle: 새파일\ntype: concept\ncreated: 2026-07-04\nupdated: 2026-07-04\n---\n\n본문\n",
+        encoding="utf-8",
+    )
+    future = time.time() + 5
+    os.utime(fp, (future, future))
+    db_module.connect(vault).close()  # stale → 재빌드
+
+    assert calls == []

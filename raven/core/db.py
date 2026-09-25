@@ -135,12 +135,15 @@ def connect(vault: Vault) -> sqlite3.Connection:
     triggers a one-shot rebuild — markdown SoT is rebuilt into the
     canonical schema, old db is overwritten.
     """
+    # 읽기 경로의 지연 재빌드는 lint를 돌리지 않는다 — 결과를 버리므로 순수 낭비였고,
+    # 그래프 탭 같은 읽기 요청마다 전체 lint(수 초)가 붙었다. (MCP read / index_builder /
+    # CLI의 지연 재빌드도 모두 run_lint=False)
     if not vault.db_path.exists():
-        build_db(vault)
+        build_db(vault, run_lint=False)
     else:
         from . import garden as _garden
         if _garden.db_is_stale(vault) or db_schema_drift(vault):
-            build_db(vault)
+            build_db(vault, run_lint=False)
     return sqlite3.connect(f"file:{vault.db_path}?mode=ro", uri=True)
 
 
