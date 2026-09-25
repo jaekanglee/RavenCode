@@ -136,6 +136,15 @@ CREATE TRIGGER tags_ai AFTER INSERT ON tags BEGIN
   FROM pages p WHERE p.slug = new.page_slug;
 END;
 
+-- 증분 재빌드용 스냅샷: 마지막 빌드 시점의 파일 상태. 이 표가 없는 DB(예전 빌드)는
+-- 무엇이 바뀌었는지 알 수 없어 update_db가 전체 빌드로 돌아간다.
+CREATE TABLE build_files (
+  path TEXT PRIMARY KEY,
+  slug TEXT NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  size INTEGER NOT NULL
+);
+
 CREATE VIEW v_backlinks AS
   SELECT l.target_slug AS slug, l.source_slug, p.title AS source_title,
          p.path AS source_path, l.context
@@ -231,6 +240,151 @@ def iter_markdown(vault: Path):
 
 # ─────────────────────────── DB build ──────────────────────────────
 
+def _insert_page(conn: sqlite3.Connection, page: dict) -> tuple[int, int]:
+    """페이지 1개와 그 태그·관계·링크를 INSERT. 전체 빌드와 증분 빌드가 공유한다.
+    Returns (n_links, n_tags)."""
+    import json
+
+    n_links = n_tags = 0
+    conn.execute(
+        """INSERT INTO pages (slug, title, type, created, updated, path,
+                              confidence, contested, content, raw_content,
+                              collection, status, aliases)
+           VALUES (:slug, :title, :type, :created, :updated, :path,
+                   :confidence, :contested, :content, :raw_content,
+                   :collection, :status, :aliases)""",
+        {**page, "tags": None, "relations": None},  # tags & relations not columns
+    )
+
+    for tag in page["tags"]:
+        tag = str(tag).strip()
+        if not tag:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)",
+            (page["slug"], tag),
+        )
+        n_tags += 1
+
+    for rel in page["relations"]:
+        if not is_valid_relation_payload(rel):
+            continue
+        rel_type = rel.get("type")
+        target = str(rel.get("target")).strip()
+
+        conf = rel.get("confidence")
+        conf_sem = None
+        conf_str = None
+        conf_prov = None
+        if isinstance(conf, dict):
+            conf_sem = conf.get("semantic")
+            conf_str = conf.get("structural")
+            conf_prov = conf.get("provenance")
+        elif conf is not None:
+            conf_sem = conf
+
+        verified = rel.get("verified_by")
+        if isinstance(verified, list):
+            verified_by_str = ", ".join(str(v) for v in verified)
+        else:
+            verified_by_str = str(verified) if verified is not None else None
+
+        ev = rel.get("evidence")
+        evidence_str = json.dumps(ev) if ev is not None else None
+        reason = rel.get("reason")
+
+        normalized = target
+        if target and not _slug_exists(conn, target):
+            candidate = _resolve_short_slug(conn, target)
+            if candidate:
+                normalized = candidate
+
+        conn.execute(
+            """INSERT OR REPLACE INTO relations (source_slug, target_slug, relation_type,
+                                                  confidence_semantic, confidence_structural, confidence_provenance,
+                                                  verified_by, evidence, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (page["slug"], normalized, rel_type, conf_sem, conf_str, conf_prov, verified_by_str, evidence_str, reason),
+        )
+
+    for target, intent, context in extract_links(page["content"]):
+        # v0.6.10: target slug normalize — 옛 wikilink `[[vault-structure]]` (짧은 형태)
+        # 가 pages에 `concept/vault-structure` (긴 형태)로 존재할 때 자동 매칭.
+        # 1) 정확 매치: 그대로
+        # 2) 마지막 segment 매치 (prefix 보정)
+        # 3) 매치 없으면 intent = 'broken' 유지
+        normalized = target
+        if target and not _slug_exists(conn, target):
+            candidate = _resolve_short_slug(conn, target)
+            if candidate:
+                normalized = candidate
+        conn.execute(
+            """INSERT OR REPLACE INTO links (source_slug, target_slug, context, intent)
+               VALUES (?, ?, ?, ?)""",
+            (page["slug"], normalized, context, intent),
+        )
+        n_links += 1
+
+    return n_links, n_tags
+
+
+def _resolve_pending_targets(conn: sqlite3.Connection) -> None:
+    """v0.6.10 post-processing pass: 짧은 slug로 남은 링크·관계 대상을 긴 slug로 보정.
+
+    전체 빌드의 첫 pass에서는 아직 INSERT되지 않은 페이지를 가리키는 링크가
+    보정되지 못한다(self-reference race). 모든 페이지가 들어간 뒤 다시 시도한다.
+    SQLite에는 id 컬럼 없음 → PRIMARY KEY로 UPDATE.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT source_slug, target_slug, context, intent FROM links"
+        ).fetchall()
+        for src, tgt, ctx, intent in rows:
+            if _slug_exists(conn, tgt):
+                continue  # 이미 정확
+            cand = _resolve_short_slug(conn, tgt)
+            if cand:
+                conn.execute(
+                    "UPDATE links SET target_slug = ? WHERE source_slug = ? AND target_slug = ?",
+                    (cand, src, tgt),
+                )
+    except Exception:
+        pass
+
+    try:
+        rows = conn.execute(
+            "SELECT source_slug, target_slug, relation_type FROM relations"
+        ).fetchall()
+        for src, tgt, rel_type in rows:
+            if _slug_exists(conn, tgt):
+                continue
+            cand = _resolve_short_slug(conn, tgt)
+            if cand:
+                conn.execute(
+                    "UPDATE relations SET target_slug = ? WHERE source_slug = ? AND target_slug = ? AND relation_type = ?",
+                    (cand, src, tgt, rel_type),
+                )
+    except Exception:
+        pass
+
+
+def _update_analytics(conn: sqlite3.Connection) -> None:
+    """analytics post-processing pass — 그래프 전역 지표라 증분 빌드에서도 전체를 다시 계산한다."""
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from raven.core.analytics import update_analytics_properties
+        update_analytics_properties(conn)
+    except Exception as exc:
+        sys.stderr.write(f"⚠️  analytics update failed: {exc}\n")
+
+
+def _file_state(md_path: Path) -> tuple[int, int]:
+    st = md_path.stat()
+    return st.st_mtime_ns, st.st_size
+
+
 def build_db(vault: Path, db_path: Path) -> tuple[int, int, int]:
     """Build wiki.db from vault. Returns (n_pages, n_links, n_tags)."""
     vault = vault.resolve()
@@ -257,149 +411,113 @@ def build_db(vault: Path, db_path: Path) -> tuple[int, int, int]:
             # rename/delete's own rebuild will pick it up correctly. Mirrors the
             # OSError guard raven/core/db.py::_inline_build already has.
             try:
+                # stat을 읽기 전에 잡는다 — 빌드 도중 파일이 바뀌면 스냅샷이 옛 값이라
+                # 다음 증분 빌드가 그 파일을 다시 색인한다.
+                mtime_ns, size = _file_state(md_path)
                 page = parse_page(md_path, vault)
             except OSError as exc:
                 print(f"⚠️  skipping {md_path} (vanished mid-scan?): {exc}", file=sys.stderr)
                 continue
-            conn.execute(
-                """INSERT INTO pages (slug, title, type, created, updated, path,
-                                      confidence, contested, content, raw_content,
-                                      collection, status, aliases)
-                   VALUES (:slug, :title, :type, :created, :updated, :path,
-                           :confidence, :contested, :content, :raw_content,
-                           :collection, :status, :aliases)""",
-                {**page, "tags": None, "relations": None},  # tags & relations not columns
-            )
+            added_links, added_tags = _insert_page(conn, page)
             n_pages += 1
-
-            for tag in page["tags"]:
-                tag = str(tag).strip()
-                if not tag:
-                    continue
-                conn.execute(
-                    "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)",
-                    (page["slug"], tag),
-                )
-                n_tags += 1
-
-            import json
-            for rel in page["relations"]:
-                if not is_valid_relation_payload(rel):
-                    continue
-                rel_type = rel.get("type")
-                target = str(rel.get("target")).strip()
-
-                conf = rel.get("confidence")
-                conf_sem = None
-                conf_str = None
-                conf_prov = None
-                if isinstance(conf, dict):
-                    conf_sem = conf.get("semantic")
-                    conf_str = conf.get("structural")
-                    conf_prov = conf.get("provenance")
-                elif conf is not None:
-                    conf_sem = conf
-
-                verified = rel.get("verified_by")
-                if isinstance(verified, list):
-                    verified_by_str = ", ".join(str(v) for v in verified)
-                else:
-                    verified_by_str = str(verified) if verified is not None else None
-
-                ev = rel.get("evidence")
-                evidence_str = json.dumps(ev) if ev is not None else None
-                reason = rel.get("reason")
-
-                normalized = target
-                if target and not _slug_exists(conn, target):
-                    candidate = _resolve_short_slug(conn, target)
-                    if candidate:
-                        normalized = candidate
-
-                conn.execute(
-                    """INSERT OR REPLACE INTO relations (source_slug, target_slug, relation_type,
-                                                          confidence_semantic, confidence_structural, confidence_provenance,
-                                                          verified_by, evidence, reason)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (page["slug"], normalized, rel_type, conf_sem, conf_str, conf_prov, verified_by_str, evidence_str, reason),
-                )
-
-            for target, intent, context in extract_links(page["content"]):
-                # v0.6.10: target slug normalize — 옛 wikilink `[[vault-structure]]` (짧은 형태)
-                # 가 pages에 `concept/vault-structure` (긴 형태)로 존재할 때 자동 매칭.
-                # 1) 정확 매치: 그대로
-                # 2) 마지막 segment 매치 (prefix 보정)
-                # 3) 매치 없으면 intent = 'broken' 유지
-                normalized = target
-                if target and not _slug_exists(conn, target):
-                    candidate = _resolve_short_slug(conn, target)
-                    if candidate:
-                        normalized = candidate
-                conn.execute(
-                    """INSERT OR REPLACE INTO links (source_slug, target_slug, context, intent)
-                       VALUES (?, ?, ?, ?)""",
-                    (page["slug"], normalized, context, intent),
-                )
-                n_links += 1
+            n_links += added_links
+            n_tags += added_tags
+            conn.execute(
+                "INSERT OR REPLACE INTO build_files (path, slug, mtime_ns, size) VALUES (?, ?, ?, ?)",
+                (page["path"], page["slug"], mtime_ns, size),
+            )
 
         conn.commit()
 
-        # v0.6.10 post-processing pass: 옛 빌드 wikilink 짧은 slug → pages에 매칭되는 긴 slug로 보정.
-        # 첫 번째 pass에서 자기 자신의 wikilink가 아직 INSERT되지 않은 다른 페이지를 가리키면
-        # _resolve_short_slug가 None 반환. build_db 전체 끝난 후 다시 시도.
-        # v0.6.10 post-processing pass: 옛 빌드 wikilink 짧은 slug → pages에 매칭되는 긴 slug로 보정.
-        # 첫 번째 pass에서 self-reference race 발생 시 _resolve_short_slug가 None 반환.
-        # build_db 전체 끝난 후 모든 links 다시 시도.
-        # SQLite에는 id 컬럼 없음 → PRIMARY KEY (source_slug, target_slug)로 UPDATE.
-        try:
-            rows = conn.execute(
-                "SELECT source_slug, target_slug, context, intent FROM links"
-            ).fetchall()
-            n_fixed = 0
-            for src, tgt, ctx, intent in rows:
-                if _slug_exists(conn, tgt):
-                    continue  # 이미 정확
-                cand = _resolve_short_slug(conn, tgt)
-                if cand:
-                    conn.execute(
-                        "UPDATE links SET target_slug = ? WHERE source_slug = ? AND target_slug = ?",
-                        (cand, src, tgt),
-                    )
-                    n_fixed += 1
-            conn.commit()
-        except Exception:
-            pass
+        _resolve_pending_targets(conn)
+        conn.commit()
 
-        # relations post-processing pass
-        try:
-            rows = conn.execute(
-                "SELECT source_slug, target_slug, relation_type FROM relations"
-            ).fetchall()
-            for src, tgt, rel_type in rows:
-                if _slug_exists(conn, tgt):
-                    continue
-                cand = _resolve_short_slug(conn, tgt)
-                if cand:
-                    conn.execute(
-                        "UPDATE relations SET target_slug = ? WHERE source_slug = ? AND target_slug = ? AND relation_type = ?",
-                        (cand, src, tgt, rel_type),
-                    )
-            conn.commit()
-        except Exception:
-            pass
-
-        # analytics post-processing pass
-        try:
-            repo_root = Path(__file__).resolve().parent.parent
-            if str(repo_root) not in sys.path:
-                sys.path.insert(0, str(repo_root))
-            from raven.core.analytics import update_analytics_properties
-            update_analytics_properties(conn)
-            conn.commit()
-        except Exception as exc:
-            sys.stderr.write(f"⚠️  analytics update failed: {exc}\n")
+        _update_analytics(conn)
+        conn.commit()
 
         return n_pages, n_links, n_tags
+    finally:
+        conn.close()
+
+
+def update_db(vault: Path, db_path: Path) -> Optional[int]:
+    """기존 문서의 내용만 바뀌었으면 그 페이지만 다시 색인한다.
+
+    Returns 다시 색인한 페이지 수(0 = 바뀐 것 없음). 전체 빌드가 필요하면 None을
+    돌려주고 DB는 건드리지 않는다:
+      - DB나 스냅샷 표(build_files)가 없음 (예전 빌드)
+      - 문서가 추가·삭제됐거나 slug가 바뀜 — 짧은 링크 보정(resolve_short_slug)은
+        slug 집합에 의존하므로 다른 페이지의 링크 해석이 달라질 수 있다
+      - 스캔 중 파일이 사라지는 등 어떤 오류든 (트랜잭션 롤백)
+    """
+    vault = vault.resolve()
+    db_path = db_path.resolve()
+    if not db_path.exists():
+        return None
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        has_snapshot = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'build_files'"
+        ).fetchone()
+        if not has_snapshot:
+            return None
+        snapshot = {
+            path: (slug, mtime_ns, size)
+            for path, slug, mtime_ns, size in conn.execute(
+                "SELECT path, slug, mtime_ns, size FROM build_files"
+            )
+        }
+
+        current: dict[str, tuple[Path, int, int]] = {}
+        for md_path in iter_markdown(vault):
+            try:
+                mtime_ns, size = _file_state(md_path)
+            except OSError:
+                return None
+            current[str(md_path.relative_to(vault))] = (md_path, mtime_ns, size)
+
+        if current.keys() != snapshot.keys():
+            return None
+
+        changed = [
+            rel for rel, (_, mtime_ns, size) in current.items()
+            if (mtime_ns, size) != snapshot[rel][1:]
+        ]
+        if not changed:
+            return 0
+
+        pages = []
+        for rel in changed:
+            md_path, mtime_ns, size = current[rel]
+            try:
+                page = parse_page(md_path, vault)
+            except OSError:
+                return None
+            if page["slug"] != snapshot[rel][0]:
+                return None
+            pages.append((page, mtime_ns, size))
+
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            for page, mtime_ns, size in pages:
+                slug = page["slug"]
+                conn.execute("DELETE FROM tags WHERE page_slug = ?", (slug,))
+                conn.execute("DELETE FROM links WHERE source_slug = ?", (slug,))
+                conn.execute("DELETE FROM relations WHERE source_slug = ?", (slug,))
+                conn.execute("DELETE FROM pages WHERE slug = ?", (slug,))
+                _insert_page(conn, page)
+                conn.execute(
+                    "UPDATE build_files SET mtime_ns = ?, size = ? WHERE path = ?",
+                    (mtime_ns, size, page["path"]),
+                )
+            _resolve_pending_targets(conn)
+            _update_analytics(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return None
+        return len(pages)
     finally:
         conn.close()
 
@@ -413,6 +531,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"vault root (default: {_default_vault})")
     p.add_argument("--db", default=None,
                    help="output DB path (default: <vault>/wiki.db)")
+    p.add_argument("--incremental", action="store_true",
+                   help="기존 문서 내용만 바뀌었으면 그 페이지만 다시 색인 (아니면 전체 빌드)")
     args = p.parse_args(argv)
 
     vault = Path(args.vault).expanduser().resolve()
@@ -421,6 +541,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     db_path = Path(args.db).expanduser().resolve() if args.db else vault / "wiki.db"
+    if args.incremental:
+        changed = update_db(vault, db_path)
+        if changed is not None:
+            # db.py가 이 줄의 mode= 토큰으로 빌드 방식을 읽는다.
+            print(f"✅ wiki.db mode=incremental: {changed} page(s) reindexed")
+            return 0
     n_pages, n_links, n_tags = build_db(vault, db_path)
     size_kb = db_path.stat().st_size / 1024
     print(f"✅ wiki.db ({size_kb:.1f} KB): {n_pages} pages, {n_links} links, {n_tags} tags")

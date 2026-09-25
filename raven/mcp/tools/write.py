@@ -112,7 +112,8 @@ def _rebuild_db(vault: Path) -> None:
     """
     try:
         vault_obj = _load_vault(vault)
-        core_db.build_db(vault_obj, run_lint=False)
+        # 내용 수정은 그 페이지만 증분 색인, 생성·삭제·이름 변경은 자동으로 전체 빌드.
+        core_db.build_db(vault_obj, run_lint=False, incremental=True)
     except Exception as e:
         sys.stderr.write(f"⚠️  wiki.db rebuild failed: {e}\n")
 

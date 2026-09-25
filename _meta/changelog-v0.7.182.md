@@ -376,3 +376,27 @@ DB가 없을 때 `build_db(vault)`(lint 포함)를 부르고 결과를 버린 �
 ### 검증
 
 pytest 856 passed (MCP 에러 표면화 테스트 포함 — 이번 세션 처음으로 전부 통과). vitest 283 passed.
+
+## 24. wiki.db 증분 재빌드 — 기존 문서 내용만 바뀌면 그 페이지만 다시 색인
+
+문서를 고칠 때마다 wiki.db를 통째로 다시 만들었다(169문서: 전체 파싱 + FTS 색인 ~0.8s). 대시보드 저장 직후 그래프·검색이 느리던 남은 원인.
+
+### 전제 — 왜 안전한가
+
+짧은 링크 보정(`resolve_short_slug`)은 **slug 집합에만** 의존한다(제목·별칭 미사용). 기존 문서의 내용만 바뀌면 다른 페이지의 링크 해석은 바뀌지 않는다. 그 전제가 깨지는 경우는 증분을 포기한다.
+
+### 변경
+
+- **스냅샷 표 `build_files(path, slug, mtime_ns, size)`**: 전체 빌드가 파일마다 기록 (stat을 읽기 *전에* — 빌드 중 바뀐 파일은 다음 증분이 다시 색인)
+- **`scripts/build_db.py::update_db`**: 스냅샷과 디스크를 대조해 바뀐 페이지만 지웠다 다시 넣는다(태그·링크·관계·FTS) → 대상 보정 → 그래프 분석(0.08s, 전역이라 매번 전체). 한 트랜잭션, 실패 시 롤백. 다음 경우 **DB를 건드리지 않고 None → 전체 빌드**: DB/스냅샷 표 없음(예전 빌드), 문서 추가·삭제, slug 변경, 스캔 중 파일 소실
+- 페이지 1장 INSERT(`_insert_page`)·대상 보정(`_resolve_pending_targets`)·분석(`_update_analytics`)을 전체/증분이 공유하도록 추출 — 로직 복제 없음
+- `--incremental` CLI 플래그, `db.build_db(..., incremental=True)` → 결과 `mode` ("incremental" / "full")
+- 사용처: `connect()`의 stale 재빌드, 목차 재생성 뒤 두 번째 빌드, MCP 쓰기 후 재빌드. `raven build`(CLI)는 그대로 전체
+- **분석 입력 정렬**(`analytics.py`): Louvain community 번호가 "처음 등장한 순서"로 매겨져 행(rowid) 순서에 의존했다. 증분이 바뀐 페이지를 다시 넣으면 같은 파일 상태에서도 전체 빌드와 번호가 달라졌다(실 vault 169건 전부 — 군집 구성은 동일, 번호만). `ORDER BY slug` 등으로 결정적으로
+
+### 검증
+
+- `tests/test_db_incremental.py` 9건: 내용 수정 후 **증분 결과 = 새 전체 빌드**(모든 표 + FTS 검색), 변경 없음 no-op, 추가/삭제/slug 변경·스냅샷 없음 → 전체 빌드 폴백 + DB 불변, `mode` 보고, `connect()`가 증분 사용, 분석의 행 순서 독립성
+- 실 vault 사본(169문서, 일반 3 + 목차 1 수정): pages/tags/links/relations/FTS/스냅샷 **전부 일치**, 검색 4개 질의 결과 일치. 증분 0.33s vs 전체 1.3~2.2s
+- `GET /graph` 문서 수정 직후 (같은 방법 A/B, 5회): 전 1.18~1.64s(중앙 1.24) → 후 0.72~1.16s(중앙 0.86). 남은 시간은 서버 ForceAtlas 60회(~0.3s) + 분석·응답 조립
+- pytest 873 passed

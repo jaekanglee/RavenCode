@@ -313,20 +313,27 @@ def update_analytics_properties(conn: sqlite3.Connection) -> None:
     relations 테이블이 비어있을 경우, links (일반 위키링크) 테이블을 fallback으로 삼아 그래프를 분석합니다.
     """
     # 1. 모든 노드 목록 가져오기
-    rows = conn.execute("SELECT slug, updated FROM pages").fetchall()
+    # ORDER BY: community 번호는 "처음 등장한 순서"로 매겨지고 label propagation도 순회
+    # 순서를 탄다. 행 순서(rowid)에 맡기면 증분 빌드가 바뀐 페이지를 다시 넣을 때마다
+    # 같은 파일 상태에서도 전체 빌드와 결과가 달라진다.
+    rows = conn.execute("SELECT slug, updated FROM pages ORDER BY slug").fetchall()
     nodes = [r[0] for r in rows]
     updated_dates = {r[0]: r[1] for r in rows}
     if not nodes:
         return
 
     # 2. relations 테이블의 엣지 정보 가져오기
-    rel_rows = conn.execute("SELECT source_slug, target_slug FROM relations").fetchall()
+    rel_rows = conn.execute(
+        "SELECT source_slug, target_slug FROM relations ORDER BY source_slug, target_slug, relation_type"
+    ).fetchall()
     edges = [(r[0], r[1]) for r in rel_rows if r[0] in nodes and r[1] in nodes]
 
     # relations 정보가 없을 때 links 테이블로 fallback
     is_fallback = False
     if not edges:
-        link_rows = conn.execute("SELECT source_slug, target_slug FROM links").fetchall()
+        link_rows = conn.execute(
+            "SELECT source_slug, target_slug FROM links ORDER BY source_slug, target_slug"
+        ).fetchall()
         edges = [(r[0], r[1]) for r in link_rows if r[0] in nodes and r[1] in nodes]
         is_fallback = True
 

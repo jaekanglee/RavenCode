@@ -29,13 +29,22 @@ from .wikilink import extract_links, slug_exists, resolve_short_slug
 # ────────────────────────── public API ──────────────────────────
 
 
-def build_db(vault: Vault, db_path: Optional[Path] = None, *, run_lint: bool = True) -> dict:
+def build_db(
+    vault: Vault,
+    db_path: Optional[Path] = None,
+    *,
+    run_lint: bool = True,
+    incremental: bool = False,
+) -> dict:
     """Rebuild the wiki.db index for `vault`. Returns a small status dict.
 
     Args:
         vault: the active vault handle (root + meta).
         db_path: where to write the DB (default: <vault>/wiki.db).
         run_lint: build 직후 lint 14개 자동 실행. 기본 True.
+        incremental: 기존 문서의 내용만 바뀌었으면 그 페이지만 다시 색인한다
+            (scripts/build_db.py::update_db). 문서 추가·삭제·slug 변경 등은 전체 빌드로
+            돌아간다. 결과의 ``mode``가 "incremental" / "full".
 
     Side effect: appends a `build` entry to log.md on success or failure.
     """
@@ -66,9 +75,10 @@ def build_db(vault: Vault, db_path: Optional[Path] = None, *, run_lint: bool = T
     # contracts.write_page uses for page writes.
     with lock_for_file(vault.root, db_path):
         if script and script.exists():
-            result = _run_legacy_build(script, vault, db_path)
+            result = _run_legacy_build(script, vault, db_path, incremental=incremental)
         else:
             result = _inline_build(vault, db_path)
+            result["mode"] = "full"
 
     # log.md에 build entry 자동 append (실패해도 계속)
     try:
@@ -98,7 +108,8 @@ def build_db(vault: Vault, db_path: Optional[Path] = None, *, run_lint: bool = T
             if build_index(vault):
                 with lock_for_file(vault.root, db_path):
                     if script and script.exists():
-                        _run_legacy_build(script, vault, db_path)
+                        # 목차 페이지만 바뀌었으므로 증분이면 그 몇 장만 다시 색인된다.
+                        _run_legacy_build(script, vault, db_path, incremental=incremental)
                     else:
                         _inline_build(vault, db_path)
         except Exception as e:
@@ -142,8 +153,12 @@ def connect(vault: Vault) -> sqlite3.Connection:
         build_db(vault, run_lint=False)
     else:
         from . import garden as _garden
-        if _garden.db_is_stale(vault) or db_schema_drift(vault):
+        if db_schema_drift(vault):
             build_db(vault, run_lint=False)
+        elif _garden.db_is_stale(vault):
+            # 대시보드 저장 직후처럼 기존 문서 몇 개만 바뀐 흔한 경우는 그 페이지만 다시
+            # 색인한다 (169문서 vault: 전체 ~0.8s). 추가·삭제·slug 변경은 전체 빌드.
+            build_db(vault, run_lint=False, incremental=True)
     return sqlite3.connect(f"file:{vault.db_path}?mode=ro", uri=True)
 
 
@@ -254,9 +269,11 @@ def _repo_root() -> Optional[Path]:
     return Path(__file__).resolve().parents[2]
 
 
-def _run_legacy_build(script: Path, vault: Vault, db_path: Path) -> dict:
+def _run_legacy_build(script: Path, vault: Vault, db_path: Path, *, incremental: bool = False) -> dict:
     """Invoke scripts/build_db.py with vault path + db output."""
     argv = [sys.executable, str(script), str(vault.root), "--db", str(db_path)]
+    if incremental:
+        argv.append("--incremental")
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", "")
     result = subprocess.run(argv, capture_output=True, text=True, env=env)
@@ -269,6 +286,7 @@ def _run_legacy_build(script: Path, vault: Vault, db_path: Path) -> dict:
         "stdout_tail": result.stdout[-500:] if result.stdout else "",
         "stderr_tail": result.stderr[-500:] if result.stderr else "",
         "returncode": result.returncode,
+        "mode": "incremental" if "mode=incremental" in (result.stdout or "") else "full",
     }
 
 
