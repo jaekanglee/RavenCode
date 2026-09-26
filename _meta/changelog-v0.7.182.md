@@ -377,6 +377,25 @@ DB가 없을 때 `build_db(vault)`(lint 포함)를 부르고 결과를 버린 �
 
 pytest 856 passed (MCP 에러 표면화 테스트 포함 — 이번 세션 처음으로 전부 통과). vitest 283 passed.
 
+## 23. vault 운영 지침 슬롯 + MCP 전달 (`wiki_get_policy`)
+
+ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery`의 2단계. 별도 정책 repo 방식은 clone·경로 변수·트리거 블록 설치가 필요했고, 설치하지 않으면 명시적 지시로만 운영됐다. 이제 MCP를 연결하는 것만으로 에이전트가 vault 소유자의 지침을 받는다.
+
+- **자리**: `_meta/policy/VAULT-POLICY.md` (`raven.core.vault.VAULT_POLICY_RELPATH`). `_meta/agents/`가 아닌 이유 — 그 디렉터리가 있으면 `is_llm_wiki`가 켜진다. Raven은 이 파일을 만들지 않는다
+- **전달**: read 도구 `wiki_get_policy(vault)` → `{path, content, modified}`. 파일이 없으면 `content: null`이며 오류가 아니고, 읽기가 파일을 만들지 않는다. 서버 `instructions`에 "큐레이션 전에 `wiki_get_policy`를 호출하라"는 한 줄을 추가했다 — `server_instructions()`로 모아 CLI와 데스크톱 런타임이 같은 문자열을 쓴다. 정책 본문은 instructions에 넣지 않는다(서버 시작 시 고정되는 문자열이라 편집이 반영되지 않는다)
+- **색인 제외**: `_meta/`는 색인·lint 대상이라 정책이 페이지로 잡히면 type lint·그래프에 섞인다. `is_user_owned_instruction()`로 루트 지침 파일과 정책 디렉터리를 한 규칙으로 묶어 정식 빌더(`scripts/build_db.py`)·fallback 빌더(`_inline_build`)·lint 페이지 스캔(`_all_pages`) 세 곳에 적용 — 한 곳이라도 빠지면 lint #11 FS/DB parity가 오탐한다
+- **쓰기 차단**: 추가 구현 없음. `contracts.write_page`가 `_meta/` 전체를 에이전트 쓰기 금지로 막는다. 회귀 가드로 고정
+- 7/15에 제거한 bootstrap·guide·freshness 구조(`530fdbc`)를 반복하지 않는다 — 생성·동기화·버전 비교 없음, 읽어서 건네기만
+- 도구 수 23 → 24 (README 수치 가드 `test_v0_7_178_doc_count_guards` 갱신), vault 주입용 `templates/agent/TOOLS.md`에 도구 설명 추가. 기존 vault의 TOOLS.md는 bootstrap 때 복사된 사본이라 자동으로 바뀌지 않는다
+
+### 검증
+
+`tests/test_vault_policy_slot.py` 8건 (RED 확인 후 GREEN). 전체 pytest는 아래 커밋 스냅샷 기준으로 별도 실행.
+
+### 후속
+
+3단계 REST + Dashboard 편집기, 4단계 policy lint, 5단계 기존 7개 vault 정책 이전 (vault별 승인).
+
 ## 24. wiki.db 증분 재빌드 — 기존 문서 내용만 바뀌면 그 페이지만 다시 색인
 
 문서를 고칠 때마다 wiki.db를 통째로 다시 만들었다(169문서: 전체 파싱 + FTS 색인 ~0.8s). 대시보드 저장 직후 그래프·검색이 느리던 남은 원인.

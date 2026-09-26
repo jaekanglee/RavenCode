@@ -98,6 +98,29 @@ def wiki_log(tail_n: int = 20, ctx: Optional[VaultContext] = None) -> list[dict]
     return db.tail_log(tail_n=tail_n, vault=ctx.vault)
 
 
+# ─────────────── 5.5. wiki_get_policy ───────────────
+
+
+def wiki_get_policy(ctx: Optional[VaultContext] = None) -> dict:
+    """User-owned vault operating policy, verbatim. Missing file → content None.
+
+    Read-only delivery (ADR 2026-09-25): never creates or rewrites the file.
+    """
+    from datetime import datetime
+
+    from raven.core.vault import VAULT_POLICY_RELPATH
+
+    ctx = ctx or VaultContext(vault=db._default_vault())
+    path = Path(ctx.vault) / VAULT_POLICY_RELPATH
+    if not path.is_file():
+        return {"path": VAULT_POLICY_RELPATH, "content": None, "modified": None}
+    return {
+        "path": VAULT_POLICY_RELPATH,
+        "content": path.read_text(encoding="utf-8"),
+        "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
 # ─────────────── 8. wiki_relations_list ───────────────
 
 

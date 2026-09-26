@@ -24,7 +24,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **CLI** (사람/자동화) | Typer 7 top-level commands + 11 subcommand groups | `raven/cli/` |
 | **API** (HTTP) | FastAPI 66 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
-| **MCP** (LLM 표준) | MCPServer 23 tools + 4 resources | `raven/mcp/` |
+| **MCP** (LLM 표준) | MCPServer 24 tools + 4 resources | `raven/mcp/` |
 
 **SoT = 마크다운**. DB/API/GUI/MCP는 **모두 재생성 가능**한 파생 산출물.
 
@@ -305,7 +305,7 @@ python -m raven.mcp.cli --transport http --host 127.0.0.1 --port 8766 --mode rea
 
 ```bash
 # 3단계: 표준 흐름
-# - tools/list → 23개 도구 schema 자동 discovery
+# - tools/list → 24개 도구 schema 자동 discovery
 # - wiki_search(vault="<basename>", query="...", top_k=10)
 ```
 
@@ -317,7 +317,7 @@ python -m raven.mcp.cli --transport http --host 127.0.0.1 --port 8766 --mode rea
 
 ### 권한 모드 3종 (서버 시작 시 argv로 고정)
 
-- `read` (기본) — 6종 도구: wiki_search / get_page / lint / graph / log / stale_detect
+- `read` (기본) — 7종 도구: wiki_search / get_page / lint / graph / log / stale_detect / get_policy
 - `write` — + wiki_update / ingest / archive
 - `admin` (사람 운영자 전용) — + wiki_delete / rename
 

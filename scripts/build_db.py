@@ -25,7 +25,7 @@ import frontmatter
 
 from raven.core.relations import is_valid_relation_payload
 from raven.core.node_meta import aliases_to_json, collection_for_slug, normalize_status
-from raven.core.vault import ROOT_AGENT_INSTRUCTION_FILES
+from raven.core.vault import is_user_owned_instruction
 from raven.core.wikilink import (
     WIKILINK_RE,
     extract_links,
@@ -233,8 +233,8 @@ def iter_markdown(vault: Path):
         rel_parts = path.relative_to(vault).parts
         if rel_parts and rel_parts[0] in EXCLUDED_TOP_DIRS:
             continue
-        if len(rel_parts) == 1 and rel_parts[0] in ROOT_AGENT_INSTRUCTION_FILES:
-            continue  # user-owned root instructions, not content pages
+        if is_user_owned_instruction(rel_parts):
+            continue  # user-owned instructions/policy, not content pages
         yield path
 
 

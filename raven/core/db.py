@@ -22,7 +22,7 @@ from typing import Optional
 from .lock import lock_for_file
 from .node_meta import aliases_to_json, collection_for_slug, normalize_status
 from .relations import is_valid_relation_payload
-from .vault import Vault, resolve_active_vault, ROOT_AGENT_INSTRUCTION_FILES
+from .vault import Vault, resolve_active_vault, is_user_owned_instruction
 from .wikilink import extract_links, slug_exists, resolve_short_slug
 
 
@@ -396,8 +396,8 @@ def _inline_build(vault: Vault, db_path: Path) -> dict:
         rel_parts = fp.relative_to(vault.root).parts
         if rel_parts and rel_parts[0] in _INLINE_EXCLUDED_TOP_DIRS:
             continue
-        if len(rel_parts) == 1 and rel_parts[0] in ROOT_AGENT_INSTRUCTION_FILES:
-            continue  # user-owned root instructions, not content pages
+        if is_user_owned_instruction(rel_parts):
+            continue  # user-owned instructions/policy, not content pages
         slug = str(fp.relative_to(vault.root))[:-3]
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")

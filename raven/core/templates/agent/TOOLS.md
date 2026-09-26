@@ -38,6 +38,7 @@ Raven MCP 서버는 권한 모드(`--mode read/write/admin`)에 따라 아래 �
 * **`wiki_lint()`**: 현재 active vault의 14가지 린트 오류 및 이슈 목록을 반환합니다.
 * **`wiki_graph(project: Optional[str] = None)`**: Vault 내 페이지 간 링크 그래프 데이터를 반환합니다.
 * **`wiki_log(tail_n: int = 20)`**: `log.md` 파일의 최근 N개 이력을 구조화된 JSON으로 반환합니다.
+* **`wiki_get_policy()`**: vault 소유자가 쓴 운영 지침(`_meta/policy/VAULT-POLICY.md`) 원문을 반환합니다. vault를 큐레이션하기 전에 읽고 따르세요. 소유자가 아직 쓰지 않았으면 `content`가 `null`이며, 그때는 사용자의 명시적 지시만 수행합니다.
 
 ### 2.2 Write 툴 (MCP `--mode write` 이상 활성화 시 제공)
 * **`wiki_update(slug: str, content: str, frontmatter: Optional[dict] = None, actor: Optional[str] = None, idempotency_key: Optional[str] = None, precondition: Optional[str] = None)`**

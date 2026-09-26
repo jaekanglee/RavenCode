@@ -44,7 +44,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from .vault import Vault
+from .vault import Vault, is_user_owned_instruction
 from . import link as link_module
 from .relations import SEMANTIC_RELATION_TYPES, has_relation_evidence, has_relation_reason
 
@@ -218,7 +218,11 @@ def _all_pages(vault: Vault) -> list[Path]:
     out = [fp for fp in _content_files(vault) if not _is_archived_page(vault, fp)]
     meta_dir = vault.meta_root
     if meta_dir.exists():
-        out.extend(fp for fp in meta_dir.rglob("*.md") if not _is_archived_page(vault, fp))
+        out.extend(
+            fp for fp in meta_dir.rglob("*.md")
+            if not _is_archived_page(vault, fp)
+            and not is_user_owned_instruction(fp.relative_to(vault.root).parts)
+        )
     result = sorted(out)
     if cache is not None:
         cache.pages = result

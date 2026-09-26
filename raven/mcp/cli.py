@@ -46,6 +46,19 @@ from raven.mcp.resources import register_resources
 # ────────────────────────── tool registration ──────────────────────
 
 
+def server_instructions(vault_names: list[str]) -> str:
+    """MCP `instructions` — clients inject this into the agent's system prompt.
+
+    Only points at `wiki_get_policy`; policy bodies stay out because this string
+    is fixed at server start (ADR 2026-09-25).
+    """
+    return (
+        "Raven multi-vault Markdown PKM MCP server. "
+        f"Registered vaults: {', '.join(vault_names) or '(none)'}. "
+        "Before curating a vault, call wiki_get_policy(vault) and follow the owner's policy."
+    )
+
+
 def register_tools(mcp: Any, mode: str) -> None:
     """Bind the 9 wiki tools onto an MCPServer instance, gated by `mode`.
 
@@ -130,6 +143,20 @@ def register_tools(mcp: Any, mode: str) -> None:
     def wiki_log(vault: str, tail_n: int = 20) -> list[dict]:
         ctx = VaultContext(vault=resolve_vault_path(vault), mode=permission_mode)
         return read_tools.wiki_log(tail_n=tail_n, ctx=ctx)
+
+    # ─── 5.5. wiki_get_policy ───
+    @mcp.tool(
+        name="wiki_get_policy",
+        description=(
+            VAULT_ARG_NOTE
+            + "The vault owner's operating policy (`_meta/policy/VAULT-POLICY.md`) verbatim. "
+            "Read it before curating the vault and follow it. `content` is null when the owner "
+            "has not written one — then act only on explicit user instructions."
+        ),
+    )
+    def wiki_get_policy(vault: str) -> dict:
+        ctx = VaultContext(vault=resolve_vault_path(vault), mode=permission_mode)
+        return read_tools.wiki_get_policy(ctx=ctx)
 
     # ─── 7.5.5. wiki_get_advice ───
     @mcp.tool(
@@ -537,10 +564,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     mcp = MCPServer(
         "wiki",
-        instructions=(
-            "Raven multi-vault Markdown PKM MCP server. "
-            f"Registered vaults: {', '.join(vault_names) or '(none)'}."
-        ),
+        instructions=server_instructions(vault_names),
     )
     register_tools(mcp, args.mode)
     register_resources(mcp)

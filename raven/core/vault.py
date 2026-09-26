@@ -31,6 +31,19 @@ ROOT_AGENT_INSTRUCTION_FILES: tuple[str, ...] = (
     ".windsurfrules",
 )
 
+# User-owned vault operating policy (ADR 2026-09-25). Raven reads it for MCP
+# delivery but never creates, rewrites, syncs, or indexes it. Kept outside
+# `_meta/agents/` because that directory flips `is_llm_wiki` on.
+VAULT_POLICY_RELPATH = "_meta/policy/VAULT-POLICY.md"
+_VAULT_POLICY_DIR_PARTS: tuple[str, ...] = ("_meta", "policy")
+
+
+def is_user_owned_instruction(rel_parts: tuple[str, ...]) -> bool:
+    """True for user-owned instruction files that must not become pages."""
+    if len(rel_parts) == 1 and rel_parts[0] in ROOT_AGENT_INSTRUCTION_FILES:
+        return True
+    return rel_parts[: len(_VAULT_POLICY_DIR_PARTS)] == _VAULT_POLICY_DIR_PARTS
+
 
 @dataclass
 class Vault:

@@ -159,7 +159,7 @@ def _build_mcp_app(mode: str, host: str):
     """Create the MCPServer streamable-http Starlette app (same as raven.mcp.cli)."""
     from mcp.server.mcpserver import MCPServer
     from mcp.server.transport_security import TransportSecuritySettings
-    from raven.mcp.cli import register_tools
+    from raven.mcp.cli import register_tools, server_instructions
     from raven.mcp.resources import register_resources
     from raven.core.registry import registry
 
@@ -168,10 +168,7 @@ def _build_mcp_app(mode: str, host: str):
 
     mcp = MCPServer(
         "wiki",
-        instructions=(
-            "Raven multi-vault Markdown PKM MCP server. "
-            f"Registered vaults: {', '.join(vault_names) or '(none)'}."
-        ),
+        instructions=server_instructions(vault_names),
     )
     register_tools(mcp, mode)
     register_resources(mcp)
