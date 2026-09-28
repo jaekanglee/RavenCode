@@ -135,13 +135,15 @@ def test_hybrid_search_matches_partial_words_case_insensitively(
     assert results[0]["slug"] == "content/system-operations"
 
 
-def test_inline_build_fts_includes_alias(tmp_path) -> None:
+def test_inline_build_fts_includes_alias(tmp_path, monkeypatch) -> None:
     """설치 패키지 fallback 빌더(_inline_build)도 pages_fts에 aliases를 포함해야
     한다 — 두 빌더 간 스키마 drift는 과거 실제 버그였다 (db.py 상단 문서 참고)."""
     import sqlite3
     from raven.core.vault import Vault
     from raven.core.db import _inline_build
 
+    # 임시 레지스트리 — 없으면 사용자의 실제 vault 레지스트리에 등록된다.
+    monkeypatch.setenv("WIKI_VAULTS_DIR", str(tmp_path / "registry"))
     vault = Vault.create("inline-test", tmp_path / "vault")
     content_dir = vault.root / "content"
     content_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +165,7 @@ def test_inline_build_fts_includes_alias(tmp_path) -> None:
     assert [r["slug"] for r in rows] == ["content/doc-d"]
 
 
-def test_inline_build_fts_rowid_integrity_with_multiple_tags(tmp_path) -> None:
+def test_inline_build_fts_rowid_integrity_with_multiple_tags(tmp_path, monkeypatch) -> None:
     """_inline_build이 페이지에 2개 이상의 태그가 있어도 pages_fts의 rowid가 올바른
     페이지 rowid를 가리키는지 검증한다.
 
@@ -175,6 +177,8 @@ def test_inline_build_fts_rowid_integrity_with_multiple_tags(tmp_path) -> None:
     from raven.core.vault import Vault
     from raven.core.db import _inline_build
 
+    # 임시 레지스트리 — 없으면 사용자의 실제 vault 레지스트리에 등록된다.
+    monkeypatch.setenv("WIKI_VAULTS_DIR", str(tmp_path / "registry"))
     vault = Vault.create("rowid-test", tmp_path / "vault")
     content_dir = vault.root / "content"
     content_dir.mkdir(parents=True, exist_ok=True)
