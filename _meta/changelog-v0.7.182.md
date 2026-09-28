@@ -504,3 +504,21 @@ ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 4단계. 정책 repo 검
 ### 검증
 
 헤드리스 Chromium 실측(임시 vault registry, 실제 vault 무관): 새 이슈 모달 textarea 113/113/92px(rows 4/4/3), 제목·BLUF 한 줄 input 유지, 운영 지침 편집칸 529px(rows 24). `tsc -b --noEmit` 통과, vitest 287 passed / 1 skipped, `npm run build` 성공.
+
+## 30. PDF 내보내기 제거 — 앱에서 눌러도 아무 반응이 없었다
+
+§16의 PDF(인쇄) 버튼은 데스크톱 앱에서 **조용히 아무 일도 하지 않았다**(§9 silent failure). 원인은 웹뷰다.
+
+- macOS WKWebView에는 JS `print()`가 없다. Tauri는 최상위 `window.print`만 `plugin:webview|print`로 바꿔 두는데(`tauri-2.11.5/src/webview/scripts/print.js`), 우리는 격리 iframe의 `contentWindow.print()`를 불렀으므로 그 대체가 적용되지 않았다
+- 최상위 경로로 우회해도 `core:webview:allow-print` 권한이 `core:default`에 없고, 네이티브 인쇄는 iframe이 아니라 웹뷰 전체(앱 UI)를 찍는다. 살리려면 권한 추가 + 같은 문서 안 인쇄 오버레이 + 인쇄 CSS 범위 재작성 + 비동기 인쇄 시트 수명 관리가 필요 → ROI가 낮아 제거하기로 결정(사용자 결정)
+
+Markdown(.md) 저장만 남긴다. vault 원본 그대로라 이식성이 더 높고, 브라우저 사용자는 ⌘P로 인쇄할 수 있다.
+
+- `ShareButton`: PDF 버튼·안내 문구·`handleExportPdf`, `title`/`getPrintHtml`/`printMeta` prop, 프린터 아이콘 제거. `exporting`을 boolean으로
+- `pageExport.ts`: `printPageAsPdf`, `buildPrintDocument`, `PRINT_CSS`, `PrintMeta` 제거
+- `InlineMarkdownEditor` / `PageView`: 인쇄용 본문 ref(`viewBodyRef`) 래퍼와 `printMeta` 전달 제거
+- `globals.css`: `.share-export-hint` 제거(PDF 안내 전용)
+
+### 검증
+
+`PageExport.test.tsx`: 인쇄 관련 4건 삭제(인쇄문서 구성·escape·iframe 수명·pdf 본문 전달), "PDF 버튼 숨김" 테스트는 "PDF 버튼은 없다" 회귀 가드로 전환. `tsc -b --noEmit` 통과, vitest 283 passed / 1 skipped(287 → 삭제 4건), `npm run build` 성공.

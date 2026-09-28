@@ -3113,13 +3113,6 @@ a:focus-visible {
   gap: 6px;
 }
 
-.share-export-hint {
-  margin-top: 6px;
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--color-muted-soft);
-}
-
 .share-export-saved {
   margin-top: 6px;
   font-size: 11px;
