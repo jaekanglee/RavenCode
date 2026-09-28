@@ -230,7 +230,7 @@ raven archive list|clean|restore [--vault N]    # 삭제된 페이지 조회/정
 
 raven log list|show|append|rotate|status [--vault N]   # log.md 조회/회전 (사람 수동; 자동 append는 4개 진입점 모두 raven.core.log.append)
 
-raven lint run|summary|check [--vault N]        # lint 22개 실행/요약/체크
+raven lint run|summary|check [--vault N]        # lint 23개 실행/요약/체크
 
 raven migrate plan|apply|categories [--vault N] # 스키마/구조 마이그레이션 (dry-run 기본)
 

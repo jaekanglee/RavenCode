@@ -44,7 +44,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from .vault import Vault, is_user_owned_instruction
+from .vault import VAULT_POLICY_RELPATH, Vault, is_user_owned_instruction
 from . import link as link_module
 from .relations import SEMANTIC_RELATION_TYPES, has_relation_evidence, has_relation_reason
 
@@ -137,6 +137,7 @@ CHECK_REGISTRY: dict[str, dict] = {
     "#21": {"name": "맥락 없는 위키링크", "fn": "check_contextless_wikilinks"},
     "#22": {"name": "저널 요약 완전성", "fn": "check_journal_summary_completeness"},
     "#23": {"name": "의미 관계 무결성", "fn": "check_semantic_relations"},
+    "#24": {"name": "운영 지침 계약", "fn": "check_policy_contract"},
 }
 
 
@@ -1130,6 +1131,101 @@ def _extract_wikilink_targets(body: str) -> list[str]:
     return out
 
 
+# ────────────────────────── #24 운영 지침 계약 (ADR 2026-09-25) ──────────────────────────
+
+# #10이 페이지에 요구하는 필드. 정책이 이보다 적게 요구하면 두 기준이 어긋난다.
+_PRODUCT_REQUIRED_FIELDS = ("title", "type", "created", "updated")
+
+
+def _policy_yaml_blocks(text: str) -> list:
+    import yaml
+
+    blocks = []
+    for raw in re.findall(r"```ya?ml\n(.*?)```", text, re.S):
+        try:
+            blocks.append(yaml.safe_load(raw))
+        except Exception:
+            blocks.append(None)
+    return blocks
+
+
+def _walk_keys(node, key: str):
+    """Yield every value stored under `key` anywhere in a nested YAML structure."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == key:
+                yield v
+            yield from _walk_keys(v, key)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_keys(item, key)
+
+
+def _approved_type_exceptions(blocks: list) -> set[str]:
+    """`validator_exceptions`의 core-types 예외 중 approved_by·approved_at이 있는 값."""
+    allowed: set[str] = set()
+    for block in blocks:
+        for entries in _walk_keys(block, "validator_exceptions"):
+            for entry in entries if isinstance(entries, list) else []:
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("rule") == "core-types"
+                    and entry.get("approved_by")
+                    and entry.get("approved_at")
+                ):
+                    allowed.update(str(v) for v in entry.get("values") or [])
+    return allowed
+
+
+def check_policy_contract(vault: Vault) -> list[dict]:
+    """#24 운영 지침 계약: 정책의 ```yaml 값이 제품 계약과 어긋나는지.
+
+    정책 본문(판단 기준)은 사용자 소유라 보지 않는다. 대조 대상은 제품이 강제하는
+    값뿐이다 — type 9종(`contracts.PAGE_TYPES`), stale 기준(`STALE_DAYS`), #10 필수 필드.
+    정책 파일이 없거나 yaml 블록이 없으면 아무것도 보고하지 않는다.
+    """
+    from .contracts import PAGE_TYPES
+
+    path = vault.root / VAULT_POLICY_RELPATH
+    if not path.is_file():
+        return []
+    slug = VAULT_POLICY_RELPATH[:-3]
+    blocks = _policy_yaml_blocks(path.read_text(encoding="utf-8"))
+    out: list[dict] = []
+
+    for index, block in enumerate(blocks):
+        if block is None:
+            out.append(_mk_issue("#24", "info", slug, f"yaml 블록 {index + 1}을 파싱할 수 없어 계약 대조를 건너뜀"))
+
+    allowed = PAGE_TYPES | _approved_type_exceptions(blocks)
+    for block in blocks:
+        for types in _walk_keys(block, "types"):
+            if not isinstance(types, list):
+                continue
+            unknown = sorted(str(t) for t in types if str(t) not in allowed)
+            if unknown:
+                out.append(_mk_issue(
+                    "#24", "warning", slug,
+                    f"type {unknown} 은 제품 9종 밖 — 이 type의 페이지는 Dashboard 파생 view에서 분류되지 않는다",
+                ))
+        for days in _walk_keys(block, "stale_threshold_days"):
+            if isinstance(days, int) and days != STALE_DAYS:
+                out.append(_mk_issue(
+                    "#24", "warning", slug,
+                    f"stale_threshold_days={days} — 제품 stale 기준은 {STALE_DAYS}일이라 lint #7과 어긋난다",
+                ))
+        for fields in _walk_keys(block, "required_fields"):
+            if not isinstance(fields, list):
+                continue
+            missing = [f for f in _PRODUCT_REQUIRED_FIELDS if f not in fields]
+            if missing:
+                out.append(_mk_issue(
+                    "#24", "info", slug,
+                    f"required_fields에 {missing} 없음 — 제품 #10은 페이지에 이 필드를 요구한다",
+                ))
+    return out
+
+
 # ────────────────────────── 합쳐서 run ──────────────────────────
 
 
@@ -1228,6 +1324,8 @@ def run_all(vault: Vault) -> dict:
         issues.extend(check_journal_summary_completeness(vault))
         # v0.8.0+ (Semantic Relation Integrity)
         issues.extend(check_semantic_relations(vault))
+        # ADR 2026-09-25 (vault policy slot)
+        issues.extend(check_policy_contract(vault))
     finally:
         _scan_local.cache = None
 

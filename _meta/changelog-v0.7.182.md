@@ -474,3 +474,21 @@ ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 3단계의 화면. 관�
 - 실 vault 사본(173문서): 본문만 고친 12건 모두 캐시 적중, 링크 추가 시 재계산. 캐시 적중 응답과 캐시를 비우고 새로 계산한 응답이 **모든 노드 필드·엣지 동일**
 - `GET /graph` 문서 수정 직후: 중앙 0.72s → **0.39s** (DB 증분 ~0.35s + 나머지 ~0.06s)
 - pytest 884 passed
+
+## 28. lint #24 운영 지침 계약 — 정책 값을 제품의 실제 계약과 대조
+
+ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 4단계. 정책 repo 검증기는 type 9종·stale 90일을 상수로 들고 있어 제품이 바뀌면 조용히 낡았다(정책 repo CHANGELOG v1.13.0의 CI 제거 이유). 이제 제품이 자기 상수로 직접 검사한다.
+
+- **`check_policy_contract` (#24)** — `_meta/policy/VAULT-POLICY.md`의 ```yaml 블록만 본다. 정책 본문(저장 기준 등 판단 내용)은 사용자 소유라 검사하지 않는다. 파일이나 yaml 블록이 없으면 보고 없음
+  - `types`가 제품 9종 밖 → warning (그 type의 페이지는 Dashboard 파생 view에서 분류되지 않는다). 단 `validator_exceptions`의 `core-types` 예외 중 `approved_by`·`approved_at`이 있는 값은 인정 — 정책 repo의 기존 소유자 승인 계약을 그대로 따른다
+  - `stale_threshold_days`가 `STALE_DAYS`(90)와 다름 → warning
+  - `required_fields`에 #10 필수 필드(title/type/created/updated) 중 빠진 것 → info
+  - yaml 블록 파싱 실패 → info
+- **`contracts.PAGE_TYPES`** — type 9종이 `validate_gardening_schema` 안의 지역 변수에만 있었다. 모듈 상수로 올려 쓰기 검증과 #24가 같은 원본을 쓴다(세 번째 사본을 만들지 않음)
+- README lint 수 22 → 23
+
+### 검증
+
+`tests/test_lint_policy_contract.py` 10건 (RED 확인 후 GREEN). 전체 pytest 895 passed(README 수치 갱신 전 가드 1건 실패 → 갱신 후 통과), 대시보드 `LintPage.dynamic-checks` 계약 4건 통과.
+
+실제 정책 7개(정책 repo `vaults/*.md`)를 임시 vault에 복사해 돌린 결과: 6개 0건, homelab 1건 — `required_fields`에 `created`가 없다(info, 실제 불일치). harumoa의 소유자 승인 type 예외 5종은 경고 없이 통과했다.

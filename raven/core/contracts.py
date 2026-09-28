@@ -80,6 +80,13 @@ class WriteResult:
     message: str = ""
 
 
+# SCHEMA.md type 9종 — 제품이 강제하는 page type 계약의 단일 원본.
+# 쓰기 검증과 lint #24(운영 지침 계약)가 함께 쓴다.
+PAGE_TYPES: frozenset[str] = frozenset({
+    "concept", "person", "tool", "comparison", "project", "rule", "query", "journal", "issue",
+})
+
+
 # ────────────────────────── write contract ──────────────────────────
 
 
@@ -487,8 +494,7 @@ def validate_gardening_schema(vault, slug: str, content: str, meta: dict) -> lis
     
     # 1. Check type
     ptype = (meta.get("type") or "").strip().lower()
-    valid_types = {"concept", "person", "tool", "comparison", "project", "rule", "query", "journal", "issue"}
-    if not ptype or ptype not in valid_types:
+    if not ptype or ptype not in PAGE_TYPES:
         missing.append("올바른 type (frontmatter)")
         return missing
 
