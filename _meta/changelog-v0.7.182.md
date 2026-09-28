@@ -435,3 +435,17 @@ ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 3단계의 백엔드. �
 ### 검증
 
 `tests/test_vault_policy_api.py` 6건 (RED 확인 후 GREEN) — 빈 vault 읽기가 파일을 만들지 않음, 본문 그대로 저장, 낡은 토큰 409, 중복 생성 409, log create/update, 없는 vault 404. 전체 pytest 879 passed, 1 skipped.
+
+## 26. 운영 지침 편집 화면 — Dashboard
+
+ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 3단계의 화면. 관리 페이지 vault 행의 **운영 지침** 버튼 → 전용 화면 `/vault/policy/:vault`.
+
+- **보기/편집**: 지침을 Markdown으로 렌더하고, 편집을 누르면 textarea(`TextField multiline`)로 바뀐다. 저장 토스트 2400ms (Dashboard 규약)
+- **빈 상태**: `EmptyState` + CTA 두 개 — **템플릿에서 시작**(서버가 준 빈 양식을 편집기에 채움) / **빈 문서로 시작**. 어느 쪽도 저장 전에는 파일을 만들지 않는다
+- **충돌**: 읽은 시점의 `precondition`을 PUT에 싣는다. 409면 "다른 곳에서 먼저 저장됐습니다" 안내와 **새로 불러오기** 버튼을 띄우고, 내 초안은 지우지 않는다
+- API 클라이언트 `getVaultPolicy` / `putVaultPolicy` + `PolicyConflictError`(409 식별용)
+- 공통 컴포넌트(`PageHeader`·`EmptyState`·`TextField`·`Button`·`Toast`)와 CSS 토큰만 사용 — 새 공통 컴포넌트 없음
+
+### 검증
+
+`dashboard/tests/VaultPolicyPage.test.tsx` 4건 (RED 확인 후 GREEN) — 템플릿은 누를 때만 채움(저장 호출 없음), 새 지침은 `precondition: ""`, 기존 지침은 읽은 토큰, 409 시 초안 유지. `tsc -b --noEmit` 통과, vitest 287 passed / 1 skipped, `npm run build` 성공.

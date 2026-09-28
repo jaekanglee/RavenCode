@@ -385,6 +385,42 @@ export async function deletePage(vault: string, slug: string) {
   return r.json();
 }
 
+// ────────────────────────── vault policy (ADR 2026-09-25) ──────────────────────────
+
+export interface VaultPolicy {
+  vault: string;
+  path: string;
+  content: string | null;
+  modified: string | null;
+  /** 읽은 시점의 파일 상태 토큰. "" = 아직 없음. */
+  precondition: string;
+  /** 지침이 없을 때만 오는 빈 양식. */
+  template?: string;
+}
+
+/** PUT 409 — 읽은 뒤 다른 곳에서 먼저 저장됐다. */
+export class PolicyConflictError extends Error {}
+
+export async function getVaultPolicy(vault: string): Promise<VaultPolicy> {
+  const r = await apiFetch(`/api/vaults/${encodeURIComponent(vault)}/policy`);
+  if (!r.ok) throw new Error(`policy load failed: ${r.status}`);
+  return r.json();
+}
+
+export async function putVaultPolicy(
+  vault: string,
+  payload: { content: string; precondition: string },
+): Promise<{ ok: boolean; vault: string; precondition: string }> {
+  const r = await apiFetch(`/api/vaults/${encodeURIComponent(vault)}/policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (r.status === 409) throw new PolicyConflictError("stale_precondition");
+  if (!r.ok) throw new Error(`policy save failed: ${r.status}`);
+  return r.json();
+}
+
 // ────────────────────────── log (v0.5.0+) ──────────────────────────
 
 export interface LogEntry {

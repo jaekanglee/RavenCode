@@ -320,7 +320,7 @@ export function VaultManage() {
                     {editing ? (
                       <><Button variant="secondary" size="sm" disabled={busy} onClick={() => void renameVault()}>저장</Button>{" "}<Button variant="secondary" size="sm" disabled={busy} onClick={() => setEditingName(null)}>취소</Button></>
                     ) : (
-                      <><Button variant="secondary" size="sm" disabled={busy} onClick={() => { setEditingName(vault.name); setNewName(vault.name); }}>이름 변경</Button>{" "}<Button variant="danger" size="sm" disabled={busy} onClick={() => void deleteVault(vault.name)}>삭제</Button></>
+                      <><Button variant="secondary" size="sm" disabled={busy} onClick={() => navigate(`/vault/policy/${encodeURIComponent(vault.name)}`)}>운영 지침</Button>{" "}<Button variant="secondary" size="sm" disabled={busy} onClick={() => { setEditingName(vault.name); setNewName(vault.name); }}>이름 변경</Button>{" "}<Button variant="danger" size="sm" disabled={busy} onClick={() => void deleteVault(vault.name)}>삭제</Button></>
                     )}
                   </td>
                 </tr>

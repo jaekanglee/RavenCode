@@ -12,6 +12,7 @@ const LogPage = lazy(() => import("./routes/LogPage").then((m) => ({ default: m.
 const LintPage = lazy(() => import("./routes/LintPage").then((m) => ({ default: m.LintPage })));
 const NewVaultPage = lazy(() => import("./routes/NewVaultPage").then((m) => ({ default: m.NewVaultPage })));
 const VaultManage = lazy(() => import("./routes/VaultManage").then((m) => ({ default: m.VaultManage })));
+const VaultPolicyPage = lazy(() => import("./routes/VaultPolicyPage").then((m) => ({ default: m.VaultPolicyPage })));
 const ArchivePage = lazy(() => import("./routes/ArchivePage").then((m) => ({ default: m.ArchivePage })));
 const GardenPage = lazy(() => import("./routes/GardenPage").then((m) => ({ default: m.GardenPage })));
 const RawPanel = lazy(() => import("./routes/RawPanel").then((m) => ({ default: m.RawPanel })));
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/workspace" element={<Suspense fallback={<RouteFallback />}><WorkspacePage /></Suspense>} />
           <Route path="/vault/new" element={<Suspense fallback={<RouteFallback />}><NewVaultPage /></Suspense>} />
           <Route path="/vault/manage" element={<Suspense fallback={<RouteFallback />}><VaultManage /></Suspense>} />
+          <Route path="/vault/policy/:vault" element={<Suspense fallback={<RouteFallback />}><VaultPolicyPage /></Suspense>} />
           <Route path="/archive" element={<Suspense fallback={<RouteFallback />}><ArchivePage /></Suspense>} />
           {/* v0.7.50+: raw/ folder panel */}
           <Route path="/raw/:vault/*" element={<Suspense fallback={<RouteFallback />}><RawPanel /></Suspense>} />
