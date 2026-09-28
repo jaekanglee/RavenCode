@@ -492,3 +492,15 @@ ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 4단계. 정책 repo 검
 `tests/test_lint_policy_contract.py` 10건 (RED 확인 후 GREEN). 전체 pytest 895 passed(README 수치 갱신 전 가드 1건 실패 → 갱신 후 통과), 대시보드 `LintPage.dynamic-checks` 계약 4건 통과.
 
 실제 정책 7개(정책 repo `vaults/*.md`)를 임시 vault에 복사해 돌린 결과: 6개 0건, homelab 1건 — `required_fields`에 `created`가 없다(info, 실제 불일치). harumoa의 소유자 승인 type 예외 5종은 경고 없이 통과했다.
+
+## 29. 여러 줄 입력칸이 한 줄 높이로 나오던 문제 — `TextField multiline`
+
+공통 `.input-base`가 `height: 56px`로 고정돼 있어 `TextField multiline`의 textarea가 `rows`를 무시하고 한 줄 높이로 나왔다. 운영 지침 화면(§26) 실제 앱 확인에서 발견해 그 화면만 우회했던 것(`6a83c57`)을 공통 CSS로 옮긴다.
+
+- `globals.css`에 `textarea.input-base { height: auto; }` — 한 줄 input은 그대로 56px
+- 영향 범위: `input-base`를 쓰는 textarea는 `TextField multiline`뿐이다 — 새 이슈 발행 모달의 문제 상황·원인 분석·해결 방안, 운영 지침 편집칸. 다른 textarea(`EditButton`, `NewPageButton`, `InlineMarkdownEditor`, `RawPanel`, `PageView`)는 이 클래스를 쓰지 않아 영향 없음
+- `VaultPolicyPage`의 화면 한정 우회(`style={{ height: "auto" }}`) 제거
+
+### 검증
+
+헤드리스 Chromium 실측(임시 vault registry, 실제 vault 무관): 새 이슈 모달 textarea 113/113/92px(rows 4/4/3), 제목·BLUF 한 줄 input 유지, 운영 지침 편집칸 529px(rows 24). `tsc -b --noEmit` 통과, vitest 287 passed / 1 skipped, `npm run build` 성공.

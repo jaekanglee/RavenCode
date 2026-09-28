@@ -946,6 +946,10 @@ mark {
   transition: border-color 0.12s ease;
   box-sizing: border-box;
 }
+/* TextField multiline — height: 56px 고정이 textarea의 rows를 무시하게 만들었다. */
+textarea.input-base {
+  height: auto;
+}
 .input-base:focus {
   border-bottom-color: var(--cds-focus);
 }

@@ -114,8 +114,6 @@ export function VaultPolicyPage() {
             hideLabel
             multiline
             rows={24}
-            // .input-base가 height: 56px로 고정해 rows가 무시된다 — 이 화면에서만 푼다.
-            style={{ height: "auto" }}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
           />
