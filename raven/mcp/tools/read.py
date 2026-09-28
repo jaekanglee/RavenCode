@@ -106,19 +106,10 @@ def wiki_get_policy(ctx: Optional[VaultContext] = None) -> dict:
 
     Read-only delivery (ADR 2026-09-25): never creates or rewrites the file.
     """
-    from datetime import datetime
-
-    from raven.core.vault import VAULT_POLICY_RELPATH
+    from raven.core.policy import read_policy
 
     ctx = ctx or VaultContext(vault=db._default_vault())
-    path = Path(ctx.vault) / VAULT_POLICY_RELPATH
-    if not path.is_file():
-        return {"path": VAULT_POLICY_RELPATH, "content": None, "modified": None}
-    return {
-        "path": VAULT_POLICY_RELPATH,
-        "content": path.read_text(encoding="utf-8"),
-        "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
-    }
+    return read_policy(Path(ctx.vault))
 
 
 # ─────────────── 8. wiki_relations_list ───────────────

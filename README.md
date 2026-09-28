@@ -22,7 +22,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
 | **CLI** (사람/자동화) | Typer 7 top-level commands + 11 subcommand groups | `raven/cli/` |
-| **API** (HTTP) | FastAPI 66 endpoints | `raven/api/` |
+| **API** (HTTP) | FastAPI 68 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 24 tools + 4 resources | `raven/mcp/` |
 
@@ -246,7 +246,7 @@ raven docs show <topic>                         # Tier 1 문서 조회 (OPERATIO
 
 ---
 
-## HTTP API (66 endpoints)
+## HTTP API (68 endpoints)
 
 ```bash
 # vault 관리
@@ -261,6 +261,10 @@ GET    /api/vaults/{name}/pages/{slug}/export.md # 문서 .md 내보내기 (atta
 POST   /api/vaults/{name}/pages                  # body: {slug, title, content, type, tags}
 PUT    /api/vaults/{name}/pages/{slug}           # body: {content, title?, type?, tags?}
 DELETE /api/vaults/{name}/pages/{slug}           # → _archive/
+
+# 운영 지침 (_meta/policy/VAULT-POLICY.md, 사용자 소유)
+GET    /api/vaults/{name}/policy                 # 없으면 content null + 빈 양식 template
+PUT    /api/vaults/{name}/policy                 # body: {content, precondition?} — 본문 그대로 저장, 낡은 토큰은 409
 
 # 쿼리
 GET    /api/vaults/{name}/search?q=X&top_k=N

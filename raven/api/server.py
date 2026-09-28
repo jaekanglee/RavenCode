@@ -27,6 +27,7 @@ from raven.core import db_module, lint_module, export_module
 from raven.core import slug_module, frontmatter_module, archive_module
 from raven.core import log_module
 from raven.core import contracts
+from raven.core import policy as policy_module
 from raven.core.vault import Vault
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
@@ -228,6 +229,11 @@ class PageUpdate(BaseModel):
     type: Optional[str] = None
     tags: Optional[list[str]] = None
     extra_meta: Optional[dict[str, Any]] = None
+    precondition: Optional[str] = None
+
+
+class PolicyUpdate(BaseModel):
+    content: str
     precondition: Optional[str] = None
 
 
@@ -1618,6 +1624,30 @@ def get_page(name: str, slug: str):
 
 # ─── vault management (v0.6.10+) ─────────────────────────────────
 # stats / rename / delete — 운영자가 vault 단위로 관리할 수 있는 API.
+
+@app.get("/api/vaults/{name}/policy")
+def get_policy(name: str):
+    """vault owner's operating policy (ADR 2026-09-25). Reading never creates the file.
+
+    `template` is the blank form for "start from template", present only while
+    no policy exists.
+    """
+    v = _vault_or_404(name)
+    body = policy_module.read_policy(v.root)
+    if body["content"] is None:
+        body["template"] = policy_module.policy_template()
+    return {"vault": name, **body}
+
+
+@app.put("/api/vaults/{name}/policy")
+def put_policy(name: str, payload: PolicyUpdate):
+    """Save the policy verbatim. `precondition=""` asserts it does not exist yet."""
+    v = _vault_or_404(name)
+    result = policy_module.write_policy(v, payload.content, precondition=payload.precondition)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.error)
+    return {"ok": True, "vault": name, "precondition": result.precondition}
+
 
 @app.get("/api/vaults/{name}/stats")
 def vault_stats(name: str):

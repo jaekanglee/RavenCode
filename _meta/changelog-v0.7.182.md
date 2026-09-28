@@ -419,3 +419,19 @@ ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery`의 2단계. 별도 정�
 - 실 vault 사본(169문서, 일반 3 + 목차 1 수정): pages/tags/links/relations/FTS/스냅샷 **전부 일치**, 검색 4개 질의 결과 일치. 증분 0.33s vs 전체 1.3~2.2s
 - `GET /graph` 문서 수정 직후 (같은 방법 A/B, 5회): 전 1.18~1.64s(중앙 1.24) → 후 0.72~1.16s(중앙 0.86). 남은 시간은 서버 ForceAtlas 60회(~0.3s) + 분석·응답 조립
 - pytest 873 passed
+
+## 25. vault 운영 지침 REST — Dashboard 편집기의 백엔드
+
+ADR `adr-2026-09-25-vault-policy-slot-and-mcp-delivery` 3단계의 백엔드. 사람이 지침을 읽고 쓰는 경로다(에이전트는 계속 MCP 읽기만).
+
+- **`raven/core/policy.py`** — 읽기·쓰기 계약을 한곳에 둔다. MCP `wiki_get_policy`도 이제 여기의 `read_policy`를 호출한다(응답에 `precondition` 추가)
+  - `write_policy`: 본문을 **그대로** 저장한다. 페이지처럼 frontmatter(title/type/updated)를 끼워 넣지 않는다 — 지침은 페이지가 아니다. 파일 lock + `atomic_write_text`, `log.md`에 create/update 기록
+  - lost update 방지: `precondition_for_path` 토큰(페이지 PUT과 같은 sha256). `""`는 "아직 없다"는 단언이라, 이미 있는 지침을 새로 만들려 하면 거부된다
+- **`GET /api/vaults/{name}/policy`** — `{vault, path, content, modified, precondition}`. 지침이 없으면 `content: null`과 함께 빈 양식 `template`을 준다. 읽기는 파일을 만들지 않는다
+- **`PUT /api/vaults/{name}/policy`** — `{content, precondition?}`. 토큰이 어긋나면 409
+- **빈 양식** `raven/core/templates/policy/VAULT-POLICY.md` — 질문만 있고 값이 없다(범위·문서 종류·저장 기준·승인이 필요한 행동). 운영 철학은 제품이 정하지 않는다는 ADR 경계. 데스크톱 번들은 `raven/` 전체를 복사하므로 포함된다
+- README 엔드포인트 수 66 → 68
+
+### 검증
+
+`tests/test_vault_policy_api.py` 6건 (RED 확인 후 GREEN) — 빈 vault 읽기가 파일을 만들지 않음, 본문 그대로 저장, 낡은 토큰 409, 중복 생성 409, log create/update, 없는 vault 404. 전체 pytest 879 passed, 1 skipped.
