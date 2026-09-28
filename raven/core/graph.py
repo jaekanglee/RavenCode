@@ -6,6 +6,8 @@ node positions inline in the HTTP handler file. `server.py` now imports them.
 """
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -413,7 +415,7 @@ def folder_group_for_slug(slug: str) -> tuple[str, str]:
     return first, first
 
 
-def forceatlas_layout(
+def _forceatlas_layout_uncached(
     ids: list[str],
     edges: list[tuple[str, str]],
     weights: dict[str, int] | None = None,
@@ -717,3 +719,75 @@ def forceatlas_layout(
             pos_y[i] += dy[i] * scale
 
     return normalize_layout(ids, pos_x, pos_y)
+
+
+# ─────────────── 레이아웃 메모이제이션 ───────────────
+# forceatlas_layout은 결정적이다(random 없음) — 입력이 같으면 좌표도 같다. 본문만 고친
+# 편집은 노드·링크·가중치가 그대로라, 문서 수정 직후 GET /graph가 같은 레이아웃을 매번
+# 다시 계산했다(169문서 60회 ~0.3초). 입력 해시로 최근 몇 개를 기억한다.
+_LAYOUT_CACHE_MAX = 8
+_layout_cache: "OrderedDict[str, dict[str, tuple[float, float]]]" = OrderedDict()
+
+
+def clear_layout_cache() -> None:
+    _layout_cache.clear()
+
+
+def _layout_cache_key(
+    ids: list[str],
+    edges: list[tuple[str, str]],
+    weights: dict[str, int] | None,
+    iterations: int,
+    communities: dict[str, int] | None,
+    edge_weights: list[float] | None,
+) -> str:
+    payload = repr((
+        tuple(ids),
+        tuple((str(a), str(b)) for a, b in edges),
+        tuple(sorted((weights or {}).items())),
+        int(iterations),
+        tuple(sorted((communities or {}).items())),
+        tuple(edge_weights) if edge_weights is not None else None,
+    ))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def forceatlas_layout(
+    ids: list[str],
+    edges: list[tuple[str, str]],
+    weights: dict[str, int] | None = None,
+    iterations: int = 400,
+    communities: dict[str, int] | None = None,
+    edge_weights: list[float] | None = None,
+) -> dict[str, tuple[float, float]]:
+    """_forceatlas_layout_uncached의 입력 해시 캐시. 결과는 복사본 — 호출자가 사용자
+    저장 좌표를 덮어써도 캐시 원본은 바뀌지 않는다.
+
+    입력을 정렬해 표준 순서로 만든 뒤 계산한다. 서버는 노드·링크를 DB 행 순서로 넘기는데
+    증분 재빌드가 고친 페이지를 맨 뒤로 다시 넣어 순서가 바뀐다 — 순서에 기대면 본문만
+    고쳐도 캐시가 빗나가고 좌표가 매번 조금씩 흔들렸다.
+    """
+    ids = sorted(ids)
+    # 가중치가 링크와 1:1일 때만 같이 재배열한다 (길이가 다르면 짝이 깨지므로 순서 유지).
+    if edge_weights is None or len(edge_weights) == len(edges):
+        edge_order = sorted(range(len(edges)), key=lambda i: (str(edges[i][0]), str(edges[i][1])))
+        edges = [edges[i] for i in edge_order]
+        if edge_weights is not None:
+            edge_weights = [edge_weights[i] for i in edge_order]
+    key = _layout_cache_key(ids, edges, weights, iterations, communities, edge_weights)
+    cached = _layout_cache.get(key)
+    if cached is None:
+        cached = _forceatlas_layout_uncached(
+            ids,
+            edges,
+            weights=weights,
+            iterations=iterations,
+            communities=communities,
+            edge_weights=edge_weights,
+        )
+        _layout_cache[key] = cached
+        while len(_layout_cache) > _LAYOUT_CACHE_MAX:
+            _layout_cache.popitem(last=False)
+    else:
+        _layout_cache.move_to_end(key)
+    return dict(cached)

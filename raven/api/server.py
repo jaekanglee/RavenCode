@@ -1100,13 +1100,18 @@ def vault_graph(
                 # 하이브리드 가중치 = in-degree 링크 수 + (importance - 1) * 3.5
                 node["weight"] = int(in_degree.get(slug, 0) + (node["importance"] - 1.0) * 3.5)
             # intent='auto' or 'broken' 만 edge로 (missing은 의도적 placeholder)
+            # ORDER BY: A↔B 상호 링크는 아래에서 한 방향만 남기는데, 어느 쪽이 남을지가 행
+            # 순서를 따랐다. 증분 재빌드가 고친 페이지의 링크를 맨 뒤로 다시 넣으면 방향이
+            # 뒤집혀 본문만 고쳐도 레이아웃 입력이 바뀌었다.
             edges_raw = db.execute(
                 "SELECT source_slug, target_slug FROM links WHERE intent IN ('auto', 'broken')"
+                " ORDER BY source_slug, target_slug"
             ).fetchall()
 
             # 의미 관계(relations) 테이블의 데이터 가져오기
             relations_raw = db.execute(
                 "SELECT source_slug, target_slug, relation_type, evidence, reason FROM relations"
+                " ORDER BY source_slug, target_slug, relation_type"
             ).fetchall()
 
             # 의미 관계와 일반 wikilink 병합
@@ -1176,6 +1181,11 @@ def vault_graph(
                             src_node = nodes_map.get(e["source"])
                             if src_node:
                                 src_node["broken_dependency"] = True
+
+            # 노드·링크를 id 순으로 — DB 행 순서는 증분 재빌드마다 바뀌어(고친 페이지가 맨
+            # 뒤로 감) Louvain 번호와 레이아웃 좌표가 본문만 고쳐도 흔들렸다.
+            nodes.sort(key=lambda n: n["id"])
+            edges.sort(key=lambda e: (e["source"], e["target"], e.get("relation_type") or ""))
 
             # 5대 핵심 의미 관계에 더 높은 가중치(5.0) 부여
             edge_weights = []
@@ -1362,6 +1372,10 @@ def vault_graph(
                     src_node = nodes_map.get(e["source"])
                     if src_node:
                         src_node["broken_dependency"] = True
+
+    # 노드·링크를 id 순으로 (위 분기와 같은 이유 — 행 순서에 기대지 않는다)
+    nodes.sort(key=lambda n: n["id"])
+    edges.sort(key=lambda e: (e["source"], e["target"], e.get("relation_type") or ""))
 
     # 5대 핵심 의미 관계에 높은 가중치(5.0) 부여
     edge_weights = []
