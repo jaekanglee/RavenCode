@@ -2,11 +2,11 @@
 
 Readiness protocol:
   stdout line 1 → {"host": "127.0.0.1", "port": <int>}
-  With --mcp:    → {..., "mcp_port": <int>, "mcp_host": "<actual bind address>"}
+  With --mcp:    → {..., "mcp_port": <int>, "mcp_host": "<dialable address>"}
 
-  ``mcp_host`` is reported verbatim (not normalised to loopback like ``host``)
-  because MCP binds a different address than the API — the shell logs it so the
-  operator can see where external agents should point.
+  ``mcp_host`` is not normalised to loopback like ``host`` — the shell shows it
+  so the operator can see where external agents should point. A 0.0.0.0 bind is
+  reported as the Tailscale IP (else loopback), since 0.0.0.0 is not dialable.
 
 The Tauri shell reads this line, then exposes the endpoint(s) to the webview
 via the ``core_endpoint`` / ``mcp_endpoint`` commands.
@@ -15,12 +15,12 @@ External access (Tailscale):
   --host 0.0.0.0  binds all interfaces (same pattern as ``python -m raven.api``).
   The readiness JSON always reports 127.0.0.1 so the local webview keeps working.
 
-  MCP binds separately (--mcp-host). The API goes LAN-wide on purpose so phones
-  and tablets can reach the dashboard, but MCP has no authentication of any
-  kind — inheriting 0.0.0.0 would hand every device on the network an
-  unauthenticated write surface onto the vaults. When the API binds 0.0.0.0 the
-  MCP listener falls back to the Tailscale IP, and to loopback if there is no
-  tailnet. Override explicitly with --mcp-host.
+  MCP binds separately (--mcp-host). v0.7.182 §31: when the API binds 0.0.0.0,
+  MCP binds 0.0.0.0 too, behind ``raven.mcp.auth.LanTokenAuth`` — loopback and
+  tailnet clients pass as before, every other source (LAN) needs a Bearer token
+  issued with ``raven mcp token add``. With no token issued the LAN gets 401 on
+  every request, so the wider bind changes nothing until the owner opts in.
+  Narrow it again with --mcp-host / RAVEN_MCP_HOST (e.g. the Tailscale IP).
 
 MCP is best-effort (v0.7.184+)
 ------------------------------
@@ -135,17 +135,25 @@ def _port_is_free(host: str, port: int) -> bool:
 
 
 def _resolve_mcp_host(explicit: str | None, api_host: str) -> str:
-    """Pick the MCP bind address, which is deliberately narrower than the API's.
+    """Pick the MCP bind address — follows the API, explicit override wins.
 
-    The API binds 0.0.0.0 so LAN devices reach the dashboard. MCP must not
-    inherit that: it has no auth, so 0.0.0.0 would expose an unauthenticated
-    write surface to the whole network. Prefer the tailnet, fall back to
-    loopback, and always honour an explicit override.
+    Binding 0.0.0.0 is safe because the MCP app is wrapped in LanTokenAuth
+    (LAN clients need a token; loopback/tailnet pass). Before v0.7.182 §31 this
+    fell back to the Tailscale IP since MCP had no auth at all.
     """
     if explicit:
         return explicit
-    if api_host != "0.0.0.0":
-        return api_host
+    return api_host
+
+
+def _advertised_mcp_host(bind_host: str) -> str:
+    """Address to report in the readiness line — 0.0.0.0 is not dialable.
+
+    The shell shows it as the MCP endpoint; prefer the tailnet (no token
+    needed there), else loopback.
+    """
+    if bind_host != "0.0.0.0":
+        return bind_host
     try:
         from raven.api.main import get_tailscale_ip
 
@@ -159,6 +167,7 @@ def _build_mcp_app(mode: str, host: str):
     """Create the MCPServer streamable-http Starlette app (same as raven.mcp.cli)."""
     from mcp.server.mcpserver import MCPServer
     from mcp.server.transport_security import TransportSecuritySettings
+    from raven.mcp.auth import LanTokenAuth
     from raven.mcp.cli import register_tools, server_instructions
     from raven.mcp.resources import register_resources
     from raven.core.registry import registry
@@ -174,10 +183,10 @@ def _build_mcp_app(mode: str, host: str):
     register_resources(mcp)
     # transport_security: SDK가 host 미지정 시 Host 헤더를 loopback으로 잠가
     # Tailscale/LAN 클라이언트에 421을 준다. raven.mcp.cli와 동일 정책.
-    return mcp.streamable_http_app(
+    return LanTokenAuth(mcp.streamable_http_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         host=host,
-    )
+    ))
 
 
 def main() -> int:
@@ -240,10 +249,10 @@ def main() -> int:
     mcp_server: uvicorn.Server | None = None
     if args.mcp:
         mcp_host = _resolve_mcp_host(args.mcp_host, bind_host)
-        if mcp_host != bind_host:
+        if mcp_host == "0.0.0.0":
             print(
-                f"🔐 [Desktop Core] MCP bound to {mcp_host} "
-                f"(API is on {bind_host}; MCP is unauthenticated so it is not LAN-wide)",
+                "🔐 [Desktop Core] MCP bound to 0.0.0.0 — loopback/tailnet open, "
+                "LAN needs a token (raven mcp token add <name>)",
                 file=sys.stderr,
             )
         if not _port_is_free(mcp_host, args.mcp_port):
@@ -320,7 +329,7 @@ def main() -> int:
     ready = {"host": LOOPBACK_HOST, "port": api_port}
     if mcp_ready:
         ready["mcp_port"] = args.mcp_port
-        ready["mcp_host"] = mcp_host
+        ready["mcp_host"] = _advertised_mcp_host(mcp_host)
     print(json.dumps(ready), flush=True)
 
     try:

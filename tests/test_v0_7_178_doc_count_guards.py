@@ -68,7 +68,9 @@ def test_readme_lint_count_matches_registry():
 
 def test_readme_cli_group_count_matches_source():
     groups = source_count(
-        "raven/cli/__main__.py", r'app\.add_typer\([a-z_]+_app,\s*name="[a-z]+"'
+        # 줄 맨 앞 app.add_typer만 — mcp_app.add_typer(mcp_token_app, ...) 같은
+        # 중첩 그룹은 top-level 서브커맨드 그룹이 아니다.
+        "raven/cli/__main__.py", r'(?m)^app\.add_typer\([a-z_]+_app,\s*name="[a-z]+"'
     )
     assert readme_numbers(r"Typer (\d+) top-level commands \+ (\d+) subcommand groups")[1] == groups
     assert readme_numbers(r"## 핵심 명령 \(CLI — (\d+) top-level \+ (\d+) 서브커맨드 그룹\)")[1] == groups

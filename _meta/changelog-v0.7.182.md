@@ -522,3 +522,20 @@ Markdown(.md) 저장만 남긴다. vault 원본 그대로라 이식성이 더 �
 ### 검증
 
 `PageExport.test.tsx`: 인쇄 관련 4건 삭제(인쇄문서 구성·escape·iframe 수명·pdf 본문 전달), "PDF 버튼 숨김" 테스트는 "PDF 버튼은 없다" 회귀 가드로 전환. `tsc -b --noEmit` 통과, vitest 283 passed / 1 skipped(287 → 삭제 4건), `npm run build` 성공.
+
+## 31. MCP 내부망 개방 + 토큰 인증 — 허락한 사람만 LAN에서 붙는다
+
+MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했다. Tailscale 없는 같은 내부망 기기에서도 에이전트를 붙이되, vault owner가 허락한 사람만 들어오게 한다. ADR `adr-2026-09-30-mcp-lan-token-auth`.
+
+- **`raven/mcp/auth.py::LanTokenAuth`** — MCP ASGI 앱 앞단. loopback·tailnet(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) 출처는 통과, 그 외는 `Authorization: Bearer <token>` 필수(401 + `WWW-Authenticate`). 발급 0개면 내부망 전부 401. 출처는 소켓 주소로만 판단
+- **`raven/core/mcp_tokens.py`** — `<VAULTS_ROOT>/.mcp-tokens.json`(0600)에 이름·SHA-256·발급일만. 요청마다 다시 읽어 revoke가 재시작 없이 반영. `raven/mcp/` 아래는 ToolError 외 예외 금지 가드가 있어 저장소는 core에 둔다(CLI와 공유 계약이기도 함)
+- **CLI `raven mcp token add|list|revoke`** — 평문은 add 때 한 번만 출력. 서브커맨드 그룹 11 → 12 (README 가드 갱신)
+- **데스크톱 바인딩** — `_resolve_mcp_host`가 API 주소를 따른다(기본 0.0.0.0). readiness의 `mcp_host`는 접속 가능한 주소(`_advertised_mcp_host`: tailnet IP → loopback)라 Rust 쪽 변경 없음. `RAVEN_MCP_HOST`로 다시 좁힐 수 있음
+- **범위 밖** — standalone `raven.mcp.cli`. team 인스턴스(launchd `0.0.0.0:8767`, write)와 Docker `mcp-http`(클라이언트가 게이트웨이 IP로 보임)가 이미 내부망에 열려 있어 적용 시 즉시 401로 깨진다
+- README MCP 절에 "내부망 접근 — 토큰", AGENTS.md §2 "MCP는 어디에 떠 있나" 갱신
+
+### 검증
+
+`tests/test_mcp_lan_token_auth.py` 16건 + README CLI 그룹 수 가드가 중첩 그룹(`mcp token`)을 세지 않게 정규식을 줄 맨 앞 `app.add_typer`로 좁힘 (RED 확인 후 GREEN): 해시만 저장·0600, 중복 이름 거부, verify/revoke, loopback·tailnet 5종 무토큰 통과, 발급 0개 401, 토큰 없음/틀림/scheme 누락 401, revoke 즉시 반영, tailnet 대역 바로 밖(100.128.0.1) 401, 바인딩/광고 주소, 앱 래핑, CLI add/list/revoke.
+
+실서버 확인(임시 `WIKI_VAULTS_DIR`, `--host 0.0.0.0 --mcp`): loopback 200 · tailnet 200 · LAN 무토큰 401 · 틀린 토큰 401 · 맞는 토큰 200 · `X-Forwarded-For: 127.0.0.1` 위조 401 · revoke 후 401 · 토큰 파일 `-rw-------`.

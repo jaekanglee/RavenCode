@@ -73,6 +73,12 @@ app.add_typer(note_app, name="note")
 app.add_typer(collection_app, name="collection")
 app.add_typer(curator_app, name="curator")
 app.add_typer(docs_app, name="docs")
+mcp_app = typer.Typer(help="MCP 서버 관리 — 내부망 접근 토큰 (v0.7.182+).")
+mcp_token_app = typer.Typer(
+    help="내부망(LAN) MCP 접근 토큰. loopback/tailnet은 토큰 없이 통과한다."
+)
+mcp_app.add_typer(mcp_token_app, name="token")
+app.add_typer(mcp_app, name="mcp")
 
 
 # ────────────────────────── top-level ──────────────────────────
@@ -1754,6 +1760,52 @@ def docs_show(
         raise typer.Exit(code=1)
 
     typer.echo(src.read_text(encoding="utf-8"))
+
+
+# ────────────────────────── mcp token (LAN 접근) ──────────────────────────
+# ADR 2026-09-30 mcp-lan-token-auth. 파일엔 해시만 — 평문은 add 때 한 번만 보인다.
+
+
+@mcp_token_app.command("add")
+def mcp_token_add(
+    name: str = typer.Argument(..., help="누구/어떤 기기용인지 (예: 민수-노트북)"),
+) -> None:
+    """토큰 발급 — 평문은 지금 한 번만 출력된다."""
+    from raven.core import mcp_tokens as auth
+
+    try:
+        token = auth.add_token(name)
+    except ValueError as e:
+        typer.echo(f"❌ {e}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"✅ 토큰 발급: {name}")
+    typer.echo(f"   {token}")
+    typer.echo("⚠️  다시 볼 수 없습니다. 지금 전달하세요. 잃어버리면 revoke 후 새로 발급.")
+    typer.echo('   클라이언트 설정: "headers": {"Authorization": "Bearer <token>"}')
+
+
+@mcp_token_app.command("list")
+def mcp_token_list() -> None:
+    """발급된 토큰의 이름·발급일 (토큰 값은 저장돼 있지 않다)."""
+    from raven.core import mcp_tokens as auth
+
+    tokens = auth.list_tokens()
+    if not tokens:
+        typer.echo("(발급된 토큰 없음 — 내부망 MCP 요청은 전부 401)")
+        return
+    for t in tokens:
+        typer.echo(f"  {t['name']:24s} {t['created']}")
+
+
+@mcp_token_app.command("revoke")
+def mcp_token_revoke(name: str = typer.Argument(..., help="회수할 토큰 이름")) -> None:
+    """토큰 회수 — 재시작 없이 즉시 401."""
+    from raven.core import mcp_tokens as auth
+
+    if not auth.revoke_token(name):
+        typer.echo(f"❌ 그런 이름의 토큰이 없습니다: {name}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"🗑️  회수됨: {name}")
 
 
 @app.command("ingest")

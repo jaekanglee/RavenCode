@@ -21,7 +21,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Vault** (데이터) | 마크다운 폴더 (Obsidian식 자유 계층) | `~/Raven/<name>/` (v0.6.3+) |
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
-| **CLI** (사람/자동화) | Typer 7 top-level commands + 11 subcommand groups | `raven/cli/` |
+| **CLI** (사람/자동화) | Typer 7 top-level commands + 12 subcommand groups | `raven/cli/` |
 | **API** (HTTP) | FastAPI 68 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 24 tools + 4 resources | `raven/mcp/` |
@@ -199,7 +199,7 @@ WIKI_VAULT=agent-output raven page ls
 
 ---
 
-## 핵심 명령 (CLI — 7 top-level + 11 서브커맨드 그룹)
+## 핵심 명령 (CLI — 7 top-level + 12 서브커맨드 그룹)
 
 ```bash
 raven where                                 # 환경 표시
@@ -242,6 +242,8 @@ raven curator run|stats <collection_id>         # collection 기반 큐레이션
 
 raven docs list                                 # Tier 1 내부 문서 목록
 raven docs show <topic>                         # Tier 1 문서 조회 (OPERATIONS.md 등)
+
+raven mcp token add|list|revoke <name>          # 내부망 MCP 접근 토큰 발급/목록/회수
 ```
 
 ---
@@ -318,6 +320,34 @@ python -m raven.mcp.cli --transport http --host 127.0.0.1 --port 8766 --mode rea
 - **의존성 0**: 파이썬 경로 / raven 패키지 위치 / vault 디렉토리 — 클라이언트는 URL만 알면 됨
 - **sandbox 우회**: 일부 MCP 클라이언트는 stdio spawn을 보안상 차단 — HTTP는 영향 없음
 - **lifecycle 단순**: 서버 lifecycle은 운영자가 관리 (직접 띄우거나 launchd/systemd 등록)
+
+### 내부망 접근 — 토큰 (v0.7.182+)
+
+MCP는 인증이 없어서 loopback과 tailnet에만 열려 있었다. 이제 내부망(LAN)에도 열리고, vault owner가 토큰을 발급한 사람만 들어온다.
+
+| 출처 | 처리 |
+|---|---|
+| loopback / tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) | 토큰 없이 통과 |
+| 그 외 (내부망 등) | `Authorization: Bearer <token>`이 맞아야 통과, 아니면 401. 발급된 토큰이 없으면 전부 401 |
+
+```bash
+raven mcp token add 민수-노트북    # 토큰은 지금 한 번만 출력 (파일엔 해시만)
+raven mcp token list
+raven mcp token revoke 민수-노트북 # 재시작 없이 즉시 401
+```
+
+```json
+{ "mcpServers": { "raven": {
+  "type": "http",
+  "url": "http://<이 기기 내부망 IP>:8766/mcp",
+  "headers": { "Authorization": "Bearer rvn_..." }
+} } }
+```
+
+- 데스크톱 앱(Raven.app)의 MCP에만 적용된다. API가 `0.0.0.0`일 때 MCP도 `0.0.0.0`에 바인딩하고, 다시 tailnet으로만 좁히려면 `RAVEN_MCP_HOST=<tailnet IP>`
+- standalone `python -m raven.mcp.cli`(team 인스턴스, Docker `mcp-http`)는 기존대로 인증 없음 — `--host`로 노출 범위를 직접 관리
+- 평문 HTTP라 같은 망에서 트래픽을 엿보면 토큰이 보인다 — 신뢰할 수 있는 망에서만 쓰고, 유출이 의심되면 revoke
+- 근거: [`_meta/decisions/adr-2026-09-30-mcp-lan-token-auth.md`](_meta/decisions/adr-2026-09-30-mcp-lan-token-auth.md)
 
 ### 권한 모드 3종 (서버 시작 시 argv로 고정)
 
@@ -477,7 +507,7 @@ raven build && raven link check
 │   │   ├── export.py                ← GUI 정적 JSON
 │   │   └── link.py                  ← wikilink 파싱/감사
 │   ├── cli/
-│   │   └── __main__.py              ← Typer 7 top-level + 11 서브커맨드 그룹
+│   │   └── __main__.py              ← Typer 7 top-level + 12 서브커맨드 그룹
 │   └── api/
 │       ├── server.py                ← FastAPI app
 │       ├── main.py                  ← uvicorn entry
