@@ -60,7 +60,7 @@ export function VaultManage() {
   // ── 데스크톱 업데이트 상태 (v0.7.183+: useAppUpdater로 일원화) ──
   // 확인/다운로드/설치/재시작 전 과정을 훅이 소유하고 UpdatePanel이 그린다.
   const updater = useAppUpdater();
-  const [appVersion, setAppVersion] = useState<string>("0.1.0");
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
   useEffect(() => {
     if (isTauri) {
@@ -835,7 +835,7 @@ export function VaultManage() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <div>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>Raven Desktop</div>
-                <div style={{ fontSize: 12, color: "var(--color-muted)" }}>현재 버전: v{appVersion}</div>
+                <div style={{ fontSize: 12, color: "var(--color-muted)" }}>현재 버전: {appVersion ? `v${appVersion}` : "확인 불가"}</div>
               </div>
               <Button
                 variant="secondary"

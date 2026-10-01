@@ -10,6 +10,7 @@
     "allow-core-status",
     "allow-restart-core",
     "allow-save-download-file",
+    "allow-app-version",
     "updater:default",
     "process:allow-restart"
   ]
