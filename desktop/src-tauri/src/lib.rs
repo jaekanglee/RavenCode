@@ -179,6 +179,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(CoreState::default())
         .invoke_handler(tauri::generate_handler![
             core_endpoint,
@@ -432,5 +433,22 @@ mod tests {
             spec.args,
             vec!["-m", "raven.desktop.runtime", "--host", "0.0.0.0"]
         );
+    }
+
+    #[test]
+    fn default_capability_allows_backup_dialogs() {
+        // 백업 내보내기/가져오기 대화상자. 권한이 빠지면 invoke가 조용히 거부된다
+        // (f2a70b0 app_version 권한 누락과 같은 유형).
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let perms: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for p in ["dialog:allow-open", "dialog:allow-save"] {
+            assert!(perms.contains(&p), "{p} 권한 누락");
+        }
     }
 }

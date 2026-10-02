@@ -383,6 +383,73 @@ def vault_import_alias(
     )
 
 
+@vault_app.command("export")
+def vault_export(
+    output: Optional[str] = typer.Option(
+        None, "-o", "--output", help="저장할 .zip 경로 (기본: ./raven-backup-YYYYMMDD-HHMM.zip)"
+    ),
+    vaults: Optional[list[str]] = typer.Option(
+        None, "--vault", help="이 vault만 담는다 (여러 번 지정 가능, 기본: 전체)"
+    ),
+) -> None:
+    """등록된 모든 vault를 zip 한 파일로 백업한다 (다른 PC에서 `vault import-backup`으로 복원).
+
+    wiki.db·.mcp/ 락·.DS_Store만 빼고 vault 폴더를 그대로 담는다.
+    """
+    from raven.core import backup as backup_module
+
+    dest = Path(output).expanduser() if output else Path.cwd() / backup_module.default_filename()
+    try:
+        report = backup_module.export_all(dest.resolve(), names=vaults or None)
+    except (backup_module.BackupError, OSError) as e:
+        typer.echo(f"❌ {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"✅ 백업: {report.path}")
+    for v in report.vaults:
+        typer.echo(f"   {v['name']}: 파일 {v['file_count']}개")
+    for s in report.skipped:
+        typer.echo(f"   ⚠️  건너뜀 {s['name']}: {s['reason']}")
+    for f in report.skipped_files:
+        typer.echo(f"   ⚠️  symlink 제외: {f}")
+
+
+@vault_app.command("import-backup")
+def vault_import_backup(
+    file: str = typer.Argument(..., help="`raven vault export`로 만든 .zip"),
+) -> None:
+    """백업 zip의 vault를 모두 가져와 등록한다.
+
+    같은 이름이 있으면 name-2처럼 새 이름으로 가져오고, 기존 vault는 건드리지 않는다.
+    workspace 경로는 PC마다 달라 비워 두므로 필요하면 `raven vault workspace`로 다시 잇는다.
+    """
+    from raven.core import backup as backup_module
+
+    try:
+        report = backup_module.import_archive(Path(file).expanduser().resolve())
+    except (backup_module.BackupError, OSError) as e:
+        typer.echo(f"❌ {e}", err=True)
+        raise typer.Exit(1)
+    failed = False
+    for it in report.items:
+        if it.error:
+            failed = True
+            typer.echo(f"   ❌ {it.original}: {it.error}")
+            continue
+        notes = []
+        if it.renamed:
+            notes.append("같은 이름이 있어 이름을 바꿈")
+        if it.workspace_reset:
+            notes.append(f"workspace 다시 연결 필요: raven vault workspace {it.imported_as} <경로>")
+        if it.build_failed:
+            notes.append(f"색인 빌드 실패: raven build --vault {it.imported_as}")
+        suffix = f"  ({'; '.join(notes)})" if notes else ""
+        typer.echo(f"   {it.original} → {it.imported_as}{suffix}")
+    if report.default_set:
+        typer.echo(f"   기본 vault: {report.default_set}")
+    if failed:
+        raise typer.Exit(1)
+
+
 @vault_app.command("repair")
 def vault_repair(
     name: str,

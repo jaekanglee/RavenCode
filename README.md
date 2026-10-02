@@ -22,7 +22,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
 | **CLI** (사람/자동화) | Typer 7 top-level commands + 12 subcommand groups | `raven/cli/` |
-| **API** (HTTP) | FastAPI 68 endpoints | `raven/api/` |
+| **API** (HTTP) | FastAPI 70 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 24 tools + 4 resources | `raven/mcp/` |
 
@@ -209,6 +209,8 @@ raven vault info [name]                     # 메타 + 통계
 raven vault create <name> <path>            # 새 vault 생성 + 등록
 raven vault register <name> <path>          # 기존 폴더를 vault로 등록
 raven vault remove <name> --force           # 등록 해제 (파일은 유지)
+raven vault export [-o FILE] [--vault N]    # 모든 vault를 zip 한 파일로 백업
+raven vault import-backup <FILE>            # 백업 가져오기 (다른 PC 복원, 이름 충돌 시 name-2)
 
 raven page ls [--type T] [--tag T] [--vault N] [--json]
 raven page get <slug> [--vault N]
@@ -248,13 +250,15 @@ raven mcp token add|list|revoke <name>          # 내부망 MCP 접근 토큰 �
 
 ---
 
-## HTTP API (68 endpoints)
+## HTTP API (70 endpoints)
 
 ```bash
 # vault 관리
 GET    /api/vaults
 GET    /api/vaults/{name}
 POST   /api/vaults/{name}/select
+POST   /api/backup/export                        # body: {dest_path, vaults?} — 전체 vault zip 백업 (loopback 전용)
+POST   /api/backup/import                        # body: {src_path} — 백업 가져오기, 이름 충돌 시 name-2 (loopback 전용)
 
 # 페이지 CRUD
 GET    /api/vaults/{name}/pages[?type=T&tag=T]

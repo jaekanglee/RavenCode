@@ -46,6 +46,9 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:8765",
         changeOrigin: true,
+        // X-Forwarded-For로 실제 LAN 클라이언트 IP를 전달 — uvicorn은 127.0.0.1발 XFF만
+        // 신뢰하므로, 이게 없으면 API는 프록시의 loopback 주소만 보고 LAN 요청을 loopback으로 오인한다.
+        xfwd: true,
       },
     },
   },

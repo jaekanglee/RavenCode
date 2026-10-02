@@ -11,13 +11,14 @@ Design:
     - all write ops use the engine; no shortcuts
 """
 from __future__ import annotations
+import ipaddress
 import json
 import os
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional, Any
-from fastapi import FastAPI, HTTPException, Query, Header, Response
+from fastapi import FastAPI, HTTPException, Query, Header, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,7 @@ from raven.core import log_module
 from raven.core import contracts
 from raven.core import policy as policy_module
 from raven.core.vault import Vault
+from raven.core import backup as backup_module
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
 from raven import __version__ as raven_version
@@ -2401,6 +2403,81 @@ def clone_vault(name: str, payload: VaultClone):
             "copy_meta": payload.copy_meta,
         },
     }
+
+
+# ────────────────────────── backup endpoints ──────────────────────────
+
+
+class BackupExportRequest(BaseModel):
+    dest_path: str = Field(..., description="저장할 .zip 절대경로 (이 PC 기준)")
+    vaults: Optional[list[str]] = Field(None, description="이 vault만 (기본: 전체)")
+
+
+class BackupImportRequest(BaseModel):
+    src_path: str = Field(..., description="가져올 백업 .zip 절대경로 (이 PC 기준)")
+
+
+def _require_loopback(request: Request) -> None:
+    """경로를 받는 API는 같은 PC(loopback)에서만. API가 0.0.0.0에 바인딩돼 있어
+    내부망/tailnet 기기가 서버 PC의 임의 경로에 쓰거나 읽게 두면 안 된다.
+    request.client — uvicorn은 127.0.0.1 프록시가 붙인 X-Forwarded-For만 반영한다
+    (기본 forwarded_allow_ips). Vite 프록시는 xfwd로 실제 LAN IP를 넘긴다.
+    FORWARDED_ALLOW_IPS를 넓히면 이 검사가 무력화된다."""
+    host = request.client.host if request.client else ""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        addr = None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    if addr is None or not addr.is_loopback:
+        raise HTTPException(status_code=403, detail="백업 내보내기·가져오기는 이 PC에서만 할 수 있습니다")
+
+    # 소켓이 loopback이어도 브라우저 Origin은 못 믿는다 — CORS 허용 목록(위 _cors_origin_regex)은
+    # Tailscale/사설 LAN 대역을 통째로 허용하고, Vite 개발 프록시(xfwd: true)가 실제 LAN IP를
+    # X-Forwarded-For로 넘기지 않거나 FORWARDED_ALLOW_IPS를 넓혀두면 LAN의 다른 기기가 보낸
+    # 요청도 이 서버에는 127.0.0.1에서 온 것처럼 보일 수 있다. Origin을 공격자가 resolve한
+    # DNS rebinding도 같은 모양 — 소켓은 loopback, Origin만 외부 도메인. 그래서 Origin
+    # 헤더가 있으면 별도로 화이트리스트를 본다.
+    origin = request.headers.get("origin")
+    if origin:
+        parsed = urllib.parse.urlsplit(origin)
+        allowed = parsed.scheme == "tauri" or parsed.hostname in {
+            "localhost", "127.0.0.1", "::1", "tauri.localhost",
+        }
+        if not allowed:
+            raise HTTPException(status_code=403, detail="백업 내보내기·가져오기는 이 PC에서만 할 수 있습니다")
+
+
+def _require_absolute(raw: str) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail=f"절대경로가 필요합니다: {raw}")
+    return path
+
+
+@app.post("/api/backup/export")
+def backup_export(payload: BackupExportRequest, request: Request):
+    """등록된 vault 전체(또는 vaults)를 dest_path(.zip)에 백업한다. loopback 전용."""
+    _require_loopback(request)
+    dest = _require_absolute(payload.dest_path)
+    try:
+        report = backup_module.export_all(dest, names=payload.vaults)
+    except backup_module.BackupError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, **report.to_json()}
+
+
+@app.post("/api/backup/import")
+def backup_import(payload: BackupImportRequest, request: Request):
+    """src_path 백업의 vault를 모두 가져와 등록한다 (이름 충돌 시 name-2…). loopback 전용."""
+    _require_loopback(request)
+    src = _require_absolute(payload.src_path)
+    try:
+        report = backup_module.import_archive(src)
+    except backup_module.BackupError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, **report.to_json()}
 
 
 # ────────────────────────── archive endpoints ──────────────────────────

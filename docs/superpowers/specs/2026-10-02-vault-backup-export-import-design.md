@@ -30,7 +30,7 @@ PC를 옮기거나 두 대를 함께 쓸 때 vault를 옮길 방법이 없다. �
    - 경로를 받는 API는 **loopback 출처만** 허용한다. API는 0.0.0.0에 바인딩되어 있으므로 내부망이나 tailnet에서 온 요청은 403으로 막는다.
    - 브라우저 대시보드에는 버튼을 보이지 않는다. 데스크톱 앱이 아니면 렌더링하지 않는다. 헤드리스 서버나 브라우저 사용자는 CLI를 쓴다.
 4. **새 의존성 (사용자 승인 2026-10-02, B안 선택)**: `tauri-plugin-dialog = "2"`(Cargo), `@tauri-apps/plugin-dialog`(npm). Python 쪽은 표준 라이브러리 `zipfile`만 쓴다.
-5. **포함하지 않는 것**: `~/Raven/.git` 이력, MCP 토큰, vault 하나만 고르는 UI. CLI의 `--vault` 반복 옵션은 core 인자로 거의 공짜로 생기므로 둔다.
+5. **포함하지 않는 것**: `~/Raven/.git` 이력, MCP 토큰, vault 하나만 고르는 UI. CLI의 `--vault` 반복 옵션은 core 인자로 거의 공짜로 생기므로 둔다. MCP 도구로도 노출하지 않는다 — 경로 기반 파일 읽기/쓰기를 LAN·에이전트에 열지 않기 위해서다.
 
 ## 백업 파일 형식
 
@@ -68,8 +68,10 @@ vaults/<name>/...        # vault 폴더 원본 트리 (제외 목록 빼고)
 ## Core — `raven/core/backup.py` (신규)
 
 ```python
-EXCLUDE_NAMES = {"wiki.db", "wiki.db-journal", "wiki.db-wal", "wiki.db-shm", ".DS_Store"}
-EXCLUDE_DIRS = {".mcp"}
+# vault 루트에서만: 색인 DB와 런타임 락. 어디서든: .DS_Store
+ROOT_EXCLUDE_FILES = {"wiki.db", "wiki.db-journal", "wiki.db-wal", "wiki.db-shm"}
+ROOT_EXCLUDE_DIRS = {".mcp"}
+ANYWHERE_EXCLUDE_FILES = {".DS_Store"}
 
 def export_all(dest: Path, *, names: list[str] | None = None) -> ExportReport
 def import_archive(src: Path) -> ImportReport
@@ -94,11 +96,11 @@ def import_archive(src: Path) -> ImportReport
 3. vault마다 다음을 한다.
    1. 이름을 정한다. `name`, `name-2`, `name-3` 순으로, 레지스트리와 `VAULTS_ROOT` 디렉터리 양쪽에서 비어 있는 첫 이름을 쓴다.
    2. `VAULTS_ROOT/.import-<uuid>/`에 푼 다음 `VAULTS_ROOT/<새 이름>`으로 `os.rename`한다.
-   3. `.vault.json`의 `path`와 `name`을 새 값으로 고치고 `workspace_path`는 `null`로 둔다.
+   3. `.vault.json`의 `path`를 새 위치로 고치고 `workspace_path` 키는 지운다(`.vault.json`에는 name 필드가 없다). 원래 workspace가 있었는지는 manifest의 `had_workspace`로 알려준다.
    4. 레지스트리에 `manifest`의 `meta`를 그대로 넣고, path는 새 위치로, workspace_path는 비워서 등록한다.
    5. `build_db`로 인덱스를 다시 만든다. 빌드가 실패해도 파일과 등록은 유지하고, 보고에 `build_failed`로 남긴다. 다음 빌드 때 다시 시도할 수 있다.
 4. 한 vault가 실패하면 그 vault의 임시 폴더만 지우고 다음 vault로 넘어간다. 이미 가져온 vault는 그대로 둔다.
-5. 레지스트리에 default가 없을 때만 manifest의 default(이름이 바뀌었다면 바뀐 이름)를 default로 정한다.
+5. 가져오기 전 레지스트리가 비어 있을 때만 manifest의 default(이름이 바뀌었다면 바뀐 이름)를 default로 정한다.
 6. `ImportReport(items=[{original, imported_as, renamed, workspace_reset, build_failed, error}])`를 반환한다.
 
 레지스트리 저장은 기존 `raven/core/registry.py` API를 쓴다. 등록 경로를 새로 만들지 않는다. (참고로 기존 CLI/API `register`는 `.vault.json`의 features/agents를 무시한다. 이 기능은 manifest의 `meta`를 직접 넘기므로 영향받지 않는다. register 자체는 고치지 않는다.)
@@ -121,16 +123,17 @@ POST /api/backup/export   {"dest_path": "...", "vaults": null}  → ExportReport
 POST /api/backup/import   {"src_path": "..."}                     → ImportReport
 ```
 
-- 둘 다 `request.client.host`가 loopback(127.0.0.0/8, ::1)이 아니면 403을 반환한다. 판정 함수는 `raven/mcp/auth.py`의 네트워크 상수와 같은 기준을 쓰되 tailnet은 넣지 않는다. X-Forwarded-For는 믿지 않는다.
+- 둘 다 `request.client.host`가 loopback(127.0.0.0/8, ::1)이 아니면 403을 반환한다. tailnet은 넣지 않는다. `request.client`는 uvicorn 기본값대로 127.0.0.1 프록시가 붙인 X-Forwarded-For만 반영하고, Vite 개발 프록시는 `xfwd: true`로 실제 LAN IP를 넘긴다.
+- `Origin` 헤더가 있으면 `tauri:` scheme 또는 localhost/127.0.0.1/::1/tauri.localhost만 허용한다. CORS 허용 목록은 사설망까지 열려 있어 CSRF·DNS rebinding·프록시 경유 LAN 브라우저를 막지 못하기 때문이다.
 - `dest_path`와 `src_path`는 절대경로여야 한다. export는 `.zip` 확장자를 강제한다.
 - `BackupError`는 400으로, 그 밖의 예외는 500으로 처리한다.
 
 **데스크톱 관리 화면** (`dashboard/src/routes/VaultManage.tsx` 또는 관리 화면의 해당 섹션)
 
-- "전체 백업 내보내기" 버튼: `save()` 대화상자를 연다(기본 파일명 `raven-backup-….zip`, 필터 zip). 고른 경로로 `POST /api/backup/export`를 호출하고, 완료 토스트(2400ms)에 vault 수와 파일 경로를 보여준다.
+- "전체 백업 내보내기" 버튼: `save()` 대화상자를 연다(기본 파일명 `raven-backup-….zip`, 필터 zip). 고른 경로로 `POST /api/backup/export`를 호출하고, 섹션 안 메시지로 vault 수와 파일 경로를 보여준다(경로를 계속 볼 수 있어야 해서 토스트 대신 이웃 도구 섹션과 같은 방식).
 - "백업 가져오기" 버튼: `open()` 대화상자를 연다(zip 필터, 파일 하나). 고른 경로로 `POST /api/backup/import`를 호출한다. 완료되면 결과 표(가져옴 / 이름 바뀜 / workspace 재설정 필요 / 빌드 실패)를 보여주고 vault 목록을 다시 불러온다.
-- 데스크톱 앱이 아니면 두 버튼을 렌더링하지 않는다. 판정은 기존 `pageExport.ts`의 Tauri 판별 방식을 재사용한다.
-- 버튼과 결과 표는 기존 `components/ui/` 컴포넌트를 쓴다. 색과 폰트는 CSS 변수로 지정한다(AGENTS.md §13).
+- 데스크톱 앱이 아니거나 대시보드의 활성 호스트가 원격이면 섹션을 렌더링하지 않는다(경로는 이 PC에서 고르기 때문). 판정은 기존 `pageExport.ts`의 Tauri 판별 방식을 재사용한다.
+- 버튼은 `components/ui/Button`을 쓰고, 결과 표는 이웃 도구 섹션처럼 평범한 `<table>`이다. 색과 폰트는 CSS 변수로 지정한다(AGENTS.md §13).
 
 **Tauri** (`desktop/src-tauri`)
 
@@ -144,7 +147,10 @@ POST /api/backup/import   {"src_path": "..."}                     → ImportRepo
 | 대화상자에서 취소 | 아무 일도 하지 않는다(토스트 없음) |
 | loopback이 아닌 요청 | 403 |
 | manifest 없음·형식 다름·버전이 더 높음 | 400, 아무것도 풀지 않음 |
-| zip-slip / symlink / 크기 초과 | 400, 아무것도 풀지 않음 |
+| zip-slip(절대경로, `..`, `.`, 빈 구간 `//`) / symlink / 크기 초과 | 400, 아무것도 풀지 않음 |
+| 백업 파일 경로가 내보낼 vault 폴더 안 | 400 (자기 자신을 읽으며 끝없이 커지는 것 방지), 파일을 만들지 않음 |
+| 1980년 이전 mtime 파일 | 1980년으로 맞춰 담는다 (`strict_timestamps=False`) |
+| vault 하나의 메타가 잘못됨(등록 실패) | 방금 만든 그 vault 폴더만 지우고 `error`, 나머지는 계속 |
 | vault 하나의 풀기·rename 실패 | 그 vault의 임시 폴더만 지우고 보고에 `error`, 나머지는 계속 |
 | DB 빌드 실패 | 파일과 등록은 유지, 보고에 `build_failed` |
 | export 중 디스크 부족 등 | `.zip.tmp`를 지우고 500 |
@@ -156,7 +162,7 @@ POST /api/backup/import   {"src_path": "..."}                     → ImportRepo
 - 왕복: vault 2개 export → 빈 `VAULTS_ROOT`에 import. 파일 트리와 바이트가 같고(제외 목록 빼고) 레지스트리 meta가 보존돼야 한다.
 - `.graph_positions.json`, `raw/`, `log.md`, `_archive/`, 모르는 폴더가 포함되고, `wiki.db`와 `.mcp/`는 빠져야 한다.
 - 이름 충돌: `a`가 있으면 `a-2`로, `a-2`까지 있으면 `a-3`으로 가져와야 한다.
-- `.vault.json`의 path가 새 위치로 바뀌고 workspace_path가 null이며, `workspace_reset=True`여야 한다.
+- `.vault.json`의 path가 새 위치로 바뀌고 workspace_path 키가 없고, `workspace_reset=True`여야 한다.
 - 거부: `../evil`, 절대경로, symlink 항목, manifest 없음, `format_version` 99, 크기 상한 초과(상한을 낮춰서). 모두 VAULTS_ROOT에 아무 변화가 없어야 한다.
 - default: 레지스트리가 비어 있으면 manifest default를 설정하고, 이미 있으면 유지해야 한다.
 - 가져온 뒤 DB 빌드가 성공해 검색이 동작해야 한다.

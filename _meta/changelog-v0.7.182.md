@@ -552,3 +552,18 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 ### 검증
 
 `findInText` / `domFind` / `FindBar` / `FindBackdrop` / `InlineMarkdownEditor.find` 테스트 (RED 확인 후 GREEN). 대시보드 전체 vitest 통과, `tsc -b` 통과. 레이아웃(편집칸 높이, classic 스크롤바 폭)은 Chromium 측정으로 확인.
+
+## 33. 전체 vault 백업 내보내기·가져오기 — 다른 PC로 vault를 그대로 옮긴다
+
+다른 PC로 vault를 옮길 도구가 없었다(`vault import`는 같은 PC 안 clone 별칭이고 raw/·log.md·.graph_positions.json을 빠뜨린다).
+
+- core `raven/core/backup.py` — wiki.db·.mcp/·.DS_Store만 빼고 vault 폴더 전체를 zip 하나로. manifest.json에 레지스트리 메타(path/workspace_path 제외).
+- 가져오기: 같은 이름이면 `name-2`…, 기존 vault는 건드리지 않음. `.vault.json` path 재작성, workspace_path는 비우고 보고. 임시 폴더에 풀고 rename. zip-slip(빈 경로 구간 포함)·symlink·크기 상한은 풀기 전에 전부 거부, vault 하나 실패는 그 vault만 오류로 남김. 백업 파일을 vault 안에 저장하는 것은 거부(자기 자신을 읽으며 무한히 커짐).
+- CLI `raven vault export [-o] [--vault]`, `raven vault import-backup <zip>`.
+- API `POST /api/backup/export|import` — 경로를 받으므로 loopback + 로컬 Origin 전용(그 외 403). Vite 개발 프록시에 `xfwd: true`(프록시 경유 LAN 요청이 loopback으로 보이던 것 차단). 엔드포인트 68 → 70.
+- 데스크톱 관리 화면 "백업" 섹션 — `tauri-plugin-dialog` 2.7(신규 의존성) 저장/열기 대화상자. 브라우저 대시보드·원격 호스트에서는 숨김. MCP로는 노출하지 않음(경로 기반 파일 읽기/쓰기를 LAN·에이전트에 열지 않음).
+- 후속 제안: `_meta/dr-runbook.md` 복구 절차를 이 기능 기준으로 갱신 (경로가 2026-06 구조 기준).
+
+### 검증
+
+`tests/test_backup.py` 32건(왕복·이름 충돌·경로 재작성·default·zip-slip/symlink/크기/형식 거부·부분 실패 격리·1980 이전 mtime·vault 안 저장 거부), `test_api_backup.py`(loopback/Origin 게이트), `test_cli_backup.py`, `BackupPanel.test.tsx`, Rust capability 가드. Python 전체 953 통과, 대시보드 vitest 통과, `cargo test` 12 통과. 임시 `WIKI_VAULTS_DIR` 두 개로 CLI export → import 실동작 확인(t1 → t1-2, 검색 동작).

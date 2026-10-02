@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { UpdatePanel } from "../components/UpdatePanel";
+import { BackupPanel } from "../components/BackupPanel";
 import { useAppUpdater } from "../lib/useAppUpdater";
 import {
   fetchLinkCheck, runExport, repairVault, cloneVault,
@@ -449,6 +450,11 @@ export function VaultManage() {
           </div>
         </div>
       )}
+
+      {/* ── 백업 (데스크톱 전용, vault가 없어도 가져오기는 가능해야 함) ──
+          경로는 이 PC의 대화상자로 고르므로 로컬 호스트일 때만 보인다.
+          원격 core에 연결돼 있으면 그 경로를 원격 PC의 디스크에서 읽고 쓰게 된다. */}
+      {isTauri && getActiveHost().isLocal && <BackupPanel onImported={() => void loadVaults()} />}
 
       {/* ── 내 PC 및 서버 & API / MCP 환경 정보 ── */}
       <div style={{ marginTop: 32, borderTop: "2px solid var(--color-hairline)", paddingTop: 24 }}>
