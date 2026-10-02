@@ -601,3 +601,17 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 ### 검증
 
 `tests/scenarios/test_stale_detect_updated_basis.py` 4건, `tests/test_mcp_wiki_log_filter.py` 4건(수정 전 각 2·3건 RED 확인). Python 전체 963 통과.
+
+## 36. 가드닝 회차 기록 — MCP wiki_gardening_record
+
+§35에서 보류했던 경로다. ADR `adr-2026-10-02-gardening-record-log-entry`.
+
+- MCP `wiki_gardening_record(vault, summary, deferred?, proposed?, actor?)` (write 모드) — log.md에 `## [날짜] gardening | <summary>` 항목과 `- actor:`·`- deferred:`·`- proposed:` 줄을 남긴다. 에이전트가 log.md에 쓰는 유일한 경로이며 형식이 고정돼 있다. 줄바꿈이 든 값(항목 위조)·300자 초과·목록 50개 초과는 거부.
+- `raven.core.log`: 액션 `gardening` 추가. `append(extra=...)`의 값이 리스트면 항목마다 한 줄.
+- Dashboard 로그 화면 액션 필터·배지에 `gardening`.
+- `TOOLS.md` 템플릿, README 도구 수(24 → 25).
+- 정책 repo: VAULT-OPERATOR §3.3 기록 규칙과 `vault-gardening` 스킬이 회차 끝에 이 도구를 부르고, 이어받기에서 `wiki_log(action="gardening")`을 읽는다.
+
+### 검증
+
+`tests/test_mcp_gardening_record.py` 8건(기록 형식, `wiki_log` 필터로 조회, 잘못된 입력 5종 거부 시 log.md 불변, read 모드 미노출 — 수정 전 RED 확인).

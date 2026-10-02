@@ -53,6 +53,7 @@ export function LogPage() {
       migrate: { bg: "#0f766e", color: "#fff" },   // teal
       archive: { bg: "#ea580c", color: "#fff" },   // orange
       delete:  { bg: "#dc2626", color: "#fff" },   // red
+      gardening: { bg: "#65a30d", color: "#fff" }, // lime — 가드닝 회차 기록 (wiki_gardening_record)
     };
     const p = palette[a] ?? { bg: "#374151", color: "#fff" };
     return { background: p.bg, color: p.color };
@@ -209,7 +210,7 @@ export function LogPage() {
             }}
           >
             <option value="">전체</option>
-            {["ingest", "update", "create", "archive", "delete", "lint", "build", "migrate", "chore"].map(
+            {["ingest", "update", "create", "archive", "delete", "lint", "build", "migrate", "chore", "gardening"].map(
               (a) => (
                 <option key={a} value={a}>
                   {a}

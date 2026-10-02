@@ -410,6 +410,29 @@ def register_tools(mcp: Any, mode: str) -> None:
             )
 
         @mcp.tool(
+            name="wiki_gardening_record",
+            description=(
+                EXPERIMENTAL_PREFIX + VAULT_ARG_NOTE
+                + "Record one gardening pass in log.md as a `gardening` entry: one-line `summary` "
+                "(e.g. counts per result class), plus optional `deferred` / `proposed` items "
+                "('<slug> — <reason>', one line each). Call once at the end of every pass, "
+                "even when nothing changed, so the next pass can resume. Find past records with "
+                "wiki_log(action='gardening'). Values with line breaks are rejected."
+            ),
+        )
+        def wiki_gardening_record(
+            vault: str,
+            summary: str,
+            deferred: Optional[list[str]] = None,
+            proposed: Optional[list[str]] = None,
+            actor: Optional[str] = None,
+        ) -> dict:
+            ctx = VaultContext(vault=resolve_vault_path(vault), mode=permission_mode)
+            return write_tools.wiki_gardening_record(
+                summary=summary, deferred=deferred, proposed=proposed, actor=actor, ctx=ctx
+            )
+
+        @mcp.tool(
             name="wiki_ingest",
             description=(
                 EXPERIMENTAL_PREFIX + VAULT_ARG_NOTE

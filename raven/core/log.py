@@ -83,6 +83,8 @@ _ALLOWED_ACTIONS = {
     "lint", "build", "migrate", "chore",
     # v0.7.67 (평가 A#1): MCP wiki_rename이 쓰는 액션 — CLI/MCP 로그 규약 통일.
     "rename",
+    # v0.7.182 §36: MCP wiki_gardening_record — 가드닝 회차 결과(보류·제안 목록 포함).
+    "gardening",
 }
 
 
@@ -238,6 +240,8 @@ def append(
             if isinstance(v, dict):
                 items = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
                 details.append(f"{k}: {items}")
+            elif isinstance(v, list):
+                details.extend(f"{k}: {item}" for item in v)
             else:
                 details.append(f"{k}: {v}")
 

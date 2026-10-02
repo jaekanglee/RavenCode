@@ -550,6 +550,54 @@ def wiki_update(
 # ─────────────── 7. wiki_ingest ───────────────
 
 
+_GARDENING_TEXT_MAX = 300
+_GARDENING_ITEMS_MAX = 50
+
+
+def wiki_gardening_record(
+    summary: str,
+    deferred: Optional[list[str]] = None,
+    proposed: Optional[list[str]] = None,
+    actor: Optional[str] = None,
+    ctx: Optional[VaultContext] = None,
+) -> dict:
+    """가드닝 회차 결과를 log.md에 `gardening` 항목 하나로 남긴다 (VAULT-OPERATOR §3.3).
+
+    에이전트가 log.md에 직접 쓰는 경로는 이것뿐이며, 형식이 고정된 한 항목만 쓴다.
+    줄바꿈이 든 값은 항목 위조(헤더·세부 줄 끼워 넣기)가 되므로 거부한다.
+    """
+    ctx = ctx or VaultContext(vault=db._default_vault())
+    deferred = list(deferred or [])
+    proposed = list(proposed or [])
+    texts = [summary, *deferred, *proposed]
+    bad = (
+        not (summary or "").strip()
+        or any(not isinstance(s, str) or "\n" in s or "\r" in s or len(s) > _GARDENING_TEXT_MAX for s in texts)
+        or len(deferred) > _GARDENING_ITEMS_MAX
+        or len(proposed) > _GARDENING_ITEMS_MAX
+    )
+    if bad:
+        return {
+            "ok": False,
+            "error": "invalid_input",
+            "message": (
+                f"summary는 비어 있지 않은 한 줄, 각 값은 {_GARDENING_TEXT_MAX}자 이하 한 줄, "
+                f"deferred·proposed는 각 {_GARDENING_ITEMS_MAX}개 이하여야 한다."
+            ),
+        }
+
+    from raven.core import log as log_module
+
+    actor_norm = (actor or "anonymous").strip() or "anonymous"
+    extra: dict = {"actor": actor_norm}
+    if deferred:
+        extra["deferred"] = deferred
+    if proposed:
+        extra["proposed"] = proposed
+    entry = log_module.append(_load_vault(Path(ctx.vault)), "gardening", summary.strip(), extra=extra)
+    return {"ok": True, "date": entry.date, "entry": entry.to_md().rstrip("\n")}
+
+
 def wiki_ingest(
     source: str,
     project: Optional[str] = None,

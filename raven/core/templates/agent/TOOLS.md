@@ -47,6 +47,10 @@ Raven MCP 서버는 권한 모드(`--mode read/write/admin`)에 따라 아래 �
   * M4/F1 규약에 따라 `actor`와 `idempotency_key`를 포함해야 안전한 재시도가 가능합니다.
 * **`wiki_ingest(source: str, project: Optional[str] = None, mode: str = "auto", actor: Optional[str] = None, idempotency_key: Optional[str] = None)`**
   * 외부 원시 문서를 읽어 `<vault>/raw/<project>/` 하위로 가져옵니다.
+* **`wiki_gardening_record(summary: str, deferred: Optional[list[str]] = None, proposed: Optional[list[str]] = None, actor: Optional[str] = None)`**
+  * 가드닝 회차 결과를 `log.md`에 `gardening` 항목 하나로 남깁니다. 변경이 없던 회차도 기록해 다음 회차가 이어받게 합니다.
+  * `deferred`·`proposed`는 `"<slug> — <사유>"` 한 줄씩. 줄바꿈이 든 값은 거부됩니다. 지난 기록은 `wiki_log(action="gardening")`으로 찾습니다.
+  * 에이전트가 `log.md`에 쓰는 유일한 경로이며, 형식이 고정된 항목만 씁니다.
 
 ### 2.3 Admin 툴 (MCP `--mode admin` 활성화 시 제공)
 * **`wiki_delete(slug: str, actor: Optional[str] = None, idempotency_key: Optional[str] = None)`**: 페이지를 `_archive/` 폴더로 아카이브(삭제) 처리합니다.
