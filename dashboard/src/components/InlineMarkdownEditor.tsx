@@ -23,8 +23,9 @@
   *   - Cmd+E / Ctrl+E → mode toggle
   *   - Esc (edit mode) → 취소
   *   - Cmd+S (edit mode) → 저장
+  *   - Cmd+F / Ctrl+F → 문서 내 찾기 (FindBar)
   */
- import { useCallback, useEffect, useRef, useState } from "react";
+ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
  import MDEditor from "@uiw/react-md-editor";
  import { useNavigate } from "react-router-dom";
  import { deletePage, updatePage } from "../lib/api";
@@ -34,6 +35,10 @@
  import { Toast } from "./ui/Toast";
  import { AITagSuggestion } from "./AITagSuggestion";
 import { ShareButton } from "./ShareButton";
+import { FindBar } from "./FindBar";
+import { FindBackdrop } from "./FindBackdrop";
+import { findMatches, wrapIndex } from "../lib/findInText";
+import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRangeIntoView } from "../lib/domFind";
 
  // Lucide-style SVG icons (MIT, public domain). 16x16 viewBox, currentColor 사용
  // → var(--color-ink) / hover 시 var(--color-accent) 자동 적용.
@@ -120,6 +125,20 @@ import { ShareButton } from "./ShareButton";
    filePathRow?: React.ReactNode;
  }
  
+ // textarea와 FindBackdrop이 글자 위치를 1:1로 맞추기 위해 공유하는 배치 스타일.
+ // box-sizing·scrollbar-gutter도 공유해야 두 상자의 글자 폭이 같다 — 어긋나도 jsdom 테스트는 잡지 못한다.
+ const SOURCE_TEXT_STYLE: React.CSSProperties = {
+   padding: "16px 20px",
+   fontSize: 14,
+   lineHeight: 1.65,
+   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+   whiteSpace: "pre-wrap",
+   wordBreak: "break-word",
+   tabSize: 2,
+   boxSizing: "border-box",
+   scrollbarGutter: "stable",
+ };
+
  export function InlineMarkdownEditor({
    vault,
    slug,
@@ -151,6 +170,14 @@ import { ShareButton } from "./ShareButton";
    const textareaRef = useRef<HTMLTextAreaElement>(null);
    const navigate = useNavigate();
    const containerRef = useRef<HTMLDivElement>(null);
+   // 문서 내 찾기 (Cmd/Ctrl+F) — 읽기 모드는 렌더된 DOM, 편집 모드는 textarea 원문 기준.
+   const [findOpen, setFindOpen] = useState(false);
+   const [findQuery, setFindQuery] = useState("");
+   const [findIndex, setFindIndex] = useState(0);
+   const [findFocusSignal, setFindFocusSignal] = useState(0);
+   const [viewMatchCount, setViewMatchCount] = useState(0);
+   const viewBodyRef = useRef<HTMLDivElement>(null);
+   const backdropRef = useRef<HTMLDivElement>(null);
 
    // 외부 content/title 변경 (다른 vault에서 페이지 fetch) 시 draft/titleVal reset
    useEffect(() => {
@@ -173,6 +200,13 @@ import { ShareButton } from "./ShareButton";
    // Cmd+E / Ctrl+E → mode toggle
    useEffect(() => {
      const onKey = (e: KeyboardEvent) => {
+       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+         // WKWebView에는 찾기 막대가 없다 — 웹뷰 기본 동작을 막고 자체 막대를 연다.
+         e.preventDefault();
+         setFindOpen(true);
+         setFindFocusSignal((n) => n + 1);
+         return;
+       }
        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "e") {
          e.preventDefault();
          setMode((m) => (m === "view" ? "edit" : "view"));
@@ -346,6 +380,40 @@ import { ShareButton } from "./ShareButton";
    // edit mode preview: wikilink 전처리 (MDEditor.Markdown에 넘김)
    const previewSource = preprocessWikilinks(draft, vault);
 
+   const editMatches = useMemo(
+     () => (findOpen && mode === "edit" ? findMatches(draft, findQuery) : []),
+     [findOpen, mode, draft, findQuery],
+   );
+   const findTotal = mode === "edit" ? editMatches.length : viewMatchCount;
+   const findCurrent = wrapIndex(findIndex, findTotal);
+
+   // 읽기 모드: 렌더된 본문에서 Range 수집 → Highlight API로 강조 + 현재 항목 스크롤.
+   useEffect(() => {
+     const root = viewBodyRef.current;
+     if (!findOpen || mode !== "view" || !root) {
+       clearFindHighlights();
+       return;
+     }
+     const ranges = collectTextRanges(root, findQuery);
+     setViewMatchCount(ranges.length);
+     const cur = wrapIndex(findIndex, ranges.length);
+     applyFindHighlights(ranges, cur);
+     if (cur >= 0) scrollRangeIntoView(ranges[cur]);
+     return () => clearFindHighlights();
+   }, [findOpen, mode, findQuery, findIndex, displayContent]);
+
+   // 편집 모드: 현재 mark가 textarea 가운데 오도록 스크롤하고 backdrop을 맞춘다.
+   // draft는 deps에서 뺀다 — 타이핑할 때마다 스크롤이 튀면 안 된다.
+   useLayoutEffect(() => {
+     if (!findOpen || mode !== "edit") return;
+     const ta = textareaRef.current;
+     const bd = backdropRef.current;
+     const mark = bd?.querySelector<HTMLElement>(".find-mark-current");
+     if (ta && mark) ta.scrollTop = Math.max(0, mark.offsetTop - ta.clientHeight / 2);
+     if (ta && bd) bd.scrollTop = ta.scrollTop;
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [findOpen, mode, findQuery, findIndex]);
+
    return (
       <div ref={containerRef} data-color-mode={colorMode}>
      {/* 타이틀과 액션 버튼을 가로 한 줄에 좌측 정렬 배치 */}
@@ -518,14 +586,31 @@ import { ShareButton } from "./ShareButton";
 
     {/* Body: view vs edit */}
     <div className="inline-md-body">
-         {mode === "view" ? (
-           <MDEditor.Markdown
-             source={displayContent ?? ""}
-             style={{
-               backgroundColor: "transparent",
-               color: "var(--color-body)",
+         {findOpen && (
+           <FindBar
+             query={findQuery}
+             onQueryChange={(q) => {
+               setFindQuery(q);
+               setFindIndex(0);
              }}
+             current={findCurrent}
+             total={findTotal}
+             onNext={() => setFindIndex((i) => i + 1)}
+             onPrev={() => setFindIndex((i) => i - 1)}
+             onClose={() => setFindOpen(false)}
+             focusSignal={findFocusSignal}
            />
+         )}
+         {mode === "view" ? (
+           <div ref={viewBodyRef}>
+             <MDEditor.Markdown
+               source={displayContent ?? ""}
+               style={{
+                 backgroundColor: "transparent",
+                 color: "var(--color-body)",
+               }}
+             />
+           </div>
          ) : (
            <div
              className="inline-md-editor"
@@ -644,33 +729,52 @@ import { ShareButton } from "./ShareButton";
                  background: "var(--color-canvas)",
                }}
              >
-               {/* Source textarea */}
-               <textarea
-                 ref={textareaRef}
-                 value={draft}
-                 onChange={(e) => setDraft(e.target.value)}
-                 disabled={busy}
-                 spellCheck={false}
-                 style={{
-                   width: "100%",
-                   minHeight: 400,
-                   maxHeight: "70vh",
-                   padding: "16px 20px",
-                   fontSize: 14,
-                   lineHeight: 1.65,
-                   fontFamily:
-                     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                   color: "var(--color-ink)",
-                   background: "var(--color-canvas)",
-                   border: 0,
-                   borderRight: showPreview ? "1px solid var(--color-hairline)" : "none",
-                   outline: "none",
-                   resize: "vertical",
-                   whiteSpace: "pre-wrap",
-                   wordBreak: "break-word",
-                   tabSize: 2,
-                 }}
-               />
+               {/* Source textarea (+ 문서 내 찾기 backdrop) */}
+               <div style={{ position: "relative", minWidth: 0 }}>
+                 {findOpen && (
+                   <FindBackdrop
+                     ref={backdropRef}
+                     text={draft}
+                     matches={editMatches}
+                     current={findCurrent}
+                     style={{
+                       ...SOURCE_TEXT_STYLE,
+                       position: "absolute",
+                       inset: 0,
+                       overflow: "hidden",
+                       color: "transparent",
+                       background: "var(--color-canvas)",
+                       borderRight: showPreview ? "1px solid transparent" : "none",
+                       pointerEvents: "none",
+                     }}
+                   />
+                 )}
+                 <textarea
+                   ref={textareaRef}
+                   value={draft}
+                   onChange={(e) => setDraft(e.target.value)}
+                   onScroll={(e) => {
+                     if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop;
+                   }}
+                   disabled={busy}
+                   spellCheck={false}
+                   style={{
+                     ...SOURCE_TEXT_STYLE,
+                     position: "relative",
+                     display: "block",
+                     width: "100%",
+                     height: "100%",
+                     minHeight: 400,
+                     maxHeight: "70vh",
+                     color: "var(--color-ink)",
+                     background: findOpen ? "transparent" : "var(--color-canvas)",
+                     border: 0,
+                     borderRight: showPreview ? "1px solid var(--color-hairline)" : "none",
+                     outline: "none",
+                     resize: "vertical",
+                   }}
+                 />
+               </div>
 
                {/* Live preview (MDEditor.Markdown wikilink 전처리) */}
                {showPreview && (

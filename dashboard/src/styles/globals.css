@@ -118,6 +118,8 @@
   --color-warning-bg: #fef9c3;
   --color-warning-border: #fde68a;
   --color-warning-text: #854d0e;
+  --color-find-match: rgba(250, 204, 21, 0.4);    /* 문서 내 찾기 — 일치 항목 */
+  --color-find-current: rgba(249, 115, 22, 0.55); /* 문서 내 찾기 — 현재 항목 */
   --color-danger-bg: #fef2f2;
   --color-danger-border: #fecaca;
   --color-danger-text: #991b1b;
@@ -530,6 +532,8 @@ body {
   --color-success-border: rgba(74, 222, 128, 0.32);
   --color-success-text: #bbf7d0;
   --color-warning-bg: rgba(133, 77, 14, 0.34);
+  --color-find-match: rgba(250, 204, 21, 0.28);
+  --color-find-current: rgba(249, 115, 22, 0.5);
   --color-warning-border: rgba(250, 204, 21, 0.28);
   --color-warning-text: #fde68a;
   --color-danger-bg: rgba(127, 29, 29, 0.34);
@@ -620,6 +624,8 @@ html.dark {
   --color-success-border: rgba(74, 222, 128, 0.32);
   --color-success-text: #bbf7d0;
   --color-warning-bg: rgba(133, 77, 14, 0.34);
+  --color-find-match: rgba(250, 204, 21, 0.28);
+  --color-find-current: rgba(249, 115, 22, 0.5);
   --color-warning-border: rgba(250, 204, 21, 0.28);
   --color-warning-text: #fde68a;
   --color-danger-bg: rgba(127, 29, 29, 0.34);
@@ -3186,4 +3192,47 @@ a:focus-visible {
 .filter-chip-count {
   font-variant-numeric: tabular-nums;
   opacity: 0.7;
+}
+
+/* ── 문서 내 찾기 (Cmd/Ctrl+F) — FindBar / FindBackdrop / domFind ── */
+.find-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-hairline);
+  border-radius: 8px;
+}
+.find-bar > label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.find-bar-input[aria-invalid="true"] {
+  border-bottom-color: var(--color-danger);
+}
+.find-bar-count {
+  min-width: 44px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+::highlight(raven-find) {
+  background-color: var(--color-find-match);
+}
+::highlight(raven-find-current) {
+  background-color: var(--color-find-current);
+}
+.find-backdrop .find-mark {
+  background: var(--color-find-match);
+  color: transparent;
+  border-radius: 2px;
+}
+.find-backdrop .find-mark-current {
+  background: var(--color-find-current);
 }

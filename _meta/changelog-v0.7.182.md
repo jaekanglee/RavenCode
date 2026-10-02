@@ -539,3 +539,16 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 `tests/test_mcp_lan_token_auth.py` 16건 + README CLI 그룹 수 가드가 중첩 그룹(`mcp token`)을 세지 않게 정규식을 줄 맨 앞 `app.add_typer`로 좁힘 (RED 확인 후 GREEN): 해시만 저장·0600, 중복 이름 거부, verify/revoke, loopback·tailnet 5종 무토큰 통과, 발급 0개 401, 토큰 없음/틀림/scheme 누락 401, revoke 즉시 반영, tailnet 대역 바로 밖(100.128.0.1) 401, 바인딩/광고 주소, 앱 래핑, CLI add/list/revoke.
 
 실서버 확인(임시 `WIKI_VAULTS_DIR`, `--host 0.0.0.0 --mcp`): loopback 200 · tailnet 200 · LAN 무토큰 401 · 틀린 토큰 401 · 맞는 토큰 200 · `X-Forwarded-For: 127.0.0.1` 위조 401 · revoke 후 401 · 토큰 파일 `-rw-------`.
+
+## 32. 문서 내 찾기 (Cmd/Ctrl+F) — 데스크톱 웹뷰에 찾기 막대가 없었다
+
+데스크톱 앱 웹뷰(WKWebView)에는 찾기 막대가 없어 Cmd+F가 아무 반응도 없었다. 문서 화면(`InlineMarkdownEditor`)에 자체 찾기 막대를 붙였다.
+
+- 읽기 모드: CSS Custom Highlight API로 렌더된 본문을 칠한다 (`dashboard/src/lib/domFind.ts`). DOM을 바꾸지 않는다.
+- 편집 모드: textarea 뒤 backdrop에 `<mark>`로 칠한다 (`FindBackdrop.tsx`). WebKit이 포커스 없는 textarea 선택을 그리지 않아서다. 글자 위치를 맞추려고 textarea와 backdrop이 글꼴·패딩·box-sizing·scrollbar-gutter를 공유한다.
+- Enter/Shift+Enter 이동, Esc 닫기 — Esc는 전파를 막아 편집 취소와 겹치지 않는다.
+- 한계: 텍스트 노드 경계를 넘는 일치(굵게 표시를 사이에 둔 구절)는 읽기 모드에서 찾지 않는다.
+
+### 검증
+
+`findInText` / `domFind` / `FindBar` / `FindBackdrop` / `InlineMarkdownEditor.find` 테스트 (RED 확인 후 GREEN). 대시보드 전체 vitest 통과, `tsc -b` 통과. 레이아웃(편집칸 높이, classic 스크롤바 폭)은 Chromium 측정으로 확인.
