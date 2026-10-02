@@ -156,7 +156,7 @@ relations:                        # 선택 (v0.8.x Semantic Relation): 1급 관�
 
 ```yaml
 status: stale
-last_verified: 2026-04-06T00:00:00Z   # ISO 8601 (stale 감지용)
+last_verified: 2026-04-06T00:00:00Z   # ISO 8601 (stale 감지용. 없으면 updated 기준)
 archived_at: 2026-07-06T12:00:00Z     # archived 시 자동 stamp
 archive_reason: stale_over_threshold  # 또는 user_request / factual_obsolete
 

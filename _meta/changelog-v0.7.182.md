@@ -589,3 +589,15 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 `tests/test_no_third_party_frontmatter.py` 2건(외부 `frontmatter` import가 실패하는 환경에서 `/graph` 200, `build_db` ok — 수정 전 RED 확인), `GraphPage.cache.test.tsx` 오류 상태 1건 추가. Python 전체 955 통과, 대시보드 vitest 315 통과, `tsc --noEmit` 0. Vite 개발 서버 + 실행 중인 앱 API로 수정한 5개 화면을 1280·900px 스크린샷으로 확인.
 
 후속: 수정본을 배포하려면 v0.3.2 릴리스가 필요하다(서명 키는 집 PC). GitHub Actions `desktop-release`는 v0.2.0부터 매번 실패 중이다.
+
+## 35. 가드닝 지원 — wiki_stale_detect의 updated 기준, wiki_log 필터
+
+정책 repo v1.17.0의 가드닝 절차(VAULT-OPERATOR §3.3)를 MCP로 실행해 보니 두 도구가 막았다.
+
+- `wiki_stale_detect`: `last_verified`만 봐서, 그 필드를 쓰지 않는 vault(대부분)에서는 후보가 늘 0건이었다. 이제 `last_verified`가 없으면 `updated`로 판정한다(lint #7과 같은 기준). evidence에 `updated N일 전 (임계값 90, last_verified 없음)`. 날짜만 있는 값(`2026-07-01`)은 naive datetime이라 aware `now`와 빼면 `TypeError`로 도구 전체가 죽던 것도 고쳤다(UTC로 간주). `SCHEMA.md` 템플릿의 `last_verified` 주석 갱신.
+- `wiki_log`: 선택 인자 `action`·`contains`. 주면 log.md 전체에서 항목(제목+세부 줄) 단위로 걸러 최근 `tail_n`개 항목을 돌려준다. 필터 없는 호출은 기존과 같다(최근 N줄). hub-control-room log.md가 1,978줄이라 줄 단위 tail로는 마지막 `reason: gardening:` 기록을 찾을 수 없었다. `TOOLS.md` 템플릿 갱신.
+- 보류: 가드닝 회차 기록(변경 0건 회차·보류 목록)을 log.md에 남기는 경로. 에이전트 쓰기 경로를 하나 늘리는 결정이라 따로 정한다.
+
+### 검증
+
+`tests/scenarios/test_stale_detect_updated_basis.py` 4건, `tests/test_mcp_wiki_log_filter.py` 4건(수정 전 각 2·3건 RED 확인). Python 전체 963 통과.

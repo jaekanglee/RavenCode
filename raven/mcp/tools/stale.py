@@ -47,6 +47,26 @@ VALID_STATUSES = {"current", "stale", "contested", "archived"}
 DEFAULT_STALE_DAYS = 90
 
 
+def _age_days(value, now: datetime) -> int | None:
+    """ISO 날짜/일시 문자열의 경과 일수. 시간대 없는 값(날짜만 포함)은 UTC로 본다."""
+    if value is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).days
+
+
+def _age_basis(frontmatter: dict) -> tuple[str, object]:
+    """신선도 기준 필드 — last_verified가 있으면 그것, 없으면 updated (제품 lint #7과 같음)."""
+    if frontmatter.get("last_verified") is not None:
+        return "last_verified", frontmatter.get("last_verified")
+    return "updated", frontmatter.get("updated")
+
+
 def _is_stale_candidate(
     frontmatter: dict,
     *,
@@ -58,24 +78,20 @@ def _is_stale_candidate(
     Returns:
         (is_candidate, evidence) — evidence는 사람이 검토할 수 있는 사유 1줄.
 
-    골격 한계: 본 골격은 frontmatter의 `last_verified` 또는 `status`만 본다.
-    실제 구현은 §1.4의 "사실 변경 감지"(outbound link 깨짐 등)도 포함해야 함.
+    기준 필드는 `last_verified`, 없으면 `updated`다. 대부분의 vault는
+    last_verified를 쓰지 않아 updated만 보던 lint #7과 결과가 어긋났다.
+    골격 한계: §1.4의 "사실 변경 감지"(outbound link 깨짐 등)는 아직 없다.
     """
     status = frontmatter.get("status")
     if status == "stale":
         return True, "status: stale 명시"
     if status == "archived":
         return False, None  # archived는 stale 후보 아님
-    last_verified = frontmatter.get("last_verified")
-    if last_verified is None:
-        return False, None
-    try:
-        last_dt = datetime.fromisoformat(last_verified.replace("Z", "+00:00"))
-        age_days = (now - last_dt).days
-        if age_days >= age_threshold_days:
-            return True, f"last_verified {age_days}일 전 (임계값 {age_threshold_days})"
-    except (ValueError, AttributeError):
-        return False, None
+    field, value = _age_basis(frontmatter)
+    age_days = _age_days(value, now)
+    if age_days is not None and age_days >= age_threshold_days:
+        suffix = "" if field == "last_verified" else ", last_verified 없음"
+        return True, f"{field} {age_days}일 전 (임계값 {age_threshold_days}{suffix})"
     return False, None
 
 
@@ -220,13 +236,7 @@ def wiki_stale_detect(
             continue
 
         last_verified = fm.get("last_verified")
-        age_days = None
-        if last_verified is not None:
-            try:
-                last_dt = datetime.fromisoformat(last_verified.replace("Z", "+00:00"))
-                age_days = (now - last_dt).days
-            except (ValueError, AttributeError):
-                pass
+        age_days = _age_days(_age_basis(fm)[1], now)
 
         candidates.append(
             {

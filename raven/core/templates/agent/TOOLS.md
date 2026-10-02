@@ -37,7 +37,7 @@ Raven MCP 서버는 권한 모드(`--mode read/write/admin`)에 따라 아래 �
 * **`wiki_get_page(slug: str)`**: 특정 페이지의 내용, frontmatter, backlinks, outbound links, 그리고 `precondition`(현재 파일 상태 토큰)을 조회합니다. 이 문서를 고쳐 쓸 계획이면 이 토큰을 `wiki_update`에 되돌려 보내세요 — 그 사이 남이 저장했으면 write가 거부됩니다(lost update 방지).
 * **`wiki_lint()`**: 현재 active vault의 14가지 린트 오류 및 이슈 목록을 반환합니다.
 * **`wiki_graph(project: Optional[str] = None)`**: Vault 내 페이지 간 링크 그래프 데이터를 반환합니다.
-* **`wiki_log(tail_n: int = 20)`**: `log.md` 파일의 최근 N개 이력을 구조화된 JSON으로 반환합니다.
+* **`wiki_log(tail_n: int = 20, action: str = None, contains: str = None)`**: `log.md` 파일의 최근 N개 이력을 구조화된 JSON으로 반환합니다. `action`(예: `update`)·`contains`(부분 문자열, 예: `gardening:`)를 주면 log.md 전체에서 항목 단위로 걸러 최근 N개 항목을 돌려줍니다.
 * **`wiki_get_policy()`**: vault 소유자가 쓴 운영 지침(`_meta/policy/VAULT-POLICY.md`) 원문을 반환합니다. vault를 큐레이션하기 전에 읽고 따르세요. 소유자가 아직 쓰지 않았으면 `content`가 `null`이며, 그때는 사용자의 명시적 지시만 수행합니다.
 
 ### 2.2 Write 툴 (MCP `--mode write` 이상 활성화 시 제공)

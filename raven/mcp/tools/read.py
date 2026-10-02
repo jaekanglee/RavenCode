@@ -92,10 +92,35 @@ def wiki_graph(
 # ─────────────── 5. wiki_log ───────────────
 
 
-def wiki_log(tail_n: int = 20, ctx: Optional[VaultContext] = None) -> list[dict]:
-    """Last N non-empty log.md lines."""
+def wiki_log(
+    tail_n: int = 20,
+    action: Optional[str] = None,
+    contains: Optional[str] = None,
+    ctx: Optional[VaultContext] = None,
+) -> list[dict]:
+    """Last N non-empty log.md lines.
+
+    With `action` and/or `contains`, filters whole entries (header + `- key: val`
+    lines) across the entire log.md and returns the last `tail_n` matching
+    entries, one `{"line": <entry text>}` per entry.
+    """
     ctx = ctx or VaultContext(vault=db._default_vault())
-    return db.tail_log(tail_n=tail_n, vault=ctx.vault)
+    if not action and not contains:
+        return db.tail_log(tail_n=tail_n, vault=ctx.vault)
+
+    from types import SimpleNamespace
+
+    from raven.core import log as log_module
+
+    # log.load()는 vault.root만 읽는다 — 레지스트리 메타 없이 경로로 충분하다.
+    entries = log_module.load(SimpleNamespace(root=Path(ctx.vault)))
+    if action:
+        entries = [e for e in entries if e.action == action]
+    if contains:
+        entries = [e for e in entries if contains in e.to_md()]
+    if tail_n > 0:
+        entries = entries[-tail_n:]
+    return [{"line": e.to_md().rstrip("\n")} for e in entries]
 
 
 # ─────────────── 5.5. wiki_get_policy ───────────────

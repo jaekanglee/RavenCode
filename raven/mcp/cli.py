@@ -138,11 +138,15 @@ def register_tools(mcp: Any, mode: str) -> None:
     # ─── 5. wiki_log ───
     @mcp.tool(
         name="wiki_log",
-        description=EXPERIMENTAL_PREFIX + VAULT_ARG_NOTE + "Last N non-empty log.md lines as structured entries.",
+        description=EXPERIMENTAL_PREFIX + VAULT_ARG_NOTE + "Last N non-empty log.md lines as structured entries. "
+            "Optional `action` (e.g. update, build) and/or `contains` (substring, e.g. 'gardening:') "
+            "filter whole entries across the entire log; tail_n then counts entries.",
     )
-    def wiki_log(vault: str, tail_n: int = 20) -> list[dict]:
+    def wiki_log(
+        vault: str, tail_n: int = 20, action: Optional[str] = None, contains: Optional[str] = None
+    ) -> list[dict]:
         ctx = VaultContext(vault=resolve_vault_path(vault), mode=permission_mode)
-        return read_tools.wiki_log(tail_n=tail_n, ctx=ctx)
+        return read_tools.wiki_log(tail_n=tail_n, action=action, contains=contains, ctx=ctx)
 
     # ─── 5.5. wiki_get_policy ───
     @mcp.tool(
