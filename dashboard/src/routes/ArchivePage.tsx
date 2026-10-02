@@ -170,8 +170,9 @@ export function ArchivePage() {
           flexWrap: "wrap",
         }}
       >
-        <label style={{ fontSize: 13, color: "var(--color-muted)" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--color-muted)" }}>
           <input
+            className="input-base"
             type="number"
             min={0}
             value={cleanDays}
@@ -179,7 +180,7 @@ export function ArchivePage() {
               setCleanDays(Math.max(0, Number(e.target.value)));
               setCleanPreview(null);
             }}
-            style={{ width: 56, marginRight: 4 }}
+            style={{ width: 72, height: 32, padding: "4px 8px", fontSize: 13 }}
             aria-label="정리 기준 일수"
           />
           일 이상 경과
@@ -218,8 +219,8 @@ export function ArchivePage() {
           <thead>
             <tr style={{ borderBottom: "2px solid var(--color-hairline)" }}>
               <th style={{ textAlign: "left", padding: "10px 8px" }}>원본 slug</th>
-              <th style={{ textAlign: "left", padding: "10px 8px" }}>보관 시각</th>
-              <th style={{ textAlign: "left", padding: "10px 8px" }}>경과</th>
+              <th style={{ textAlign: "left", padding: "10px 8px", whiteSpace: "nowrap" }}>보관 시각</th>
+              <th style={{ textAlign: "left", padding: "10px 8px", whiteSpace: "nowrap" }}>경과</th>
               <th style={{ textAlign: "right", padding: "10px 8px" }}>작업</th>
             </tr>
           </thead>
@@ -235,13 +236,13 @@ export function ArchivePage() {
                 >
                   {e.original_slug}
                 </td>
-                <td style={{ padding: "10px 8px", color: "var(--color-muted)" }}>
+                <td style={{ padding: "10px 8px", color: "var(--color-muted)", whiteSpace: "nowrap" }}>
                   {formatTs(e.timestamp)}
                 </td>
-                <td style={{ padding: "10px 8px", color: "var(--color-muted)" }}>
+                <td style={{ padding: "10px 8px", color: "var(--color-muted)", whiteSpace: "nowrap" }}>
                   {formatAge(e.age_days)}
                 </td>
-                <td style={{ padding: "10px 8px", textAlign: "right" }}>
+                <td style={{ padding: "10px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
                   <Button
                     variant="secondary"
                     size="sm"

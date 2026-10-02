@@ -61,4 +61,13 @@ describe("GraphPage graph cache", () => {
     expect(screen.queryByText("그래프를 불러오는 중입니다")).toBeNull();
     expect(pending).toHaveBeenCalled();
   });
+
+  it("API가 오류로 응답하면 빈 그래프가 아니라 오류 상태를 보여준다", async () => {
+    // v0.3.1 번들 의존성 누락으로 GET /graph가 500일 때 "시각화할 문서가 없습니다"로 가려졌다.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) }));
+    renderGraphPage("error-vault");
+
+    await waitFor(() => expect(screen.getByText("그래프를 불러오지 못했습니다")).toBeTruthy());
+    expect(screen.queryByText("아직 시각화할 문서가 없습니다")).toBeNull();
+  });
 });

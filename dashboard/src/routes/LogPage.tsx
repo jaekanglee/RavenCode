@@ -191,6 +191,7 @@ export function LogPage() {
             gap: 8,
             fontSize: 13,
             color: "var(--color-muted)",
+            whiteSpace: "nowrap",
           }}
         >
           액션
@@ -199,6 +200,8 @@ export function LogPage() {
             onChange={(e) => setActionFilter(e.target.value)}
             className="input-base"
             style={{
+              width: "auto",
+              height: 36,
               padding: "6px 14px",
               fontSize: 13,
               fontFamily: "inherit",

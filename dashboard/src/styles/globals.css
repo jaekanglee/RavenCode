@@ -2654,6 +2654,26 @@ a:focus-visible {
   color: var(--slate-100) !important;
 }
 
+/* ─ 라이트 모드 pre도 어두운 배경이므로 구문 강조는 라이브러리의 다크 팔레트를 쓴다 ─
+ * 값은 @uiw/react-markdown-preview markdown.css의 [data-color-mode*='dark'] 블록과 같다.
+ * 라이트 팔레트(#0a3069 등)가 남으면 YAML 키 등이 slate-800 배경에 묻힌다. */
+[data-color-mode="light"] .wmde-markdown pre {
+  --color-prettylights-syntax-comment: #8b949e;
+  --color-prettylights-syntax-constant: #79c0ff;
+  --color-prettylights-syntax-entity: #d2a8ff;
+  --color-prettylights-syntax-storage-modifier-import: #c9d1d9;
+  --color-prettylights-syntax-entity-tag: #7ee787;
+  --color-prettylights-syntax-keyword: #ff7b72;
+  --color-prettylights-syntax-string: #a5d6ff;
+  --color-prettylights-syntax-variable: #ffa657;
+  --color-prettylights-syntax-string-regexp: #7ee787;
+  --color-prettylights-syntax-markup-list: #f2cc60;
+  --color-prettylights-syntax-markup-heading: #1f6feb;
+  --color-prettylights-syntax-meta-diff-range: #d2a8ff;
+  --color-prettylights-syntax-brackethighlighter-angle: #8b949e;
+  --color-prettylights-syntax-constant-other-reference-link: #a5d6ff;
+}
+
 /* ─ pre > code ─ */
 [data-color-mode] .wmde-markdown pre code,
 [data-color-mode] .wmde-markdown-html pre code,

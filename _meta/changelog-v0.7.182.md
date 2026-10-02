@@ -567,3 +567,25 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 ### 검증
 
 `tests/test_backup.py` 32건(왕복·이름 충돌·경로 재작성·default·zip-slip/symlink/크기/형식 거부·부분 실패 격리·1980 이전 mtime·vault 안 저장 거부), `test_api_backup.py`(loopback/Origin 게이트), `test_cli_backup.py`, `BackupPanel.test.tsx`, Rust capability 가드. Python 전체 953 통과, 대시보드 vitest 통과, `cargo test` 12 통과. 임시 `WIKI_VAULTS_DIR` 두 개로 CLI export → import 실동작 확인(t1 → t1-2, 검색 동작).
+
+## 34. 데스크톱 v0.3.1 그래프 500·wiki.db 재빌드 실패 — 번들에 python-frontmatter가 빠졌다
+
+데스크톱 UI 점검 중 발견했다. 설치된 v0.3.1에서 GET `/graph`가 500인데 화면은 "아직 시각화할 문서가 없습니다"를 띄웠고, 앱의 wiki.db 재빌드가 그날 하루만 25번 실패했다(`log.md` `build | wiki.db rebuild (fail, ? pages)`). 앱의 내장 Python에 `python-frontmatter`가 없었다. raven 코드는 repo와 같았고, 이 PC에서 만든 번들(`desktop/src-tauri/resources`)에는 패키지가 있다 — v0.3.1을 빌드한 쪽 번들에서만 빠졌다(그 빌드의 python-dotenv도 1.2.4로 달랐다). 빠진 이유는 그 빌드 로그 없이 확인하지 못했다.
+
+- 그래프 API(`raven/api/server.py` `vault_graph` 2곳)와 `scripts/build_db.py`가 외부 `frontmatter` 대신 `raven.core.frontmatter.parse`를 쓴다. 실제 vault 2개 658파일에서 두 파서의 DB 사용 필드 11개·본문이 같고, hub-control-room 복사본으로 옛/새 빌더 DB를 만들어 pages·tags·links·relations·build_files·pages_fts가 모두 같음을 확인했다.
+- `scripts/prepare-bundle.sh`: pip 설치 뒤 `requirements.txt`의 패키지가 모두 설치됐는지 확인하고, 빠지면 번들을 만들지 않는다. 설치된 v0.3.1의 Python에 돌리면 `python-frontmatter`로 실패한다.
+- GraphPage: HTTP 오류 응답을 빈 그래프로 바꾸던 처리를 오류로 던져, 기존 "그래프를 불러오지 못했습니다 / 다시 시도" 상태가 뜨게 했다.
+- `python-frontmatter`는 테스트 2곳이 아직 쓰므로 `requirements.txt`에 그대로 둔다.
+
+### 같은 점검의 UI 수정
+
+- 보관함: 긴 slug에 밀려 "복원" 버튼이 "복/원"으로 꺾이던 것 — 시각·경과·작업 칸 `nowrap`. 일수 입력칸에 `input-base`.
+- 로그: `input-base`의 `width: 100%` 때문에 "액션" 라벨이 세로로 꺾이던 것 — select `width: auto`.
+- 새 vault: 페이지 제목("새 vault 만들기")과 위저드 제목("새 vault 추가")이 겹치던 것 — 페이지 쪽 제거.
+- Markdown 코드 블록(라이트 모드): 배경은 v0.7.56부터 어둡게 강제했는데 구문 강조는 라이트 팔레트로 남아 YAML 키(#0a3069)가 묻혔다 — 라이트 모드 `pre` 안에서 라이브러리 다크 팔레트 변수를 쓴다.
+
+### 검증
+
+`tests/test_no_third_party_frontmatter.py` 2건(외부 `frontmatter` import가 실패하는 환경에서 `/graph` 200, `build_db` ok — 수정 전 RED 확인), `GraphPage.cache.test.tsx` 오류 상태 1건 추가. Python 전체 955 통과, 대시보드 vitest 315 통과, `tsc --noEmit` 0. Vite 개발 서버 + 실행 중인 앱 API로 수정한 5개 화면을 1280·900px 스크린샷으로 확인.
+
+후속: 수정본을 배포하려면 v0.3.2 릴리스가 필요하다(서명 키는 집 PC). GitHub Actions `desktop-release`는 v0.2.0부터 매번 실패 중이다.

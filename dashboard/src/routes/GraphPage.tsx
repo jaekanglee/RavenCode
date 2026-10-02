@@ -183,7 +183,10 @@ export function GraphPage() {
     // 서버 ForceAtlas 좌표는 클라이언트 물리의 출발점일 뿐이라 거칠어도 된다.
     // 기본 500회는 169문서 vault에서 ~2.8초, 60회는 ~0.3초.
     apiFetch(`/api/vaults/${encodeURIComponent(vault)}/graph?iterations=${GRAPH_SEED_ITERATIONS}`)
-      .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
+      .then((r) => {
+        if (!r.ok) throw new Error(`graph ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
         const next = { nodes: d.nodes ?? [], edges: d.edges ?? [] };
         graphCache.set(vault, next);

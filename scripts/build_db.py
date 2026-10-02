@@ -21,8 +21,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import frontmatter
-
+from raven.core import frontmatter as core_frontmatter
 from raven.core.relations import is_valid_relation_payload
 from raven.core.node_meta import aliases_to_json, collection_for_slug, normalize_status
 from raven.core.vault import is_user_owned_instruction
@@ -185,11 +184,10 @@ def parse_page(md_path: Path, vault: Path) -> dict:
     """Read a markdown file, parse frontmatter, derive slug. Returns a dict ready for INSERT."""
     raw = md_path.read_text(encoding="utf-8")
     try:
-        post = frontmatter.loads(raw)
-        fm = dict(post.metadata)
+        fm, body = core_frontmatter.parse(raw)
     except Exception:
         # Malformed frontmatter → treat as empty
-        fm = {}
+        fm, body = {}, raw
 
     # Apply defaults for missing required fields
     title = str(fm.get("title") or md_path.stem)
@@ -201,8 +199,7 @@ def parse_page(md_path: Path, vault: Path) -> dict:
     fm_slug = fm.get("slug")
 
     slug = derive_slug(md_path, vault, fm_slug)
-    body = post.content if "post" in locals() else raw
-    # Strip leading frontmatter if python-frontmatter didn't (safety)
+    # Strip leading frontmatter if the parser didn't (safety)
     if body.startswith("---\n"):
         body = re.sub(r"^---\n.*?\n---\n", "", raw, count=1, flags=re.DOTALL)
 

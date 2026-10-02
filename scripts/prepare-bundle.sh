@@ -60,6 +60,26 @@ BUNDLED_PIP="$RESOURCES/python/bin/python3 -m pip"
 # 있던 탓에 mcp 2.0.0이 딸려 들어와 mcp.server.fastmcp import가 깨졌다.
 $BUNDLED_PIP install --quiet --no-cache-dir -r "$REPO_ROOT/requirements.txt"
 
+# 설치 결과 검증 — requirements.txt의 패키지가 하나라도 빠지면 번들을 만들지 않는다.
+# v0.3.1 배포본에 python-frontmatter가 빠져 그래프 API와 wiki.db 재빌드가 조용히 실패했다.
+"$RESOURCES/python/bin/python3" - "$REPO_ROOT/requirements.txt" <<'PY'
+import re, sys
+from importlib.metadata import PackageNotFoundError, version
+
+missing = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", line.split("#", 1)[0])
+    if not m:
+        continue
+    try:
+        version(m.group(1))
+    except PackageNotFoundError:
+        missing.append(m.group(1))
+if missing:
+    sys.exit("  ❌ 번들 Python에 설치되지 않은 패키지: " + ", ".join(missing))
+print("  ✅ requirements.txt 패키지 모두 설치됨")
+PY
+
 echo "  Installed packages:"
 $BUNDLED_PIP list --format=columns 2>/dev/null | wc -l | xargs echo "   "
 

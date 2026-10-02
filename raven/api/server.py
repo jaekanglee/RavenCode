@@ -1078,7 +1078,6 @@ def vault_graph(
                 for p in pages
             ]
             # 각 노드의 markdown frontmatter에서 importance 수치 및 status, issue_status, archived 등을 파싱
-            import frontmatter
             for node in nodes:
                 slug = node["slug"]
                 node_fp = v.root / f"{slug}.md"
@@ -1087,8 +1086,7 @@ def vault_graph(
                 archived = False
                 if node_fp.exists():
                     try:
-                        post = frontmatter.loads(node_fp.read_text(errors="replace"))
-                        fm = post.metadata
+                        fm, _ = frontmatter_module.parse(node_fp.read_text(errors="replace"))
                         status = normalize_status(fm.get("status"))
                         issue_status = fm.get("issue_status")
                         archived = bool(fm.get("archived", False))
@@ -1328,7 +1326,6 @@ def vault_graph(
             in_degree[resolved_tgt] = in_degree.get(resolved_tgt, 0) + 1
 
     # nodes에 weight 부착 및 status, issue_status, archived 파싱
-    import frontmatter
     for node in nodes:
         slug = node["slug"]
         node_fp = v.root / f"{slug}.md"
@@ -1338,8 +1335,7 @@ def vault_graph(
         archived = False
         if node_fp.exists():
             try:
-                post = frontmatter.loads(node_fp.read_text(errors="replace"))
-                fm = post.metadata
+                fm, _ = frontmatter_module.parse(node_fp.read_text(errors="replace"))
                 importance = int(fm.get("importance", 1))
                 status = normalize_status(fm.get("status"))
                 issue_status = fm.get("issue_status")
