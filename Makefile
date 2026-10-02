@@ -180,7 +180,7 @@ export PATH := $(HOME)/.cargo/bin:$(PATH)
 
 # ────────────────────────── desktop ──────────────────────────
 
-.PHONY: desktop-check desktop-dev desktop-rebuild desktop-bundle desktop-build desktop-dmg desktop-key-save desktop-release-preflight desktop-release
+.PHONY: desktop-check desktop-dev desktop-rebuild desktop-bundle desktop-build desktop-dmg desktop-key-save desktop-release-preflight desktop-release-version desktop-release
 
 desktop-check: ## Check required tools (python venv, cargo, node, npm) for desktop app development and auto-install if missing
 	@if ! command -v python3 >/dev/null 2>&1; then \
@@ -251,6 +251,9 @@ desktop-dmg: desktop-build ## Build DMG installer from release binary
 desktop-key-save: ## 업데이터 서명 키 경로+비밀번호를 .env.release 에 기록 (최초 1회. 검증 후 저장, gitignore 대상)
 	@bash scripts/save-release-key.sh
 
+desktop-release-version: ## 현재 버전을 보여주고 새 버전을 물어 범프·커밋·태그·푸시 (VERSION=x.y.z 면 묻지 않음, 현재 버전 입력 시 재릴리스)
+	@VERSION="$(VERSION)" bash scripts/desktop-release-version.sh
+
 desktop-release-preflight: ## 릴리스 전제조건 검사 (서명 자격증명·태그·gh) — 빌드 전에 먼저 실패시킨다
 	@set -e; \
 	VERSION="$(DESKTOP_VERSION)"; \
@@ -267,7 +270,7 @@ desktop-release-preflight: ## 릴리스 전제조건 검사 (서명 자격증명
 	  echo "❌ 태그 $$TAG 가 원격에 없습니다 — 'git push origin --tags' 먼저 실행하세요."; exit 1; }; \
 	echo "✅ preflight 통과 — 빌드를 시작합니다."
 
-desktop-release: desktop-release-preflight desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + .env.release — make desktop-key-save)
+desktop-release: desktop-release-version desktop-release-preflight desktop-dmg ## Build DMG + signed auto-update artifact, upload both to GitHub Release (requires gh CLI + .env.release — make desktop-key-save)
 	@set -e; \
 	VERSION="$(DESKTOP_VERSION)"; \
 	TAG="v$$VERSION"; \

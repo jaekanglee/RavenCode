@@ -161,7 +161,7 @@ make desktop-install   # = scripts/install-desktop.sh
 make desktop-bundle    # 번들용 Python(python-build-standalone) 다운로드 + raven 소스 복사 → desktop/src-tauri/resources/
 make desktop-build     # Dashboard 빌드 + cargo build --release
 make desktop-dmg       # .app 조립 + 코드사인 + .dmg 생성 (desktop-build 포함)
-make desktop-release   # .dmg를 현재 git tag의 GitHub Release에 업로드 (requires gh CLI)
+make desktop-release   # 새 버전을 물어 범프·커밋·태그·푸시 → .dmg와 업데이트 파일을 GitHub Release에 업로드 (requires gh CLI)
 ```
 
 `desktop-dmg` (`scripts/make-dmg.sh`)는 `.app` 조립 후 번들된 실행파일/`.dylib`/`.so`들을 ad-hoc 서명합니다 — macOS의 provenance 정책상 부모 앱과 자식 프로세스(번들된 python3) 모두 유효한 서명이 있어야 하기 때문입니다.

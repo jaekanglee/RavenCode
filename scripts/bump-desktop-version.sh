@@ -82,10 +82,14 @@ sub_once(
 )
 PY
 
-echo ""
-echo "=== 범프 완료 — 다음 순서로 릴리스 ==="
-echo "  git add -A && git commit -m \"chore(desktop): v$VERSION\""
-echo "  git tag -a \"v$VERSION\" -m \"Raven v$VERSION\""
-echo "  git push origin HEAD --tags"
-echo "  export TAURI_SIGNING_PRIVATE_KEY=<개인키 경로>"
-echo "  make desktop-release"
+# make desktop-release(scripts/desktop-release-version.sh)에서 불리면 커밋·태그·푸시를
+# 그쪽이 이어서 하므로 안내를 생략한다.
+if [ -z "${RAVEN_RELEASE_FLOW:-}" ]; then
+  echo ""
+  echo "=== 범프 완료 — 다음 순서로 릴리스 ==="
+  echo "  git add -A && git commit -m \"chore(desktop): v$VERSION\""
+  echo "  git tag -a \"v$VERSION\" -m \"Raven v$VERSION\""
+  echo "  git push origin HEAD --tags"
+  echo "  export TAURI_SIGNING_PRIVATE_KEY=<개인키 경로>"
+  echo "  make desktop-release"
+fi
