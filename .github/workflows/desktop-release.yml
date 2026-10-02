@@ -1,5 +1,10 @@
-# Raven Desktop — DMG 빌드 + GitHub Release 업로드
-# 트리거: git tag v* 푸시 (예: git tag v0.2.0 && git push --tags)
+# Raven Desktop — 태그마다 깨끗한 환경에서 DMG까지 빌드되는지 검증한다.
+# 트리거: git tag v* 푸시 (make desktop-release-version이 태그를 푸시한다)
+#
+# 업로드는 하지 않는다. 릴리스 산출물(DMG + 서명된 업데이터)은 서명 키가 있는
+# 머신의 `make desktop-release`가 올린다. 여기서 같은 릴리스에 DMG를 --clobber로
+# 올리면 DMG와 업데이터가 서로 다른 빌드가 된다. 이 단계는 v0.2.0~v0.3.1 내내
+# DMG 파일명이 0.1.0으로 고정돼 실패하고 있었다.
 name: desktop-release
 
 on:
@@ -34,16 +39,3 @@ jobs:
 
       - name: Build DMG
         run: bash scripts/make-dmg.sh
-
-      - name: Upload to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          DMG="desktop/src-tauri/target/release/bundle/dmg/Raven_0.1.0_aarch64.dmg"
-          gh release create "$TAG" "$DMG" \
-            --title "Raven $TAG" \
-            --notes "Raven Desktop — macOS (Apple Silicon)" \
-            --generate-notes \
-            2>/dev/null || \
-          gh release upload "$TAG" "$DMG" --clobber

@@ -69,6 +69,29 @@ def test_orphan_after_grace_is_warning(vault):
     )
 
 
+def test_vault_root_index_is_not_orphan(vault):
+    """content/index는 vault 루트(index_builder가 만드는 목차) — inbound 0이 정상이다.
+
+    lint #4와 정원(garden)이 모두 이 페이지를 고아로 잡고, 정원은 무관한 문서를
+    연결하라고 추천했다.
+    """
+    from raven.core import db as db_module
+    from raven.core import garden as garden_module
+
+    old = (date.today() - timedelta(days=30)).isoformat()
+    _write_page(vault, "content/index", {"title": "Home", "type": "concept", "created": old, "updated": old})
+    _write_page(vault, "content/lonely", {"title": "Lonely", "type": "concept", "created": old, "updated": old})
+
+    lint_slugs = {i["slug"] for i in check_orphans(vault)}
+    assert "content/index" not in lint_slugs
+    assert "content/lonely" in lint_slugs
+
+    db_module.build_db(vault, run_lint=False)
+    # build 중 index_builder가 content/_index/* 목차를 만들어 lonely에 inbound가 생긴다 — index만 본다.
+    garden_slugs = {o["slug"] for o in garden_module.get_orphan_pages(vault)}
+    assert "content/index" not in garden_slugs
+
+
 def test_orphan_within_grace_is_info(vault):
     """grace 내 orphan → info (grace 중)."""
     recent = (date.today() - timedelta(days=2)).isoformat()

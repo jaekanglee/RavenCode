@@ -62,7 +62,7 @@ export function LogPage() {
   return (
     <div style={{ maxWidth: 1120 }}>
       <div style={{ marginBottom: 8, display: "flex", alignItems: "baseline", gap: 8 }}>
-        <h1 style={{ margin: 0 }}>Vault Log</h1>
+        <h1 style={{ margin: 0 }}>로그</h1>
         <span style={{ color: "var(--color-muted)", fontSize: 14 }}>in {vault}</span>
       </div>
       <p className="text-muted" style={{ fontSize: 14, marginTop: 8, marginBottom: 32 }}>

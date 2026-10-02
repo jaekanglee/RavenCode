@@ -3256,3 +3256,21 @@ a:focus-visible {
 .find-backdrop .find-mark-current {
   background: var(--color-find-current);
 }
+
+/* ── RawPanel 파일 선택 전 레이아웃 ──
+ * 사이드바가 항상 보이는 폭에서는 사이드바의 raw 트리와 중복되므로 내부 트리를 숨긴다.
+ * 사이드바가 서랍이 되는 744px 이하에서는 내부 트리가 유일한 탐색 수단이다. */
+.raw-panel-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.raw-panel-tree {
+  display: none;
+}
+@media (max-width: 744px) {
+  .raw-panel-grid {
+    grid-template-columns: minmax(240px, 1fr) minmax(0, 2.5fr);
+  }
+  .raw-panel-tree {
+    display: block;
+  }
+}

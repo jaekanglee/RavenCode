@@ -19,3 +19,11 @@ describe("RawPanel selected-file viewer layout", () => {
     expect(RawPanelSrc).toContain('height: "100%"');
   });
 });
+
+
+describe("RawPanel before a file is selected", () => {
+  it("marks the inner RawTree so globals.css hides it where the sidebar is always visible (>744px)", () => {
+    expect(RawPanelSrc).toContain('className="raw-panel-tree"');
+    expect(RawPanelSrc).toContain('className={relPath ? undefined : "raw-panel-grid"}');
+  });
+});

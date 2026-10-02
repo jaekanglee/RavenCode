@@ -72,7 +72,7 @@ def get_stale_pages(vault: Vault) -> List[Dict[str, Any]]:
 
 def get_orphan_pages(vault: Vault) -> List[Dict[str, Any]]:
     """Get orphan pages (inbound wikilinks = 0) older than the grace period.
-    Excludes _meta/ directory.
+    Excludes _meta/ directory and the vault root index (content/index), same as lint #4.
     """
     grace = _orphan_grace_days(vault)
     today = dt.date.today()
@@ -84,6 +84,7 @@ def get_orphan_pages(vault: Vault) -> List[Dict[str, Any]]:
         SELECT p.slug, p.title, p.created, p.type 
         FROM pages p
         WHERE p.slug NOT LIKE '_meta/%'
+          AND p.slug != 'content/index'
           AND p.slug NOT IN (SELECT DISTINCT target_slug FROM links)
           AND ('content/' || p.slug) NOT IN (SELECT DISTINCT target_slug FROM links)
     """)

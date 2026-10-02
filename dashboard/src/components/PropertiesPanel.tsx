@@ -196,7 +196,7 @@ export function PropertiesPanel({ vault, page, onSaved }: Props) {
           <path d="M4 2 L8 6 L4 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
         </svg>
         <span style={{ fontSize: 12, fontWeight: 600, color: "var(--color-muted)", letterSpacing: "0.04em", textTransform: "uppercase" }}>
-          Properties
+          속성
         </span>
       </button>
 

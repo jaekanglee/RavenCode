@@ -282,16 +282,19 @@ export function RawPanel() {
       </div>
 
       <div
+        className={relPath ? undefined : "raw-panel-grid"}
         style={{
           display: "grid",
-          gridTemplateColumns: relPath ? "minmax(0, 1fr)" : "minmax(240px, 1fr) minmax(0, 2.5fr)",
+          gridTemplateColumns: relPath ? "minmax(0, 1fr)" : undefined,
           gap: 16,
           alignItems: "stretch",
         }}
       >
-        {/* 좌: 트리 — 파일 선택 전 전용. 파일을 열면 사이드바 탐색기와 중복되므로 숨김. */}
+        {/* 좌: 트리 — 파일 선택 전 전용. 파일을 열면 사이드바 탐색기와 중복되므로 숨김.
+            사이드바가 항상 보이는 폭(>744px)에서는 선택 전에도 숨긴다 — globals.css .raw-panel-tree */}
         {!relPath && (
           <div
+            className="raw-panel-tree"
             style={{
               background: "var(--color-surface)",
               border: "1px solid var(--color-hairline)",

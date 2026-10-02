@@ -315,6 +315,7 @@ def check_orphans(vault: Vault) -> list[dict]:
     Returns: [{"id":"#4", "severity":"warning|info", "slug":..., "message":...}, ...]
 
     면제 (v0.5.2+ SCHEMA): _meta/ 안 페이지 (rule/reference). 운영 문서는 inbound 0이 정상.
+    vault 루트 목차 `content/index`도 면제 (다른 문서가 가리키지 않는 것이 정상).
     """
     grace = _orphan_grace_days(vault)
     today = date.today()
@@ -339,6 +340,9 @@ def check_orphans(vault: Vault) -> list[dict]:
             continue
         # 면제: _meta/ 안 (rule/reference, 운영 문서)
         if slug.startswith("_meta/"):
+            continue
+        # 면제: vault 루트 목차 (index_builder가 만든다) — inbound 0이 정상
+        if slug == "content/index":
             continue
         # orphan: created 기준 grace 계산
         fm = _parse_fm(fp)

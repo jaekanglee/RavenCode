@@ -615,3 +615,15 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 ### 검증
 
 `tests/test_mcp_gardening_record.py` 8건(기록 형식, `wiki_log` 필터로 조회, 잘못된 입력 5종 거부 시 log.md 불변, read 모드 미노출 — 수정 전 RED 확인).
+
+## 37. 데스크톱 점검 P2 — CI 업로드 제거, 루트 목차 고아 면제, UI 정리
+
+- **CI `desktop-release`**: 빌드는 매번 성공했고 업로드 단계만 DMG 파일명 `Raven_0.1.0_aarch64.dmg` 고정으로 v0.2.0~v0.3.1 내내 실패했다. 파일명을 고치는 대신 업로드를 뺐다 — 릴리스는 서명 키가 있는 머신의 `make desktop-release`가 DMG와 서명된 업데이터를 함께 올리는데, CI가 같은 릴리스에 `--clobber`로 DMG를 올리면 DMG와 업데이터가 서로 다른 빌드가 된다(§34가 바로 빌드 차이에서 생긴 사고). 이제 태그마다 깨끗한 환경에서 DMG까지 빌드되는지만 검증하고, §34의 번들 패키지 검사도 여기서 돈다.
+- **`content/index` 고아 면제**: lint #4와 정원(garden)이 vault 루트 목차를 고아로 잡고, 정원은 무관한 도구 문서를 연결하라고 추천했다. 둘 다 면제(`index_builder`가 만드는 루트이며 analytics·advice·db도 이미 따로 다룬다). 점검 때 보인 "정원 1 / 린트 2" 개수 차이는 사이에 vault가 바뀐 탓으로 재현되지 않았다.
+- **보관소 관리**: 900px에서 헤더 버튼("보/관함")·숫자 칸("링/크", "859.5/KB")·이름이 글자 단위로 꺾이던 것 — 해당 칸 `nowrap`, 경로만 `break-all`(최소 120px), 작업 버튼은 버튼 단위로 줄바꿈.
+- **raw**: 파일 선택 전 본문 트리가 사이드바 raw 트리와 겹쳤다. 사이드바가 항상 보이는 폭(>744px)에서는 숨기고, 사이드바가 서랍이 되는 744px 이하에서는 유지(`.raw-panel-grid`/`.raw-panel-tree`). v0.7.112 "파일을 열면 내부 트리 숨김" 계약은 그대로.
+- **제목**: "Vault Log" → "로그", "Vault 관리" → "보관소 관리", 속성 패널 "Properties" → "속성" (탭 라벨·사이드바 표현에 맞춤). 로그 요약 카드 라벨(PATH 등)은 그대로.
+
+### 검증
+
+`test_lint_v2.py::test_vault_root_index_is_not_orphan`(lint·garden 모두 — garden 쪽은 수정 전 RED 확인), `RawPanel.viewer-layout.contract.test.ts` 1건 추가. Python 972, vitest 316 통과, `tsc --noEmit` 0. 보관소 관리 900·1280px, raw 1280·700px, 로그·문서 화면 스크린샷 확인(가로 넘침 0).

@@ -274,12 +274,12 @@ export function VaultManage() {
     <div style={{ maxWidth: 1100 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Vault 관리</h1>
+          <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>보관소 관리</h1>
           <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
             등록된 Markdown workspace를 확인하고 이름을 변경하거나 연결을 해제합니다.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0, whiteSpace: "nowrap" }}>
           <Button variant="secondary" onClick={() => navigate("/archive")}>🗄 보관함</Button>
           <Button variant="pillPrimary" onClick={() => navigate("/vault/new")}>새 vault 만들기</Button>
         </div>
@@ -293,7 +293,7 @@ export function VaultManage() {
       ) : (
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
-            <tr style={{ borderBottom: "2px solid var(--color-hairline)" }}>
+            <tr style={{ borderBottom: "2px solid var(--color-hairline)", whiteSpace: "nowrap" }}>
               <th style={{ textAlign: "left", padding: "10px 8px" }}>이름</th>
               <th style={{ textAlign: "left", padding: "10px 8px" }}>경로</th>
               <th style={{ textAlign: "right", padding: "10px 8px" }}>문서</th>
@@ -308,21 +308,23 @@ export function VaultManage() {
               const editing = editingName === vault.name;
               return (
                 <tr key={vault.name} style={{ borderBottom: "1px solid var(--color-hairline)" }}>
-                  <td style={{ padding: "10px 8px", fontWeight: 600 }}>
+                  <td style={{ padding: "10px 8px", fontWeight: 600, whiteSpace: "nowrap" }}>
                     {editing ? (
                       <input value={newName} onChange={(e) => setNewName(e.target.value)} aria-label={`${vault.name} 새 이름`} />
                     ) : <>{vault.default ? "★ " : ""}{vault.name}</>}
                   </td>
-                  <td style={{ padding: "10px 8px", color: "var(--color-muted)", fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11 }}>{vault.path}</td>
-                  <td style={{ padding: "10px 8px", textAlign: "right" }}>{detail?.pages ?? "—"}</td>
-                  <td style={{ padding: "10px 8px", textAlign: "right", color: detail?.broken_links ? "var(--color-danger-text)" : undefined }}>{detail?.broken_links ?? "—"}</td>
-                  <td style={{ padding: "10px 8px", textAlign: "right" }}>{detail ? formatBytes(detail.size_bytes) : "—"}</td>
-                  <td style={{ padding: "10px 8px", textAlign: "right" }}>
+                  <td style={{ padding: "10px 8px", color: "var(--color-muted)", fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, wordBreak: "break-all", minWidth: 120 }}>{vault.path}</td>
+                  <td style={{ padding: "10px 8px", textAlign: "right", whiteSpace: "nowrap" }}>{detail?.pages ?? "—"}</td>
+                  <td style={{ padding: "10px 8px", textAlign: "right", whiteSpace: "nowrap", color: detail?.broken_links ? "var(--color-danger-text)" : undefined }}>{detail?.broken_links ?? "—"}</td>
+                  <td style={{ padding: "10px 8px", textAlign: "right", whiteSpace: "nowrap" }}>{detail ? formatBytes(detail.size_bytes) : "—"}</td>
+                  <td style={{ padding: "10px 8px" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 4, whiteSpace: "nowrap" }}>
                     {editing ? (
                       <><Button variant="secondary" size="sm" disabled={busy} onClick={() => void renameVault()}>저장</Button>{" "}<Button variant="secondary" size="sm" disabled={busy} onClick={() => setEditingName(null)}>취소</Button></>
                     ) : (
                       <><Button variant="secondary" size="sm" disabled={busy} onClick={() => navigate(`/vault/policy/${encodeURIComponent(vault.name)}`)}>운영 지침</Button>{" "}<Button variant="secondary" size="sm" disabled={busy} onClick={() => { setEditingName(vault.name); setNewName(vault.name); }}>이름 변경</Button>{" "}<Button variant="danger" size="sm" disabled={busy} onClick={() => void deleteVault(vault.name)}>삭제</Button></>
                     )}
+                    </div>
                   </td>
                 </tr>
               );
