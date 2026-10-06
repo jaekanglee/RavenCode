@@ -11,7 +11,11 @@ scripts 패키지)는 그 파일을 설치할 뿐, 자기 핀을 다시 선언�
 """
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +77,56 @@ def test_bundle_installs_from_requirements():
     assert "-r \"$REPO_ROOT/requirements.txt\"" in script, (
         "prepare-bundle.sh는 requirements.txt를 설치해야 한다 (핀 하드코딩 금지)"
     )
+
+
+def test_bundle_pip_command_is_isolated_and_preserves_spaces(tmp_path):
+    script = (ROOT / "scripts/prepare-bundle.sh").read_text(encoding="utf-8")
+    declaration = next(line for line in script.splitlines() if line.startswith("BUNDLED_PIP="))
+    resources = tmp_path / "bundle resources"
+    result = subprocess.run(
+        ["bash", "-c", declaration + '\nprintf "%s\\0" "${BUNDLED_PIP[@]}"'],
+        env={**os.environ, "RESOURCES": str(resources)},
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    assert result.stdout.decode().split("\0")[:-1] == [
+        str(resources / "python/bin/python3"), "-I", "-m", "pip", "--isolated",
+    ]
+    assert '"${BUNDLED_PIP[@]}" install' in script
+    assert '"${BUNDLED_PIP[@]}" list' in script
+
+
+def test_bundle_validation_rejects_user_site_dependency(tmp_path):
+    script = (ROOT / "scripts/prepare-bundle.sh").read_text(encoding="utf-8")
+    invocation, remainder = script.split(" <<'PY'\n", 1)
+    flags = shlex.split(invocation.splitlines()[-1])[1:-1]
+    validator = remainder.split("\nPY\n", 1)[0]
+    userbase = tmp_path / "userbase"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    env["PYTHONUSERBASE"] = str(userbase)
+    python = sys._base_executable
+    probe = subprocess.run(
+        [python, "-c", "import site; print(site.getusersitepackages())"],
+        env=env, capture_output=True, text=True, check=True, timeout=10,
+    )
+    metadata = Path(probe.stdout.strip()) / "raven_bundle_probe-1.0.dist-info"
+    metadata.mkdir(parents=True)
+    (metadata / "METADATA").write_text("Name: raven-bundle-probe\nVersion: 1.0\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("raven-bundle-probe>=1.0\n", encoding="utf-8")
+    # Control: the host's user package would satisfy the old validator.
+    control = subprocess.run(
+        [python, "-", str(requirements)], input=validator, env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert control.returncode == 0, control.stderr
+    isolated = subprocess.run(
+        [python, *flags, str(requirements)], input=validator, env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert isolated.returncode != 0
+    assert "raven-bundle-probe" in isolated.stderr
 
 
 # 실제 import 문만 본다 — docstring의 이력 설명("2.0 removed mcp.server.fastmcp")은

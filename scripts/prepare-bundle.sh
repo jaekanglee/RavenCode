@@ -53,16 +53,18 @@ mv "$TMPDIR_BUNDLE/python" "$RESOURCES/python"
 
 # 3. Install dependencies
 echo "[3/4] Installing dependencies into bundled Python..."
-BUNDLED_PIP="$RESOURCES/python/bin/python3 -m pip"
+# Ignore user site-packages, PYTHON* variables and user pip configuration.
+# Otherwise pip can report a dependency in ~/.local as already installed.
+BUNDLED_PIP=("$RESOURCES/python/bin/python3" -I -m pip --isolated)
 
 # Core runtime dependencies — requirements.txt가 단일 진실 원천이다.
 # 여기에 핀을 다시 하드코딩하지 말 것: 번들만 `mcp>=1.28`(상한 없음)을 들고
 # 있던 탓에 mcp 2.0.0이 딸려 들어와 mcp.server.fastmcp import가 깨졌다.
-$BUNDLED_PIP install --quiet --no-cache-dir -r "$REPO_ROOT/requirements.txt"
+"${BUNDLED_PIP[@]}" install --quiet --no-cache-dir -r "$REPO_ROOT/requirements.txt"
 
 # 설치 결과 검증 — requirements.txt의 패키지가 하나라도 빠지면 번들을 만들지 않는다.
 # v0.3.1 배포본에 python-frontmatter가 빠져 그래프 API와 wiki.db 재빌드가 조용히 실패했다.
-"$RESOURCES/python/bin/python3" - "$REPO_ROOT/requirements.txt" <<'PY'
+"$RESOURCES/python/bin/python3" -I - "$REPO_ROOT/requirements.txt" <<'PY'
 import re, sys
 from importlib.metadata import PackageNotFoundError, version
 
@@ -81,7 +83,7 @@ print("  ✅ requirements.txt 패키지 모두 설치됨")
 PY
 
 echo "  Installed packages:"
-$BUNDLED_PIP list --format=columns 2>/dev/null | wc -l | xargs echo "   "
+"${BUNDLED_PIP[@]}" list --format=columns | wc -l | xargs echo "   "
 
 # 4. Copy Raven source
 echo "[4/4] Copying Raven source..."

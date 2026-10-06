@@ -54,9 +54,11 @@ pub(crate) fn runtime_launch_spec(
     mcp_mode: Option<String>,
 ) -> RuntimeLaunchSpec {
     let mut args = Vec::new();
-    // Bundled mode: -P prevents CWD from shadowing the bundled raven package
+    // Keep the bundled PYTHONPATH, but block CWD and user site-packages.
+    // -I would also ignore PYTHONPATH, so bundled mode uses -P -s instead.
     if python_path.is_some() {
         args.push("-P".into());
+        args.push("-s".into());
     }
     args.push("-m".into());
     args.push("raven.desktop.runtime".into());

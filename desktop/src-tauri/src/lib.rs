@@ -391,7 +391,7 @@ mod tests {
         let python = PathBuf::from("/tmp/python");
         let pp = PathBuf::from("/app/Resources/raven");
         let spec = runtime_launch_spec(python, false, Some(pp.clone()), None, None);
-        assert_eq!(spec.args, vec!["-P", "-m", "raven.desktop.runtime"]);
+        assert_eq!(spec.args, vec!["-P", "-s", "-m", "raven.desktop.runtime"]);
         assert_eq!(
             spec.env,
             vec![("PYTHONPATH".to_string(), pp.to_string_lossy().into_owned())]
