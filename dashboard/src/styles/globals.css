@@ -1534,7 +1534,9 @@ textarea.input-base {
    "Vaults (N)" label은 vault 2개+일 때만 표시 (1개일 땐 노이즈). */
 
 .sidebar-top-actions {
-  display: flex;
+  /* desktop(>744px)에는 drawer가 없다 → 닫기(×)도 없다. 표시 여부는 CSS 소유,
+     mobile(≤744px)에서만 다시 켠다. SOT: "사이드바 계약" 블록 참조. */
+  display: none;
   justify-content: flex-end;
   margin: -6px -4px 4px;
 }
@@ -2502,18 +2504,28 @@ textarea.input-base {
   justify-content: center;
 }
 
-/* Below 1024px tighten column gap; sidebar drawer is already off-canvas. */
+/* Below 1024px tighten column gap. */
 @media (max-width: 1024px) {
   .page-grid {
     gap: 24px !important;
   }
 }
 
-/* Sidebar drawer (always overlay — desktop + mobile).
-   Desktop users keep the full content width; the hamburger opens the drawer on demand.
-   Mobile keeps the same drawer behavior (no separate breakpoint needed). */
+/* ── 사이드바 계약 (SOT) ─────────────────────────────────────────────
+ *  desktop (>744px): 사이드바는 in-flow, 상시 노출. drawer가 없으므로
+ *                    트리거(hamburger·×)와 backdrop도 없다 (no-op 트리거 제거).
+ *  mobile  (≤744px): off-canvas drawer. hamburger가 열고 backdrop/Escape/×가 닫는다.
+ *
+ *  open/close state는 mobile drawer에만 의미가 있다. desktop에서는 위 트리거가
+ *  CSS로 숨고, drawer를 연 채 창을 넓혀도 sidebar/backdrop이 화면을 덮지 않는다.
+ *  breakpoint 숫자 SOT = src/lib/useMediaQuery.ts (회귀 테스트가 CSS와 일치 검증).
+ * ──────────────────────────────────────────────────────────────────── */
+
+/* Hamburger — mobile drawer trigger only (≤744px).
+   Desktop sidebar is in-flow (아래 .sidebar-offcanvas), 열 drawer가 없으므로
+   트리거를 숨긴다. 표시 여부는 CSS가 소유한다 (JS state ❌). */
 .header-hamburger {
-  display: inline-flex; /* always visible — drawer is now desktop-first too */
+  display: none;
   align-items: center;
   justify-content: center;
   width: 40px;
@@ -2537,6 +2549,12 @@ textarea.input-base {
   outline: none;
   border-color: var(--color-ink);
 }
+/* mobile drawer에서만 트리거가 살아난다 — desktop은 위 `display: none` 유지. */
+@media (max-width: 744px) {
+  .header-hamburger {
+    display: inline-flex;
+  }
+}
 
 /* v0.7.97.3+: 사이드바 — 데스크탑은 항상 노출, 모바일만 off-canvas drawer.
    Codex 안 1 (유틸리티 헤더 + 별도 탭 레일) — explorer는 사이드바 복귀. */
@@ -2545,6 +2563,20 @@ textarea.input-base {
   height: 100%;
   flex-shrink: 0;
 }
+
+/* desktop(>744px)에는 drawer가 없으므로 backdrop도 그리지 않는다.
+   (mobile drawer를 연 채 창을 넓혀도 desktop 화면 위에 어둠이 남지 않게.)
+   base 규칙은 반드시 아래 mobile 미디어 쿼리보다 *앞*에 온다 —
+   같은 specificity라 source order가 승패를 가른다. */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.36);
+  z-index: 55;
+  animation: sidebar-backdrop-fade-in 0.15s ease-out forwards;
+}
+
 @media (max-width: 744px) {
   .sidebar-offcanvas {
     position: fixed !important;
@@ -2563,14 +2595,13 @@ textarea.input-base {
     transform: translateX(0);
     box-shadow: var(--shadow-overlay);
   }
-}
-
-.sidebar-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.36);
-  z-index: 55;
-  animation: sidebar-backdrop-fade-in 0.15s ease-out forwards;
+  /* drawer 트리거(×·backdrop)는 mobile에서만 의미를 가진다. */
+  .sidebar-top-actions {
+    display: flex;
+  }
+  .sidebar-backdrop {
+    display: block;
+  }
 }
 
 @keyframes sidebar-backdrop-fade-in {

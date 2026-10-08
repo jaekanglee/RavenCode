@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import NewPageButtonSrc from "../src/components/NewPageButton.tsx?raw";
 import SidebarSrc from "../src/components/Sidebar.tsx?raw";
 import LayoutSrc from "../src/components/Layout.tsx?raw";
+import BreakpointSotSrc from "../src/lib/useMediaQuery.ts?raw";
 
 const SOURCES = {
   NewPageButton: NewPageButtonSrc,
@@ -41,12 +42,15 @@ describe("Modal-close-sidebar source contracts", () => {
 
 
 
-  it("Layout keeps 744px mobile breakpoint (drawer auto-close only meaningful there)", () => {
-    const s = SOURCES.Layout;
-    expect(s).toMatch(/max-width:\s*744px/);
+  it("744px drawer breakpoint SOT는 useMediaQuery.ts 하나다 (Layout.tsx에 복제 금지)", () => {
+    // v0.8.x (Issue #6): breakpoint SOT가 Layout.tsx에서 src/lib/useMediaQuery.ts로
+    // 이동했다 (Layout/Sidebar 중복 matchMedia 제거). CSS와의 일치 검증은
+    // Layout.responsive-contract.test.ts가 실제 shipped stylesheet를 읽어 수행한다.
+    expect(BreakpointSotSrc).toMatch(/DRAWER_MQ\s*=\s*"\(max-width: 744px\)"/);
+    expect(SOURCES.Layout).not.toMatch(/max-width:\s*744px/);
+    expect(SOURCES.Layout).toMatch(/useIsDrawerMobile/);
   });
 
-  // globals.css 검증은 vite ?raw 한계로 회귀 가드에서 제외.
-  // Layout.tsx의 744px 매칭이 살아있으면 globals.css도 동일 breakpoint 사용을 가정.
-  // (실제 CSS는 v0.6.10+ 작업에서 검증됨.)
+  // globals.css 검증은 여기서 하지 않는다 — Layout.responsive-contract.test.ts가
+  // 실제 shipped stylesheet(globals.css)를 파싱해 검증한다.
 });

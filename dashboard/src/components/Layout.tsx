@@ -4,6 +4,7 @@ import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "./CommandPalette";
 import { UpdateChecker } from "./UpdateChecker";
 import { fetchRawList, fetchVaults, fetchTree, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
+import { useIsCompactNav, useIsDrawerMobile } from "../lib/useMediaQuery";
 import { useEffect, useState } from "react";
 import type { TreeNode, VaultMeta } from "../types";
 
@@ -71,9 +72,6 @@ export function Layout() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState<number>(() =>
-    typeof window === "undefined" ? 1440 : window.innerWidth,
-  );
   const location = useLocation();
 
   // v0.7.99+: 현재 path에서 page slug 추출. /page/:vault/* 패턴에 매치될 때만.
@@ -139,14 +137,15 @@ export function Layout() {
       });
   }, [vaults, refreshKey]);
 
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const mql = window.matchMedia("(max-width: 744px)");
-    const onChange = () => setIsMobile(mql.matches);
-    onChange();
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
+  // 744px drawer 판정 — Sidebar와 같은 primitive를 쓴다 (중복 matchMedia 제거).
+  const isMobile = useIsDrawerMobile();
+  // 390px compact 판정 — raw resize listener 대신 breakpoint crossing에서만 갱신.
+  const compactNav = useIsCompactNav();
+
+  // desktop(>744px)에서는 drawer 자체가 없다 → open state를 desktop sidebar/backdrop에
+  // 전달하지 않는다. CSS(트리거 숨김)와 함께 JSX도 같은 계약을 주장한다:
+  // "open/close state는 mobile drawer에만 의미를 가진다."
+  const drawerOpen = isMobile && mobileNavOpen;
 
   useEffect(() => {
     if (!mobileNavOpen) return;
@@ -154,12 +153,6 @@ export function Layout() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [mobileNavOpen]);
-
-  useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
 
   useEffect(() => setMoreOpen(false), [location.pathname]);
 
@@ -187,7 +180,7 @@ export function Layout() {
   }
 
   const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
-  const navPlan = planSectionNav(viewportWidth);
+  const navPlan = planSectionNav(compactNav ? 390 : 1024);
   const moreActive = isMoreNavActive(location.pathname);
 
   return (
@@ -200,11 +193,11 @@ export function Layout() {
         activeSlug={activeSlug}
         onSelectVault={(name) => { setVault(name); setActiveVault(name); setRefreshKey((k) => k + 1); }}
         onRefresh={() => setRefreshKey((k) => k + 1)}
-        open={mobileNavOpen}
+        open={drawerOpen}
         onClose={() => setMobileNavOpen(false)}
       />
 
-      {mobileNavOpen && <div className="sidebar-backdrop" onClick={() => setMobileNavOpen(false)} aria-hidden />}
+      {drawerOpen && <div className="sidebar-backdrop" onClick={() => setMobileNavOpen(false)} aria-hidden />}
 
       <main className="flex-1 flex flex-col overflow-hidden" style={{ minWidth: 0 }}>
         {/* v0.7.97.3+: 헤더 — 유틸리티. brand + 현재 vault + theme만.
@@ -238,7 +231,7 @@ export function Layout() {
                 className="header-hamburger"
                 onClick={() => setMobileNavOpen((v) => !v)}
                 aria-label="메뉴 열기"
-                aria-expanded={isMobile && mobileNavOpen}
+                aria-expanded={drawerOpen}
                 aria-controls="primary-sidebar"
               >
                 <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>☰</span>
