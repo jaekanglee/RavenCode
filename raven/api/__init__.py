@@ -2,7 +2,7 @@
 
 Exposes the raven engine to the React dashboard (and any HTTP client).
 Designed for local-first: binds to 127.0.0.1 (single-user). Non-loopback sources
-need a Bearer token unless they are on the tailnet (raven/core/access.py, Issue #14).
+need a Bearer token — tailnet included (raven/core/access.py, Issues #14/#24).
 
 Endpoints (all under /api):
     GET    /vaults                      list registered vaults

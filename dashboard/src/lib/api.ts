@@ -186,14 +186,34 @@ export function formatApiError(err: unknown): string {
   return String(err);
 }
 
-export async function testHostConnection(endpoint: string): Promise<{ ok: boolean; vaultsCount: number; error?: string }> {
+/**
+ * Probe a host's `/api/vaults`. `token` (Issue #24 — tailnet/LAN need one) goes in the
+ * Authorization header only; it is never placed in the URL or the returned error.
+ */
+export async function testHostConnection(
+  endpoint: string,
+  token?: string | null,
+): Promise<{ ok: boolean; vaultsCount: number; error?: string; authRequired?: boolean }> {
   const normalized = normalizeEndpoint(endpoint);
   const targetUrl = `${normalized}/api/vaults`;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    const r = await fetch(targetUrl, { signal: controller.signal });
+    const headers: Record<string, string> = {};
+    const trimmed = token?.trim();
+    if (trimmed) headers.Authorization = `Bearer ${trimmed}`;
+    const r = await fetch(targetUrl, { signal: controller.signal, headers });
     clearTimeout(timer);
+    if (r.status === 401) {
+      return {
+        ok: false,
+        vaultsCount: 0,
+        authRequired: true,
+        error: trimmed
+          ? "토큰이 맞지 않습니다 (상대 PC에서 raven mcp token list로 확인)"
+          : "이 호스트는 토큰이 필요합니다 (상대 PC에서 raven mcp token add <이름>)",
+      };
+    }
     if (!r.ok) {
       const errJson = await r.json().catch(() => ({}));
       return { ok: false, vaultsCount: 0, error: formatApiError(errJson) || `HTTP ${r.status}` };

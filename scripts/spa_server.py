@@ -310,7 +310,10 @@ class SPAHandler(SimpleHTTPRequestHandler):
         body = self.rfile.read(length) if length else None
         if authorization is None:
             msg = b'{"ok": false, "error": "unauthorized", "detail": "login required"}'
-            self._send(401, msg, "application/json")
+            # Distinct from the API gate's `Bearer realm="raven"`: the dashboard sends the
+            # browser to this proxy's login page instead of asking for a token (#24).
+            self._send(401, msg, "application/json",
+                       [("WWW-Authenticate", 'Session realm="raven-dashboard"')])
             return
         if from_cookie and method in _UNSAFE and not self._same_origin():
             self._send(403, b'{"ok": false, "error": "cross-origin request refused"}', "application/json")

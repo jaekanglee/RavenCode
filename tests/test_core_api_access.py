@@ -42,6 +42,9 @@ TRUSTED_SOURCES = [
     "127.8.9.10",
     "::1",
     "::ffff:127.0.0.1",
+]
+# Issue #24: tailnet sources need a token on the Core API (route check still says "tailnet").
+TAILNET_SOURCES = [
     "100.64.0.1",          # tailnet CGNAT 하한
     "100.127.255.254",     # tailnet CGNAT 상한
     "fd7a:115c:a1e0::5",   # Tailscale ULA
@@ -97,8 +100,13 @@ def test_app_refuses_unauthenticated_non_local_source(vaults_root, ip):
 
 
 @pytest.mark.parametrize("ip", TRUSTED_SOURCES)
-def test_app_serves_loopback_and_tailnet(vaults_root, ip):
+def test_app_serves_loopback(vaults_root, ip):
     assert _call("GET", "/api/vaults", ip).status_code == 200, ip
+
+
+@pytest.mark.parametrize("ip", TAILNET_SOURCES)
+def test_app_requires_token_from_tailnet(vaults_root, ip):
+    assert _call("GET", "/api/vaults", ip).status_code == 401, ip
 
 
 @pytest.mark.parametrize(
@@ -515,6 +523,6 @@ def test_real_socket_tailnet_source_is_trusted(vaults_root):
     )
     try:
         _wait_listening(port, proc)
-        assert _http("GET", f"http://{ts}:{port}/api/vaults") == 200
+        assert _http("GET", f"http://{ts}:{port}/api/vaults") == 401  # #24: tailnet needs a token
     finally:
         _stop(proc)

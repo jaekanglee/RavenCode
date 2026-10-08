@@ -7,7 +7,7 @@ everything dynamic and supports multiple vaults.
 Design:
     - stateless: every request resolves the vault fresh
     - CORS restricted to the local dashboard's known origins (v0.7.67+); CORS is not access control
-    - access gate (Issue #14): loopback/tailnet sources pass, everyone else needs a Bearer token
+    - access gate (Issue #14/#24): loopback sources pass, everyone else (tailnet included) needs a Bearer token
       issued by `raven mcp token add` (raven/core/access.py) — on every launcher
     - errors return {ok: false, error: "..."} (never raw stack traces)
     - all write ops use the engine; no shortcuts
@@ -102,7 +102,7 @@ _cors_origin_regex = (
 )
 # Issue #14: 접근 게이트는 실행기가 아니라 앱에 붙는다. 데스크톱 런타임 /
 # `python -m raven.api` / `uvicorn raven.api:app` 어느 경로로 띄워도 같은 판정 —
-# loopback·tailnet 출처는 통과, 그 외는 `raven mcp token add`로 발급한 Bearer 토큰
+# loopback 출처만 통과, 그 외(tailnet 포함, #24)는 `raven mcp token add`로 발급한 Bearer 토큰
 # 필수(발급 0개면 전부 401). 경로 예외 없음. 판정 로직은 MCP와 공유한다
 # (`raven/core/access.py`). CORS보다 먼저 add → CORS가 바깥: 브라우저 preflight는
 # CORS가 직접 응답해 핸들러에 닿지 않고, 401 응답에도 CORS 헤더가 붙는다.
@@ -113,6 +113,9 @@ app.add_middleware(
     allow_origin_regex=_cors_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Issue #24: a remote host's 401 is cross-origin for the dashboard; without this
+    # the browser hides the challenge and the token prompt can't tell why it failed.
+    expose_headers=["WWW-Authenticate"],
 )
 
 

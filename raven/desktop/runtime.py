@@ -15,8 +15,8 @@ External access (Tailscale) — opt-in (Issue #14):
   ``--host 0.0.0.0`` binds all interfaces (same pattern as ``python -m raven.api``),
   but only when ``RAVEN_ALLOW_REMOTE=1`` is set. The API app carries its own
   access gate (``raven/core/access.py::TokenGate``, shared with MCP and with
-  ``python -m raven.api``) — loopback/tailnet clients pass, every other source
-  needs a Bearer token from ``raven mcp token add``. Anything else —
+  ``python -m raven.api``) — loopback clients pass, every other source (tailnet
+  included, #24) needs a Bearer token from ``raven mcp token add``. Anything else —
   unset, blank, malformed, wildcard, or a named address — falls back to
   loopback. The readiness JSON always reports 127.0.0.1 so the local webview
   keeps working.
@@ -274,7 +274,7 @@ def main() -> int:
     if not _is_loopback_host(bind_host):
         print(
             "🔐 [Desktop Core] API bound to "
-            f"{bind_host} — loopback/tailnet open, LAN needs a Bearer token "
+            f"{bind_host} — loopback only without a token; LAN and tailnet need a Bearer token "
             "(raven mcp token add <name>)",
             file=sys.stderr,
         )

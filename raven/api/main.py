@@ -6,8 +6,8 @@ Usage:
     python -m raven.api --host tailscale                       # tailnet IP only
 
 Remote binds are opt-in (Issue #14). The access gate lives in the app itself
-(raven/core/access.py), so loopback/tailnet sources pass and every other source
-needs a Bearer token from `raven mcp token add <name>` — however the app is served.
+(raven/core/access.py), so loopback sources pass and every other source (tailnet
+included, #24) needs a Bearer token from `raven mcp token add <name>` — however the app is served.
 """
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def main(argv=None) -> int:
             # something specific and should learn why they did not get it.
             print(
                 f"❌ [raven-api] refusing to bind {requested.strip()!r}: non-loopback binds need "
-                f"{ALLOW_REMOTE_ENV}=1. Even then, sources other than loopback/tailnet need a "
+                f"{ALLOW_REMOTE_ENV}=1. Even then, every non-loopback source (tailnet included) needs a "
                 "Bearer token from `raven mcp token add <name>`.",
                 file=sys.stderr,
             )
@@ -137,8 +137,8 @@ def main(argv=None) -> int:
 
     if not is_loopback_host(bind_host):
         print(
-            f"🔐 [raven-api] bound to {bind_host} — loopback/tailnet open, every other source "
-            "needs a Bearer token (raven mcp token add <name>).",
+            f"🔐 [raven-api] bound to {bind_host} — loopback only without a token; every other "
+            "source, tailnet included, needs a Bearer token (raven mcp token add <name>).",
             file=sys.stderr,
         )
 

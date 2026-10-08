@@ -451,3 +451,11 @@ def test_shipped_local_proxies_send_x_forwarded_for():
     by test_proxy_strips_session_cookie_and_spoofed_forwarding_headers)."""
     vite = (REPO_ROOT / "dashboard" / "vite.config.ts").read_text(encoding="utf-8")
     assert "xfwd: true" in vite
+
+
+def test_dashboard_401_names_its_own_realm(stack):
+    """#24: the dashboard tells a gate 401 (Bearer realm="raven" → token dialog) from the
+    Docker proxy's own 401 (Session realm → its login page)."""
+    status, headers, _ = _req(stack["port"], "GET", "/api/vaults")
+    assert status == 401
+    assert headers.get("www-authenticate", "").startswith('Session realm="raven-dashboard"'), headers

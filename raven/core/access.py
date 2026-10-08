@@ -8,8 +8,9 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 판정 (출처 = ASGI ``scope["client"]``):
 
 - loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과
-- tailnet ``100.64.0.0/10``, ``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이 기기의
-  Tailscale 주소로 나가는 출처 → 통과 (``is_tailnet_peer``). 범위 소속만으로는 신뢰 ❌ —
+- tailnet: **Core API는 토큰 필수** (#24). MCP(``LanTokenAuth``)만 ``100.64.0.0/10``,
+  ``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이 기기의 Tailscale 주소로 나가는 출처를
+  통과시킨다 (``is_tailnet_peer``, ADR 2026-09-30). 범위 소속만으로는 신뢰 ❌ —
   CGNAT LAN·다른 VPN·Docker 망. 제품 전제는 "신뢰된 단일 사용자 네트워크(localhost 또는
   본인 tailnet)"다 (README 보안 전제, deployment D5, MCP ADR 2026-09-30).
 - 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
@@ -162,16 +163,21 @@ def is_tailnet_peer(host: str | None) -> bool:
     return _route_source(str(addr)) in self_ips
 
 
-def is_trusted_client(host: str | None) -> bool:
-    """loopback, 또는 라우트로 판정한 tailnet 출처인가. IP가 아닌 값은 신뢰하지 않는다."""
-    if not host:
-        return False
-    addr = _parse_ip(host)
-    if addr is None:
-        return False
-    if any(addr in net for net in LOOPBACK_NETWORKS):
+def is_loopback_client(host: str | None) -> bool:
+    """loopback 출처인가 (127.0.0.0/8, ::1, IPv4-mapped). IP가 아닌 값은 신뢰하지 않는다."""
+    addr = _parse_ip(host) if host else None
+    return addr is not None and any(addr in net for net in LOOPBACK_NETWORKS)
+
+
+def is_trusted_client(host: str | None, *, allow_tailnet: bool = True) -> bool:
+    """loopback, 또는 (``allow_tailnet``이면) 라우트로 판정한 tailnet 출처인가.
+
+    Core API 게이트는 ``allow_tailnet=False``로 부른다 (#24). MCP는 ADR 2026-09-30대로
+    route-judged tailnet을 계속 신뢰한다.
+    """
+    if is_loopback_client(host):
         return True
-    return is_tailnet_peer(str(addr))
+    return allow_tailnet and is_tailnet_peer(host)
 
 
 _FORWARDING_HEADERS = (b"x-forwarded-for", b"forwarded", b"x-real-ip")
@@ -244,13 +250,18 @@ def has_valid_bearer(scope) -> bool:
 
 
 class TokenGate:
-    """ASGI 게이트 — loopback/tailnet 외 출처에 Bearer 토큰을 요구한다.
+    """ASGI 게이트 — loopback 외 출처에 Bearer 토큰을 요구한다 (``trust_tailnet``이면 tailnet도 통과).
 
     http와 websocket 둘 다 막는다. 거부된 요청은 감싼 앱에 전달되지 않는다.
     lifespan 등 다른 scope는 그대로 통과한다.
     """
 
     realm = "raven"
+    # Issue #24: the Core API trusts loopback only — a tailnet source needs a token
+    # like any other. The route check behind ``is_tailnet_peer`` is an inference,
+    # not proof of the connection's WireGuard authentication. MCP's LanTokenAuth
+    # opts back in (ADR 2026-09-30); nothing else should.
+    trust_tailnet = False
     detail = (
         "원격 접근에는 Authorization: Bearer <token>이 필요합니다 "
         "(raven mcp token add <name>)."
@@ -264,7 +275,7 @@ class TokenGate:
             await self.app(scope, receive, send)
             return
         source = effective_client(scope)
-        if is_trusted_client(source) or has_valid_bearer(scope):
+        if is_trusted_client(source, allow_tailnet=self.trust_tailnet) or has_valid_bearer(scope):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
                 port = client[1] if client else 0

@@ -4,12 +4,14 @@ import {
   getActiveHostId,
   setActiveHostId,
   addHost,
+  normalizeEndpoint,
   removeHost,
   testHostConnection,
   getActiveHost,
   type HostConnection,
 } from "../lib/api";
 import { TextField } from "./ui/TextField";
+import { getHostToken, setHostToken } from "../lib/host-auth";
 import { Button } from "./ui/Button";
 
 export function HostPicker() {
@@ -18,6 +20,8 @@ export function HostPicker() {
   const [modalOpen, setModalOpen] = useState(false);
   const [hostName, setHostName] = useState("");
   const [endpoint, setEndpoint] = useState("");
+  // Issue #24: 원격 호스트(tailnet 포함)는 토큰 필수. sessionStorage에만 보관된다.
+  const [token, setToken] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +43,7 @@ export function HostPicker() {
     setActiveStatus("checking");
     setActiveError(null);
     try {
-      const res = await testHostConnection(activeHost.endpoint);
+      const res = await testHostConnection(activeHost.endpoint, getHostToken(activeHost.endpoint));
       if (res.ok) {
         setActiveStatus((prev) => {
           if (prev === "offline") {
@@ -97,7 +101,7 @@ export function HostPicker() {
     }
     setTesting(true);
     setTestResult(null);
-    const res = await testHostConnection(endpoint);
+    const res = await testHostConnection(endpoint, token);
     setTesting(false);
     if (res.ok) {
       setTestResult({ ok: true, message: `✅ 연결 성공! (${res.vaultsCount}개 보관소 발견)` });
@@ -117,11 +121,13 @@ export function HostPicker() {
       endpoint: endpoint.trim(),
       isLocal: false,
     });
+    if (token.trim()) setHostToken(normalizeEndpoint(endpoint), token);
     setHosts(getHosts());
     setSubmitting(false);
     setModalOpen(false);
     setHostName("");
     setEndpoint("");
+    setToken("");
     setTestResult(null);
     
     // Switch to newly added host
@@ -369,6 +375,17 @@ export function HostPicker() {
               placeholder="예: 192.168.0.15:8765 또는 http://100.x.y.z:8765"
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
+              style={{ marginTop: 12 }}
+            />
+
+            <TextField
+              label="접근 토큰"
+              type="password"
+              autoComplete="off"
+              placeholder="rvn_... (상대 PC에서 raven mcp token add <이름>)"
+              helper="tailnet·내부망 연결에 필요합니다. 이 창을 닫으면 지워집니다."
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
               style={{ marginTop: 12 }}
             />
 

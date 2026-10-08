@@ -33,6 +33,8 @@ class LanTokenAuth(TokenGate):
     """MCP ASGI 앱 앞단 — loopback/tailnet 외 출처에 Bearer 토큰을 요구한다."""
 
     realm = "raven-mcp"
+    # MCP keeps route-judged tailnet trust (ADR 2026-09-30); the Core API does not (#24).
+    trust_tailnet = True
     detail = (
         "내부망 접근에는 Authorization: Bearer <token>이 필요합니다 "
         "(raven mcp token add <name>)."
