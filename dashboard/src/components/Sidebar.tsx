@@ -12,6 +12,7 @@ import { TextField } from "./ui/TextField";
 import { Button } from "./ui/Button";
 import { fetchDraftsList, writeRaw, type DraftListItem } from "../lib/api";
 import { resolveNewRawFile } from "../lib/rawPath";
+import { useIsDrawerMobile } from "../lib/useMediaQuery";
 import type { TreeNode as TNode, VaultMeta } from "../types";
 
 interface SidebarProps {
@@ -281,15 +282,8 @@ export function Sidebar({
   // state/commit은 drag 끝나면 1회만. 매 픽셀 React re-render 방지.
   const asideRef = useRef<HTMLElement>(null);
   const [width, setWidth] = useState<number>(() => readSidebarWidth());
-  const [isMobile, setIsMobile] = useState(false);
-
-  useEffect(() => {
-    const mql = window.matchMedia("(max-width: 744px)");
-    const onChange = () => setIsMobile(mql.matches);
-    onChange();
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
+  // 744px drawer 판정 — Layout과 같은 primitive (중복 matchMedia 제거).
+  const isMobile = useIsDrawerMobile();
 
   // width 변경 시 aside DOM에 직접 반영 (state는 resize 끝나면 1회만 set)
   useEffect(() => {

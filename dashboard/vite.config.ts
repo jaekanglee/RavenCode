@@ -54,6 +54,7 @@ export default defineConfig({
   },
   test: {
     globals: true,
+    css: true,
     environment: "jsdom",
     // v0.7.102: vitest global setup — jsdom 한계 보완 (matchMedia/scrollTo stub).
     // v0.7.97 §6 Folder-hover-menu 회귀 가드 회복.
