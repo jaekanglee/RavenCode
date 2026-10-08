@@ -636,9 +636,9 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 - **프록시 헤더**: strict 모드(기본)에서는 X-Forwarded-For / Forwarded / X-Real-IP가 붙은 요청에 출처 신뢰를 주지 않는다. 그래서 `--forwarded-allow-ips '*'`여도 사칭할 수 없다. Raven 실행기는 `proxy_headers=False`로 띄우고, 이 기기의 프록시(vite `xfwd`)가 붙인 XFF만 해석한다.
 - **bind**: 기본은 loopback이다. 원격 bind는 `RAVEN_ALLOW_REMOTE=1`(또는 `--host tailscale`)일 때만 허용한다. standalone은 opt-in 없이 요청하면 exit 2로 거부한다. 우선순위는 `--host` > `RAVEN_HOST`다. CORS는 더 이상 `*`로 넓어지지 않는다.
 - **Docker**: compose가 `RAVEN_ALLOW_REMOTE=1`을 명시한다. 대시보드 프록시는 사용자 토큰(`/__raven/login` → HttpOnly·SameSite=Strict 쿠키)을 Bearer로 실어 보낸다. Docker 대역은 신뢰하지 않는다. 쿠키로 인증된 쓰기 요청은 같은 Origin일 때만 받는다.
-- **감사 개정 (tailnet 입증)**: `100.64.0.0/10` 대역 소속만으로 신뢰하던 것을 고쳤다. `100.64.200.0/24` Docker 망의 컨테이너가 토큰 없이 vault를 지울 수 있었다(실제 재현). 이제 응답 라우트가 이 기기의 Tailscale 주소(`tailscale ip`)로 나갈 때만 tailnet으로 본다. Tailscale이 없으면 토큰이 필요하다.
+- **감사 개정 (tailnet 판정)**: `100.64.0.0/10` 대역 소속만으로 신뢰하던 것을 고쳤다. `100.64.200.0/24` Docker 망의 컨테이너가 토큰 없이 vault를 지울 수 있었다(실제 재현). 이제 응답 라우트가 이 기기의 Tailscale 주소(`tailscale ip`)로 나갈 때만 tailnet으로 본다. Tailscale이 없으면 토큰이 필요하다. 이 판정은 요청 시점 라우트에 의한 추론이고 WireGuard 인증을 직접 증명하지 않는다 (승인된 잔여 위험, 토큰 필수화는 #24).
 - **감사 개정 (Docker 세션)**: 쿠키에는 API 토큰 대신 메모리 세션 id를 담는다(로그아웃 시 서버에서 폐기). 로그인 본문과 토큰 형식을 제한하고, 잘못된 Content-Length는 400/413으로 거부한다. 프록시는 CORS 응답 헤더를 버리고, `RAVEN_DASHBOARD_SECURE_COOKIE` opt-in을 추가했다.
-- **구조적 한계**: XFF 없이 API를 중계하는 로컬 프록시는 직접 loopback 접속과 구분할 수 없어 인증 없이 통과한다(재현됨). 지원 프록시(vite·spa_server·Caddy→dashboard)는 모두 XFF를 붙인다. loopback 토큰화 여부는 정책 결정 대기다.
+- **구조적 한계**: XFF 없이 API를 중계하는 로컬 프록시는 직접 loopback 접속과 구분할 수 없어 인증 없이 통과한다(재현됨). 지원 프록시(vite·spa_server·Caddy→dashboard)는 모두 XFF를 붙인다. loopback 프로세스 신뢰와 비공식 프록시는 2026-10-08 승인된 잔여 위험이다 (공식 지원 프록시 3종으로 한정).
 - **운영 변화**: Docker 대시보드는 첫 접속 때 토큰이 필요하다 (`docker compose exec api python -m raven.cli mcp token add <이름>`). 테스트에서 `TestClient`의 기본 출처 `"testclient"`는 IP가 아니라서 거부되므로, `tests/conftest.py`가 loopback을 기본값으로 준다.
 
 ### 검증
@@ -647,4 +647,4 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 
 ### 후속
 
-#22 (원격 모드 포트 선택이 loopback 점유를 놓침), #23 (SIGTERM 후 Python Core 잔존).
+#24 (tailnet Bearer 토큰 필수화·멀티호스트 호환), #22 (원격 모드 포트 선택이 loopback 점유를 놓침), #23 (SIGTERM 후 Python Core 잔존).

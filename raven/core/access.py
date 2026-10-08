@@ -59,7 +59,7 @@ LOOPBACK_NETWORKS = (
 )
 # Tailscale이 노드에 주는 주소 대역 (CGNAT IPv4 + Tailscale ULA IPv6). **범위 소속만으로는
 # 신뢰하지 않는다** — CGNAT은 통신사 LAN·다른 mesh VPN·사용자 Docker 망도 쓴다.
-# 아래 ``is_tailnet_peer``가 라우트로 입증한다.
+# 아래 ``is_tailnet_peer``가 라우트로 판정한다 (증명이 아니라 추론 — 아래 주석).
 TAILNET_NETWORKS = (
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("fd7a:115c:a1e0::/48"),
@@ -80,13 +80,15 @@ def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
     return addr
 
 
-# ─── tailnet 입증 ─────────────────────────────────────────────
+# ─── tailnet 판정 ─────────────────────────────────────────────
 #
 # TCP 연결은 클라이언트가 우리 SYN-ACK를 받아야 성립한다. 커널이 그 peer 주소로 가는
 # 응답을 **이 기기의 Tailscale 주소**(tailscaled가 `tailscale ip`로 알려주는 값)에서
 # 내보낸다면, SYN-ACK는 Tailscale로 들어갔고 Tailscale은 그 주소를 가진 WireGuard
-# 인증 노드에게만 전달한다. LAN에서 100.x를 사칭한 호스트는 SYN-ACK를 못 받아 연결을
-# 끝낼 수 없다. Tailscale이 없거나(CLI·daemon 부재), 응답이 다른 인터페이스로 나가면
+# 인증 노드에게만 전달한다 — 라우팅이 대칭이고 연결 이후 바뀌지 않는다는 전제에서, LAN에서
+# 100.x를 사칭한 호스트는 SYN-ACK를 못 받아 연결을 끝낼 수 없다. 이 검사는 요청 시점의
+# 송신 라우트를 보는 **추론**이며, 수락된 소켓의 수신 경로나 WireGuard 인증을 직접 증명하지
+# 않는다 (승인된 잔여 위험; Tailnet 토큰 필수화는 #24). Tailscale이 없거나(CLI·daemon 부재), 응답이 다른 인터페이스로 나가면
 # (CGNAT LAN, 다른 VPN, Docker bridge) tailnet 신뢰는 없다 — 토큰 필요 (fail-closed).
 
 _TS_TTL = 30.0
@@ -161,7 +163,7 @@ def is_tailnet_peer(host: str | None) -> bool:
 
 
 def is_trusted_client(host: str | None) -> bool:
-    """loopback, 또는 라우트로 입증된 tailnet 출처인가. IP가 아닌 값은 신뢰하지 않는다."""
+    """loopback, 또는 라우트로 판정한 tailnet 출처인가. IP가 아닌 값은 신뢰하지 않는다."""
     if not host:
         return False
     addr = _parse_ip(host)
