@@ -74,11 +74,14 @@ _extra_cors = [
     for o in os.environ.get("RAVEN_EXTRA_CORS_ORIGIN", "").split(",")
     if o.strip()
 ]
-_allow_all_cors = (
-    os.environ.get("RAVEN_ALLOW_ALL_CORS", "").strip().lower() in ("1", "true", "yes")
-    or "*" in _extra_cors
-)
-_cors_origins = ["*"] if _allow_all_cors else [
+# Issue #14 (평가 F-1 후속): `RAVEN_ALLOW_ALL_CORS=1` / `RAVEN_EXTRA_CORS_ORIGIN=*`
+# 은 더 이상 `Access-Control-Allow-Origin: *`로 넓히지 않는다. 이 API에는 인증이
+# 없으므로 `*`는 "브라우저에 열린 아무 페이지나 이 API의 클라이언트"라는 뜻이었고,
+# 그중에는 `DELETE /api/vaults/{name}?force=true`(→ shutil.rmtree)도 있었다.
+# CORS는 접근 제어가 아니다 — 넓히는 스위치는 조용히 무시하고, 실제 origin만
+# 허용한다. 와일드카드 요청이 있어도 허용 목록은 좁은 쪽을 유지한다.
+_allow_all_cors = False
+_cors_origins = [
     f"http://localhost:{_dashboard_port}",   # vite dev server
     f"http://127.0.0.1:{_dashboard_port}",
     f"http://localhost:{_api_port}",         # built dashboard served by this API
@@ -86,7 +89,7 @@ _cors_origins = ["*"] if _allow_all_cors else [
     "tauri://localhost",
     "https://tauri.localhost",
     "http://tauri.localhost",
-    *_extra_cors,
+    *(o for o in _extra_cors if o != "*"),
 ]
 # Tailscale (100.64.0.0/10) & private network (192.168.x.x, 10.x.x.x, 172.16-31.x.x) CORS regex
 _cors_origin_regex = (
@@ -96,8 +99,8 @@ _cors_origin_regex = (
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if _allow_all_cors else _cors_origins,
-    allow_origin_regex=None if _allow_all_cors else _cors_origin_regex,
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
 )

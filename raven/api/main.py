@@ -94,8 +94,14 @@ def main(argv=None) -> int:
             bind_host = ts_ip
             print(f"🔒 [Tailscale Auto-Detect] Found Tailscale IP: {ts_ip}")
         else:
-            print("⚠️  [Tailscale Auto-Detect] Tailscale IP not found, falling back to 0.0.0.0")
-            bind_host = "0.0.0.0"
+            # Issue #14: no tailnet is not a reason to open every interface.
+            # `--host tailscale` asks for the authenticated tailnet; falling
+            # open to 0.0.0.0 here handed the unauthenticated API to the LAN.
+            print(
+                "⚠️  [Tailscale Auto-Detect] Tailscale IP not found — "
+                "binding loopback instead of 0.0.0.0"
+            )
+            bind_host = "127.0.0.1"
 
     # v0.7.178: 실제 바인드된 호스트를 app에 전달 — /api/system/info가 추정값이 아닌 실제값을 보고하게 한다.
     os.environ["RAVEN_BOUND_HOST"] = bind_host

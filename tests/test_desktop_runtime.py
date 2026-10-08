@@ -482,3 +482,72 @@ def test_remote_bind_wraps_real_api_in_lan_token_gate() -> None:
 
     assert asyncio.run(call("192.168.1.50")).status_code == 401
     assert asyncio.run(call("127.0.0.1")).status_code == 200
+
+def test_wildcard_cors_switch_cannot_open_the_api() -> None:
+    """Issue #14 acceptance: the default must not answer `Access-Control-Allow-Origin: *`.
+
+    `RAVEN_ALLOW_ALL_CORS=1` was a bare opt-in that turned every browser page on
+    the machine into a client of an unauthenticated API (including
+    `DELETE /api/vaults/{name}?force=true`). CORS is not access control, so the
+    switch must no longer be able to widen the policy to `*`.
+    """
+    process = _spawn_core({"RAVEN_ALLOW_ALL_CORS": "1"}, host_arg="0.0.0.0")
+    try:
+        ready = _wait_for_ready(process)
+        base = f"http://{ready['host']}:{ready['port']}"
+        for origin in ("https://evil.example.com", "http://127.0.0.1:5173"):
+            req = Request(f"{base}/api/vaults", headers={"Origin": origin})
+            with urlopen(req, timeout=5) as response:
+                allow = response.headers.get("access-control-allow-origin")
+            assert allow != "*", f"wildcard CORS granted for {origin}"
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+def test_wildcard_cors_env_is_not_honoured_in_isolated_import() -> None:
+    """The `*` path must be gone from the module, not merely unreachable here.
+
+    Imported in a clean interpreter so the assertion reflects the shipped
+    policy rather than whatever this test session already imported.
+    """
+    code = (
+        "import raven.api.server as s;"
+        "print(s._allow_all_cors, s._cors_origins == ['*'])"
+    )
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"RAVEN_ALLOW_ALL_CORS", "RAVEN_EXTRA_CORS_ORIGIN"}
+    }
+    env["RAVEN_ALLOW_ALL_CORS"] = "1"
+    env["RAVEN_EXTRA_CORS_ORIGIN"] = "*"
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout.strip()
+    assert out == "False False", f"wildcard CORS still reachable: {out}"
+
+def test_tailscale_host_without_tailnet_does_not_fall_open(monkeypatch) -> None:
+    """`--host tailscale` with no tailnet must not bind every interface.
+
+    The standalone CLI printed "falling back to 0.0.0.0" and did exactly that —
+    a fail-open path to the unauthenticated API on a machine where the operator
+    asked for the (authenticated) tailnet. The desktop runtime already falls back
+    to loopback; the CLI must agree.
+    """
+    from raven.api.main import main as api_main
+
+    captured: dict[str, object] = {}
+
+    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str) -> None:
+        captured.update(host=host)
+
+    monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: None)
+    monkeypatch.setattr("raven.api.main.uvicorn.run", fake_run)
+    monkeypatch.delenv("RAVEN_HOST", raising=False)
+    assert api_main(["--host", "tailscale"]) == 0
+    assert captured["host"] == "127.0.0.1", captured
