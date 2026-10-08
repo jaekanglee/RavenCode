@@ -220,8 +220,12 @@ export function Layout() {
             borderBottom: "1px solid var(--color-hairline)",
             background: "var(--color-canvas)",
             flexShrink: 0,
-            position: "sticky",
-            top: 0,
+            // Issue #9: header는 어떤 scroll container의 descendant도 아니다.
+            // 실제 scrollport는 sibling인 .page-content(overflow-y-auto)이고,
+            // 조상인 main은 overflow-hidden(스크롤 없음)이다. 따라서 sticky/top은
+            // offset될 대상이 없어 무효였다. 남는 의도는 "page content 위로 뜨는
+            // layering"뿐이므로 relative + z-index로 표현한다 (static이면 z-index 무시).
+            position: "relative",
             zIndex: 50,
           }}
         >
@@ -326,8 +330,10 @@ export function Layout() {
             background: "var(--color-canvas)",
             borderBottom: "1px solid var(--color-hairline)",
             flexShrink: 0,
-            position: "sticky",
-            top: 52,
+            // Issue #9: nav도 scroll container 밖(sibling .page-content가 스크롤 담당)이라
+            // sticky/top이 무효였다. z-index는 "더보기" 드롭다운이 page content 위에 뜨는
+            // 근거로 필요하므로 relative로 유지한다.
+            position: "relative",
             zIndex: 49,
           }}
         >
