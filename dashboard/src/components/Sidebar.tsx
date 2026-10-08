@@ -37,6 +37,14 @@ const SIDEBAR_WIDTH_KEY = "raven.sidebar.width";
 const SIDEBAR_WIDTH_DEFAULT = 288;
 const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 480;
+/** keyboard Arrow 1회 이동량. 200→480 구간을 18회에 도달시키고, 8px(space 격자)
+ *  보다 폭 변화가 눈에 읽힌다. */
+const SIDEBAR_WIDTH_KEYBOARD_STEP = 16;
+
+/** pointer drag와 keyboard splitter가 공유하는 단일 clamp (Issue #8). */
+function clampSidebarWidth(w: number): number {
+  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, w));
+}
 
 function readSidebarWidth(): number {
   if (typeof window === "undefined") return SIDEBAR_WIDTH_DEFAULT;
@@ -44,7 +52,7 @@ function readSidebarWidth(): number {
     const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
     const n = raw ? parseInt(raw, 10) : NaN;
     if (!Number.isFinite(n)) return SIDEBAR_WIDTH_DEFAULT;
-    return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, n));
+    return clampSidebarWidth(n);
   } catch {
     return SIDEBAR_WIDTH_DEFAULT;
   }
@@ -292,6 +300,44 @@ export function Sidebar({
     }
   }, [width, isMobile]);
 
+  /**
+   * Issue #8: width를 state · localStorage · DOM에 한 번에 반영한다.
+   * keyboard splitter와 double-click reset이 공유한다. pointer drag는 이 경로를
+   * 쓰지 않는다 — drag 중 매 픽셀 state를 commit하지 않는 최적화가 따로 있다.
+   */
+  function commitWidth(next: number) {
+    const clamped = clampSidebarWidth(next);
+    setWidth(clamped);
+    writeSidebarWidth(clamped);
+    if (asideRef.current) asideRef.current.style.width = `${clamped}px`;
+  }
+
+  /**
+   * Issue #8: separator를 keyboard-operable splitter로 만든다.
+   * ArrowLeft/Right = ±STEP, Home/End = MIN/MAX. 모두 commitWidth를 타므로
+   * pointer와 같은 clamp·persistence 경로를 쓴다 (magic number 복제 없음).
+   * 좌우 방향은 width 축 기준이다 (RTL은 이 제품이 지원하지 않는다).
+   */
+  function onResizeKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (isMobile) return;
+    const delta =
+      e.key === "ArrowLeft"
+        ? -SIDEBAR_WIDTH_KEYBOARD_STEP
+        : e.key === "ArrowRight"
+          ? SIDEBAR_WIDTH_KEYBOARD_STEP
+          : 0;
+    if (delta !== 0) {
+      e.preventDefault();
+      commitWidth(width + delta);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      commitWidth(SIDEBAR_WIDTH_MIN);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      commitWidth(SIDEBAR_WIDTH_MAX);
+    }
+  }
+
   function toggleFavorite(name: string) {
     setFavorites((prev) => {
       const next = new Set(prev);
@@ -329,12 +375,14 @@ export function Sidebar({
 
     const onMove = (ev: PointerEvent) => {
       const dx = ev.clientX - startX;
-      const next = Math.min(
-        SIDEBAR_WIDTH_MAX,
-        Math.max(SIDEBAR_WIDTH_MIN, startWidth + dx)
-      );
+      // Issue #8: clamp SOT 하나 — keyboard와 같은 함수.
+      const next = clampSidebarWidth(startWidth + dx);
       // DOM 직접 — React re-render 우회
       aside.style.width = `${next}px`;
+      // Issue #8 후속: drag 중에도 aria-valuenow가 실제 width와 어긋나지 않게
+      // DOM에서만 동기화한다. React state는 여전히 commit하지 않으므로(위 최적화
+      // 유지) re-render는 없다 — pointerup에서 state/localStorage와 최종 합류한다.
+      target.setAttribute("aria-valuenow", String(next));
     };
     const onUp = (ev: PointerEvent) => {
       try { target.releasePointerCapture(ev.pointerId); } catch {}
@@ -344,24 +392,16 @@ export function Sidebar({
       document.body.style.cursor = "";
       document.body.classList.remove("sidebar-resizing");
       const dx = ev.clientX - startX;
-      const finalWidth = Math.min(
-        SIDEBAR_WIDTH_MAX,
-        Math.max(SIDEBAR_WIDTH_MIN, startWidth + dx)
-      );
       // drag 끝났을 때만 state 1회 commit → localStorage + 다음 mount 시 유지
-      setWidth(finalWidth);
-      writeSidebarWidth(finalWidth);
+      commitWidth(startWidth + dx);
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
   }
 
   function onResizeDoubleClick() {
-    setWidth(SIDEBAR_WIDTH_DEFAULT);
-    writeSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
-    if (asideRef.current) {
-      asideRef.current.style.width = `${SIDEBAR_WIDTH_DEFAULT}px`;
-    }
+    // Issue #8: reset도 같은 commit 경로 (state + localStorage + DOM).
+    commitWidth(SIDEBAR_WIDTH_DEFAULT);
   }
 
   return (
@@ -387,14 +427,21 @@ export function Sidebar({
         position: "relative",
       }}
     >
-      {/* v0.7.97.4+: resize handle (desktop only) */}
+      {/* v0.7.97.4+: resize handle (desktop only).
+          Issue #8: role=separator를 실제 keyboard-operable splitter로 완성한다.
+          tabIndex로 focus 가능하고, aria-valuemin/max/now가 실제 width와 동기화된다. */}
       {!isMobile && (
         <div
           className="sidebar-resize-handle"
           onPointerDown={onResizeStart}
           onDoubleClick={onResizeDoubleClick}
+          onKeyDown={onResizeKeyDown}
           role="separator"
+          tabIndex={0}
           aria-orientation="vertical"
+          aria-valuemin={SIDEBAR_WIDTH_MIN}
+          aria-valuemax={SIDEBAR_WIDTH_MAX}
+          aria-valuenow={width}
           aria-label="사이드바 크기 조정 (더블클릭 시 기본값)"
           title="끌어서 크기 조절 · 더블클릭 시 기본값"
         />

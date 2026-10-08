@@ -2059,6 +2059,16 @@ textarea.input-base {
 .sidebar-resize-handle:hover::after {
   background: var(--color-hairline-strong);
 }
+/* Issue #8: keyboard focus 표시. tab으로 포커스가 갔는데 아무 표시가 없으면
+   keyboard 사용자는 splitter의 존재·위치를 알 수 없다. hover와 같은 토큰을 쓴다. */
+.sidebar-resize-handle:focus-visible {
+  outline: none;
+  background: var(--color-primary);
+  opacity: 0.35;
+}
+.sidebar-resize-handle:focus-visible::after {
+  background: var(--color-hairline-strong);
+}
 
 /* v0.7.97.3+: 헤더 theme 토글 버튼 (slim pill) */
 .app-header-theme-btn {

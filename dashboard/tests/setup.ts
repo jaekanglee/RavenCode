@@ -38,6 +38,35 @@ if (typeof window !== "undefined") {
   if (typeof window.scrollTo !== "function") {
     window.scrollTo = () => {};
   }
+
+  // PointerEvent stub — jsdom은 PointerEvent 생성자를 제공하지 않는다.
+  // 그래서 fireEvent.pointerDown(el, { clientX })는 PointerEvent 대신 plain
+  // Event를 만들어 clientX를 조용히 버린다 (직접 probe로 확인). 사이드바 resize
+  // separator의 pointer drag 회귀 테스트(Issue #8)가 clientX/pointerId를 읽어야
+  // 하므로 MouseEvent 기반으로 채운다 (clientX/clientY는 MouseEvent가 제공).
+  if (typeof (window as unknown as { PointerEvent?: unknown }).PointerEvent !== "function") {
+    class PointerEventPolyfill extends MouseEvent {
+      readonly pointerId: number;
+      readonly pointerType: string;
+      readonly isPrimary: boolean;
+      constructor(type: string, params: PointerEventInit = {}) {
+        super(type, params);
+        this.pointerId = params.pointerId ?? 1;
+        this.pointerType = params.pointerType ?? "mouse";
+        this.isPrimary = params.isPrimary ?? true;
+      }
+    }
+    Object.defineProperty(window, "PointerEvent", {
+      writable: true,
+      configurable: true,
+      value: PointerEventPolyfill,
+    });
+    Object.defineProperty(globalThis, "PointerEvent", {
+      writable: true,
+      configurable: true,
+      value: PointerEventPolyfill,
+    });
+  }
 }
 
 // v0.7.181: 존재 여부만 보던 가드를 "Storage로 동작하는가"로 강화. Node 22의
