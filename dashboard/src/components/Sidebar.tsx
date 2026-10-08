@@ -467,7 +467,9 @@ export function Sidebar({
                   const isFav = favorites.has(v.name);
                   return (
                     <option key={v.name} value={v.name}>
-                      📁 {isFav ? "⭐ " : ""}{v.name} {v.default ? "★" : ""}
+                      {/* favorite = ★/☆ (toggle과 동일 glyph), default = "기본" badge.
+                          Issue #7: 같은 화면에서 ★가 default와 favorite 두 의미를 갖지 않게 분리. */}
+                      📁 {isFav ? "★ " : ""}{v.name} {v.default ? "기본" : ""}
                     </option>
                   );
                 })}
@@ -481,8 +483,11 @@ export function Sidebar({
               )}
               title={favorites.has(activeVault) ? "즐겨찾기 해제" : "즐겨찾기 추가"}
               aria-label={favorites.has(activeVault) ? "즐겨찾기 해제" : "즐겨찾기 추가"}
+              aria-pressed={favorites.has(activeVault)}
             >
-              ★
+              {/* on/off를 색이 아니라 glyph로도 구분한다 (★ = on, ☆ = off).
+                  glyph는 장식이므로 aria-hidden — accessible name은 aria-label에서 온다. */}
+              <span aria-hidden>{favorites.has(activeVault) ? "★" : "☆"}</span>
             </button>
           </div>
         </div>
@@ -698,7 +703,8 @@ function VaultTreeGroup({
         <NewPageButton vault={vault.name} variant="icon" label="페이지" onOpen={onClose} />
         <NewIssueButton vault={vault.name} initialSlug={`content/issues`} onOpen={onClose} />
         {showMeta && vault.default && (
-          <span className="sidebar-vault-default" aria-label="default">★</span>
+          /* Issue #7: default는 favorite(★)와 다른 시각 언어를 쓴다 — ★ glyph 대신 "기본" badge. */
+          <span className="sidebar-vault-default" aria-label="기본 보관소">기본</span>
         )}
         {showMeta && isActive && (
           <span className="sidebar-vault-active" aria-label="active">●</span>
