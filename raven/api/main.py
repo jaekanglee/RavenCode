@@ -76,7 +76,11 @@ def get_lan_ip() -> str | None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="raven-api")
     env_host = os.environ.get("RAVEN_HOST", "")
-    default_host = env_host if env_host else ("0.0.0.0" if os.environ.get("RAVEN_ALLOW_ALL_CORS") else "127.0.0.1")
+    # Issue #14: the bind default is loopback, full stop. It used to widen to
+    # 0.0.0.0 whenever RAVEN_ALLOW_ALL_CORS was set — a CORS switch deciding
+    # network exposure for an API that has no auth. Remote binding now requires
+    # an explicit `--host` / `RAVEN_HOST` (or `--host tailscale`).
+    default_host = env_host if env_host else "127.0.0.1"
     default_port = int(os.environ.get("RAVEN_PORT", os.environ.get("PORT_API", "8765")))
     parser.add_argument("--host", default=default_host, help="Host to bind (e.g. 127.0.0.1, 0.0.0.0, or 'tailscale')")
     parser.add_argument("--port", type=int, default=default_port, help="Port to bind (default: RAVEN_PORT or 8765)")

@@ -624,7 +624,7 @@ cd dashboard && npm install
 - v0.7.179 (REST 관례 정리 + 에러 envelope 분류 + link 스캔 중복 제거)
 - v0.7.178 (동시 편집 precondition + 열화 정직화 + 선언-실제 재정합)
 - **전제 = 신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)**. auth/ACL은 여전히 non-goal이므로, 이 API에 도달할 수 있는 사람은 vault를 읽고 쓰고 지울 수 있다 — tailnet을 남과 공유하지 말 것.
-- v0.7.175+ 데스크톱/원격 기본값은 `0.0.0.0` 바인딩 + Tailscale·사설망 CORS 허용이다 (`raven/desktop/runtime.py`). 실제 태세는 `GET /api/system/info`의 `bind_host` / `allow_all_cors`로 확인.
+- v0.7.175+ 데스크톱/원격 **기본값은 loopback 바인딩**이다 (`raven/desktop/runtime.py`). 사설망으로 넓히려면 명시적 opt-in(`RAVEN_ALLOW_REMOTE=1` 또는 `--host tailscale`)이 필요하고, 그때도 API는 `LanTokenAuth`로 감싸여 loopback·tailnet 외 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 통과한다 (Issue #14). 실제 태세는 `GET /api/system/info`의 `bind_host` / `allow_all_cors`로 확인.
 - 동시 편집은 precondition 토큰으로 lost update를 거부한다 (v0.7.178). 자동 merge는 non-goal.
 - 멀티 에이전트 write는 **experimental** (scope 명시 + 동시성 사용자 책임)
 - Not production-ready for multi-tenant (no auth, no ACL)
