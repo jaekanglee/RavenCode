@@ -379,6 +379,10 @@ export function Sidebar({
       const next = clampSidebarWidth(startWidth + dx);
       // DOM 직접 — React re-render 우회
       aside.style.width = `${next}px`;
+      // Issue #8 후속: drag 중에도 aria-valuenow가 실제 width와 어긋나지 않게
+      // DOM에서만 동기화한다. React state는 여전히 commit하지 않으므로(위 최적화
+      // 유지) re-render는 없다 — pointerup에서 state/localStorage와 최종 합류한다.
+      target.setAttribute("aria-valuenow", String(next));
     };
     const onUp = (ev: PointerEvent) => {
       try { target.releasePointerCapture(ev.pointerId); } catch {}

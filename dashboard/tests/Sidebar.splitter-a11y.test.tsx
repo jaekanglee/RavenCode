@@ -9,7 +9,8 @@
  *   - ArrowLeft/Right = 1 step 이동, Home/End = MIN/MAX.
  *   - pointer drag와 keyboard가 *같은* clamp 범위를 쓴다 (MIN- step / MAX+step 불가).
  *   - keyboard resize도 pointer와 같은 localStorage key에 저장되고 재마운트 시 복원된다.
- *   - drag 중에는 React state를 commit하지 않는다 (aside DOM 직접 반영) → aria-valuenow 불변.
+ *   - drag 중에도 aria-valuenow는 실제 width와 어긋나지 않는다 (DOM 직접 갱신).
+ *     React state · localStorage commit은 pointerup 1회로 미룬다 (drag 성능 최적화).
  *   - mobile(≤744px) drawer에는 separator가 없다.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -239,7 +240,7 @@ describe("Persistence — keyboard resize도 재마운트 후 복원된다", () 
 });
 
 describe("Pointer 회귀 — drag 최적화와 clamp가 유지된다", () => {
-  it("drag 중에는 state를 commit하지 않고 DOM만 바꾼다 (aria-valuenow 불변)", async () => {
+  it("drag 중 aria-valuenow가 실제 width를 따라가고, persistence는 pointerup까지 미뤄진다", async () => {
     renderSidebar();
     const el = handle();
     // jsdom은 pointer capture API를 구현하지 않는다 — 브라우저 API를 대체한다.
@@ -253,10 +254,12 @@ describe("Pointer 회귀 — drag 최적화와 clamp가 유지된다", () => {
       fireEvent.pointerMove(document, { clientX: 400, pointerId: 1 });
     });
 
-    // DOM은 즉시 반영 (성능 최적화 유지) …
+    // DOM width는 즉시 반영 (성능 최적화 유지) …
     expect(asideWidthStyle()).toBe(`${DEFAULT + 100}px`);
-    // … 하지만 React state는 아직 commit되지 않았다.
-    expect(valuenow()).toBe(DEFAULT);
+    // … 그리고 aria-valuenow도 실제 width와 어긋나지 않는다 (DOM 직접 갱신).
+    expect(valuenow()).toBe(DEFAULT + 100);
+    // … 하지만 persistence(React state · localStorage)는 아직 commit되지 않았다.
+    expect(storedWidth()).toBeNull();
 
     await act(async () => {
       fireEvent.pointerUp(document, { clientX: 400, pointerId: 1 });
@@ -280,6 +283,8 @@ describe("Pointer 회귀 — drag 최적화와 clamp가 유지된다", () => {
       fireEvent.pointerMove(document, { clientX: 5000, pointerId: 1 });
     });
     expect(asideWidthStyle()).toBe(`${MAX}px`);
+    // clamp된 값이 drag 중에도 ARIA에 반영된다 (MAX 초과 값이 노출되지 않는다).
+    expect(valuenow()).toBe(MAX);
 
     await act(async () => {
       fireEvent.pointerUp(document, { clientX: 5000, pointerId: 1 });
