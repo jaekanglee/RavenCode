@@ -62,6 +62,7 @@ from raven.core.access import (  # noqa: E402 — re-exported for callers/tests
     allow_remote_from_env,
     is_loopback_host as _is_loopback_host,
     safe_bind_host,
+    serve_kwargs,
 )
 
 # v0.7.184+: 8765였다 — API 기본 포트와 같은 값이어서, --mcp를 켜는 순간
@@ -284,6 +285,9 @@ def main() -> int:
         host=bind_host,
         port=api_port,
         log_level="warning",
+        # PR #21 P0: FORWARDED_ALLOW_IPS must not let uvicorn rewrite the client
+        # before the gate runs — the gate reads proxy headers itself.
+        **serve_kwargs(),
     )
     api_server = uvicorn.Server(api_config)
 
@@ -311,6 +315,7 @@ def main() -> int:
                     host=mcp_host,
                     port=args.mcp_port,
                     log_level="warning",
+                    **serve_kwargs(),
                 )
                 mcp_server = uvicorn.Server(mcp_config)
             except Exception as exc:  # noqa: BLE001 — degrade, don't take the app down

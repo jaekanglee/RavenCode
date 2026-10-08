@@ -14,10 +14,24 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 - 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
   통과. 발급된 토큰이 없으면 전부 401 (fail-closed). 경로 예외는 없다 — health 포함.
 
-Host / Origin / X-Forwarded-For 헤더는 판정에 쓰지 않는다. X-Forwarded-For는 uvicorn이
-``forwarded_allow_ips``(기본 127.0.0.1)에 든 프록시가 보낸 경우에만 ``scope["client"]``로
-옮긴다 — ``FORWARDED_ALLOW_IPS=*`` / ``--forwarded-allow-ips '*'``로 띄우면 LAN 기기가
-헤더 한 줄로 loopback을 사칭할 수 있으므로 그렇게 띄우지 말 것.
+Host / Origin 헤더는 판정에 쓰지 않는다. 프록시 헤더(X-Forwarded-For / Forwarded /
+X-Real-IP)는 서버 설정에 따라 다르게 다룬다 — PR #21 재리뷰 P0:
+
+- **strict 모드 (기본)**: 게이트가 uvicorn 설정을 모르는 경우(``uvicorn raven.api:app`` 직접
+  실행, gunicorn 등). uvicorn은 ``forwarded_allow_ips``가 허용하면 X-Forwarded-For로
+  ``scope["client"]``를 *앱보다 먼저* 바꾼다 — ``'*'``면 LAN 기기가 ``127.0.0.1``을 사칭한다.
+  그 재작성은 헤더가 있을 때만 일어나고 헤더는 남아 있으므로, **프록시 헤더가 붙은 요청은
+  출처 신뢰를 받지 못한다**(토큰 필수). ``forwarded_allow_ips`` 값과 무관하게 성립한다.
+- **launcher 모드**: Raven 실행기(``python -m raven.api``, 데스크톱 런타임)는
+  ``serve_kwargs()``로 uvicorn을 ``proxy_headers=False``로 띄운다 — ``scope["client"]``가 실제
+  소켓 peer이고 ``FORWARDED_ALLOW_IPS``는 무시된다. 이때 게이트가 X-Forwarded-For를 직접
+  읽되 **loopback peer(이 기기의 프록시, 예: vite ``xfwd``)가 보낸 경우만**: 오른쪽부터
+  loopback hop을 건너뛰고 처음 나오는 주소가 출처다. 해석할 수 없는 항목이 있으면 신뢰 ❌.
+  비루프백 peer의 프록시 헤더, X-Forwarded-For 없는 Forwarded/X-Real-IP는 신뢰 ❌.
+
+통과한 요청의 ``scope["client"]``는 게이트가 본 실효 출처로 바뀐다(모르면 ``"unknown"``) —
+``_require_loopback`` 같은 하위 가드도 같은 출처를 본다. 이 기기의 프록시가 X-Forwarded-For를
+붙이지 않으면 모든 요청이 loopback으로 보이므로, 앞단 프록시는 반드시 XFF를 붙여야 한다.
 
 bind 정책도 여기 둔다 (``safe_bind_host``): 기본 loopback, 비루프백·와일드카드는
 ``RAVEN_ALLOW_REMOTE``가 참일 때만. 게이트가 1차 방어, bind 제한이 2차 방어다.
@@ -66,6 +80,67 @@ def is_trusted_client(host: str | None) -> bool:
     return any(addr in net for net in TRUSTED_NETWORKS)
 
 
+_FORWARDING_HEADERS = (b"x-forwarded-for", b"forwarded", b"x-real-ip")
+
+# True only while Raven's own launcher serves the app with ``proxy_headers=False``
+# (see ``serve_kwargs``) — then ``scope["client"]`` is the real socket peer.
+_socket_peer = False
+
+UNKNOWN_CLIENT = "unknown"
+
+
+def serve_kwargs() -> dict:
+    """uvicorn options for Raven's launchers: ``scope["client"]`` = socket peer.
+
+    ``proxy_headers=False`` keeps uvicorn from rewriting the client from
+    X-Forwarded-For (whatever ``FORWARDED_ALLOW_IPS`` says), which is what lets
+    the gate read forwarding headers itself. In-process only — a ``--reload``
+    child re-imports the app and falls back to strict mode (fail-closed).
+    """
+    global _socket_peer
+    _socket_peer = True
+    return {"proxy_headers": False}
+
+
+def _parse_forwarded_entry(entry: str):
+    value = entry.strip()
+    if value.startswith("["):  # [v6]:port
+        end = value.find("]")
+        if end == -1:
+            return None
+        value = value[1:end]
+    elif value.count(":") == 1:  # v4:port
+        value = value.split(":", 1)[0]
+    return _parse_ip(value)
+
+
+def effective_client(scope) -> str | None:
+    """The source the gate judges, or None when it cannot be known."""
+    client = scope.get("client")
+    peer = client[0] if client else None
+    xff: list[str] = []
+    other = False
+    for key, value in scope.get("headers", []):
+        if key == b"x-forwarded-for":
+            xff.append(value.decode("latin-1"))
+        elif key in _FORWARDING_HEADERS:
+            other = True
+    if not xff and not other:
+        return peer
+    if not _socket_peer:
+        return None  # the server may already have rewritten the client from these headers
+    if not peer or not is_loopback_host(peer) or not xff:
+        return None
+    entries = ",".join(xff).split(",")
+    for entry in reversed(entries):
+        addr = _parse_forwarded_entry(entry)
+        if addr is None:
+            return None
+        if not addr.is_loopback:
+            return str(addr)
+    return LOOPBACK_HOST
+
+
 def has_valid_bearer(scope) -> bool:
     for key, value in scope.get("headers", []):
         if key == b"authorization":
@@ -94,8 +169,12 @@ class TokenGate:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        client = scope.get("client")
-        if is_trusted_client(client[0] if client else None) or has_valid_bearer(scope):
+        source = effective_client(scope)
+        if is_trusted_client(source) or has_valid_bearer(scope):
+            client = scope.get("client")
+            if source is None or not client or client[0] != source:
+                port = client[1] if client else 0
+                scope = dict(scope, client=(source or UNKNOWN_CLIENT, port))
             await self.app(scope, receive, send)
             return
         if scope["type"] == "websocket":

@@ -418,7 +418,7 @@ def test_standalone_cli_bind_default_ignores_cors_switch() -> None:
 
     captured: dict[str, object] = {}
 
-    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str) -> None:
+    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str, **_kw) -> None:
         captured.update(host=host, port=port)
         raise _Stop
 
@@ -444,7 +444,7 @@ def test_standalone_cli_honours_explicit_host_only_with_opt_in(monkeypatch) -> N
 
     captured: dict[str, object] = {}
 
-    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str) -> None:
+    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str, **_kw) -> None:
         captured.update(host=host)
 
     monkeypatch.setattr("raven.api.main.uvicorn.run", fake_run)
@@ -550,7 +550,7 @@ def test_tailscale_host_without_tailnet_does_not_fall_open(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
-    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str) -> None:
+    def fake_run(app: str, host: str, port: int, reload: bool, log_level: str, **_kw) -> None:
         captured.update(host=host)
 
     monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: None)

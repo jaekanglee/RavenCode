@@ -88,6 +88,7 @@ def main(argv=None) -> int:
         allow_remote_from_env,
         is_loopback_host,
         safe_bind_host,
+        serve_kwargs,
     )
 
     parser = argparse.ArgumentParser(prog="raven-api")
@@ -151,6 +152,8 @@ def main(argv=None) -> int:
         port=args.port,
         reload=args.reload,
         log_level="info",
+        # PR #21 P0: scope["client"] = socket peer; the gate reads proxy headers itself.
+        **serve_kwargs(),
     )
     return 0
 

@@ -75,7 +75,7 @@ app.add_typer(curator_app, name="curator")
 app.add_typer(docs_app, name="docs")
 mcp_app = typer.Typer(help="MCP 서버 관리 — 내부망 접근 토큰 (v0.7.182+).")
 mcp_token_app = typer.Typer(
-    help="내부망(LAN) MCP 접근 토큰. loopback/tailnet은 토큰 없이 통과한다."
+    help="원격(LAN·Docker) MCP / Core API 접근 토큰. loopback/tailnet은 토큰 없이 통과한다."
 )
 mcp_app.add_typer(mcp_token_app, name="token")
 app.add_typer(mcp_app, name="mcp")
