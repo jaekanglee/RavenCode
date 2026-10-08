@@ -240,7 +240,14 @@ export function Layout() {
               <button
                 type="button"
                 className="header-hamburger"
-                onClick={() => setMobileNavOpen((v) => !v)}
+                onClick={() => {
+                  // toggle은 mobile drawer 전용이다. desktop에서 활성화되면
+                  // mobileNavOpen=true가 latch되고, 나중에 mobile 구간으로
+                  // crossing하는 순간 사용자 입력 없이 drawer가 열린다
+                  // (위 effect가 막으려는 것과 같은 stale state). CSS가 햄버거를
+                  // 숨기더라도 state 경로 자체를 mobile로 제한한다.
+                  if (isMobile) setMobileNavOpen((v) => !v);
+                }}
                 aria-label="메뉴 열기"
                 aria-expanded={drawerOpen}
                 aria-controls="primary-sidebar"

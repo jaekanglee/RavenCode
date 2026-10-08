@@ -174,6 +174,26 @@ describe("desktop (>744px) — sidebar in-flow, drawer state 무해", () => {
     expect(backdrop()).toBeNull();
     expect(btn.getAttribute("aria-expanded")).toBe("false");
   });
+
+  it("desktop에서 햄버거를 활성화해도 mobile drawer state가 latch되지 않는다", async () => {
+    // 회귀 (browser smoke에서 발견): toggle이 unconditional이면 desktop 활성화가
+    // mobileNavOpen=true를 latch한다. 화면에는 아무 변화가 없지만, mobile 구간으로
+    // crossing하는 순간 사용자 입력 없이 drawer가 열린다 — 위 round-trip blocker와
+    // 같은 stale state를 반대 방향에서 만든다. desktop 진입 시 폐기만으로는
+    // 부족하고, toggle 자체가 mobile로 제한돼야 한다.
+    setDesktop();
+    renderLayout();
+    await screen.findByRole("complementary", {}, { timeout: 2000 });
+
+    await interact(() => fireEvent.click(hamburger()));
+    expect(backdrop()).toBeNull();
+
+    // mobile로 crossing — 사용자 입력이 없었으므로 CLOSED를 유지해야 한다.
+    await crossBreakpoint(DRAWER_MQ, true);
+    expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(false);
+    expect(hamburger().getAttribute("aria-expanded")).toBe("false");
+    expect(backdrop()).toBeNull();
+  });
 });
 
 describe("mobile (≤744px) — off-canvas drawer semantics", () => {
