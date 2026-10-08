@@ -6,12 +6,14 @@ use std::process::{Child, Command, Stdio};
 
 /// Default Core API bind host.
 ///
-/// Issue #14: this used to be `0.0.0.0`. The Core API has no authentication
-/// (`raven/api/` ships zero auth middleware) yet exposes vault reads and
-/// `DELETE /api/vaults/{name}?force=true`, so a LAN-wide default handed that
-/// surface to every host on the network. Loopback is the default; remote access
-/// is an explicit opt-in (`RAVEN_ALLOW_REMOTE=1`) that the Python runtime also
-/// enforces, so the shell cannot widen the bind on its own.
+/// Issue #14: this used to be `0.0.0.0`, handing vault reads and
+/// `DELETE /api/vaults/{name}?force=true` to every host on the network.
+/// Loopback is the default; remote access is an explicit opt-in
+/// (`RAVEN_ALLOW_REMOTE=1`) that the Python runtime enforces, so the shell
+/// cannot widen the bind on its own. Even when opted in, the API app carries its
+/// own access gate (`raven/core/access.py`): loopback/tailnet pass, every other
+/// source needs a `raven mcp token add` Bearer token. The value passed here is
+/// sent as `--host`, which beats an inherited `RAVEN_HOST` in the runtime.
 pub(crate) const DEFAULT_API_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, PartialEq, Eq)]

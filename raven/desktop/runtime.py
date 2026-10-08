@@ -13,10 +13,10 @@ via the ``core_endpoint`` / ``mcp_endpoint`` commands.
 
 External access (Tailscale) — opt-in (Issue #14):
   ``--host 0.0.0.0`` binds all interfaces (same pattern as ``python -m raven.api``),
-  but only when ``RAVEN_ALLOW_REMOTE=1`` is set. This API has no authentication
-  (``raven/api/`` ships zero auth middleware), so the wide bind is wrapped in
-  ``raven.mcp.auth.LanTokenAuth`` — loopback/tailnet clients pass, every other
-  source needs a Bearer token from ``raven mcp token add``. Anything else —
+  but only when ``RAVEN_ALLOW_REMOTE=1`` is set. The API app carries its own
+  access gate (``raven/core/access.py::TokenGate``, shared with MCP and with
+  ``python -m raven.api``) — loopback/tailnet clients pass, every other source
+  needs a Bearer token from ``raven mcp token add``. Anything else —
   unset, blank, malformed, wildcard, or a named address — falls back to
   loopback. The readiness JSON always reports 127.0.0.1 so the local webview
   keeps working.
@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import ipaddress
 import json
 import os
 import signal
@@ -56,58 +55,14 @@ import threading
 import time
 
 
-LOOPBACK_HOST = "127.0.0.1"
-
-# Issue #14: remote access is an explicit opt-in. This API has no auth, so a
-# wide bind is only ever the operator's own decision — never a default.
-_ALLOW_REMOTE_ENV = "RAVEN_ALLOW_REMOTE"
-
-def allow_remote_from_env(raw: str | None = None) -> bool:
-    """True only for an explicit truthy ``RAVEN_ALLOW_REMOTE``."""
-    if raw is None:
-        raw = os.environ.get(_ALLOW_REMOTE_ENV, "")
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-def safe_bind_host(host: str | None, allow_remote: bool = False) -> str:
-    """Resolve a requested bind host to something safe to bind.
-
-    Fail-closed: anything that is not a loopback address resolves to loopback
-    unless remote access was explicitly opted into. This is deliberately *not*
-    an error — the shell always passes a host, so rejecting the launch would
-    leave the user with no window at all.
-
-    Loopback spellings (``127.0.0.1``, ``localhost``, ``::1``, ``[::1]``) all
-    normalise to ``127.0.0.1`` so callers get one canonical value to bind and
-    report. Wildcards (``0.0.0.0``, ``::``, ``0:0:0:0:0:0:0:0``) and named
-    addresses are honoured only under ``allow_remote``.
-    """
-    if host is None:
-        return LOOPBACK_HOST
-    candidate = host.strip()
-    if not candidate:
-        return LOOPBACK_HOST
-
-    if candidate.startswith("[") and candidate.endswith("]"):
-        candidate = candidate[1:-1]
-
-    try:
-        addr = ipaddress.ip_address(candidate)
-    except ValueError:
-        # "localhost" is loopback; every other hostname is treated as remote
-        # (it would resolve to an interface we cannot vouch for).
-        if candidate.lower() == "localhost":
-            return LOOPBACK_HOST
-        return candidate if allow_remote else LOOPBACK_HOST
-
-    # IPv4-mapped IPv6 (::ffff:0.0.0.0) reaches the whole IPv4 space.
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-
-    if addr.is_loopback:
-        return LOOPBACK_HOST
-    if allow_remote:
-        return str(addr)
-    return LOOPBACK_HOST
+# Issue #14: bind policy and the access gate are shared with the standalone
+# API (`python -m raven.api`) — one implementation in raven/core/access.py.
+from raven.core.access import (  # noqa: E402 — re-exported for callers/tests
+    LOOPBACK_HOST,
+    allow_remote_from_env,
+    is_loopback_host as _is_loopback_host,
+    safe_bind_host,
+)
 
 # v0.7.184+: 8765였다 — API 기본 포트와 같은 값이어서, --mcp를 켜는 순간
 # API가 8765를 선점한 뒤 MCP가 같은 포트에 bind를 시도해 반드시 실패했다.
@@ -221,16 +176,6 @@ def _advertised_mcp_host(bind_host: str) -> str:
     return ts_ip or LOOPBACK_HOST
 
 
-def _is_loopback_host(host: str) -> bool:
-    """True when ``host`` only ever receives local traffic."""
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return host.strip().lower() == "localhost"
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return addr.is_loopback
-
 def _build_mcp_app(mode: str, host: str):
     """Create the MCPServer streamable-http Starlette app (same as raven.mcp.cli)."""
     from mcp.server.mcpserver import MCPServer
@@ -261,8 +206,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="raven-desktop-core")
     parser.add_argument(
         "--host",
-        default=LOOPBACK_HOST,
-        help="Bind address (127.0.0.1 default; 0.0.0.0 for Tailscale/external access)",
+        default=None,
+        help="Bind address (default: RAVEN_HOST or 127.0.0.1; 0.0.0.0 needs RAVEN_ALLOW_REMOTE=1)",
     )
     parser.add_argument("--mcp", action="store_true", help="Enable MCP HTTP listener")
     parser.add_argument("--mcp-port", type=int, default=DEFAULT_MCP_PORT, help="MCP HTTP port")
@@ -280,7 +225,10 @@ def main() -> int:
 
     import uvicorn
 
-    bind_host = os.environ.get("RAVEN_HOST", args.host)
+    # 우선순위: --host > RAVEN_HOST > loopback (standalone `raven.api.main`과 동일).
+    # Tauri는 RAVEN_DESKTOP_HOST > RAVEN_HOST로 고른 값을 --host로 넘기므로, 자식이
+    # 상속한 RAVEN_HOST가 그 결정을 뒤집으면 안 된다.
+    bind_host = args.host if args.host is not None else os.environ.get("RAVEN_HOST", "")
     # `--host tailscale` is itself the opt-in: the tailnet is authenticated by
     # Tailscale (same trust rule as `raven.mcp.auth`), so it needs no extra flag.
     tailscale_requested = bind_host.strip().lower() in ("tailscale", "auto-tailscale", "ts")
@@ -297,13 +245,6 @@ def main() -> int:
         else:
             # No tailnet is not an excuse to fall back to every interface.
             bind_host = LOOPBACK_HOST
-    if bind_host == "0.0.0.0":
-        print(
-            "⚠️  [Desktop Core] API bound to 0.0.0.0 (RAVEN_ALLOW_REMOTE=1). "
-            "Loopback/tailnet clients pass; every other source needs a Bearer "
-            "token from `raven mcp token add <name>`.",
-            file=sys.stderr,
-        )
 
     api_port = _free_port(bind_host)
 
@@ -325,28 +266,18 @@ def main() -> int:
     os.environ["RAVEN_BOUND_HOST"] = bind_host
     os.environ["RAVEN_BOUND_PORT"] = str(api_port)
 
-    # Issue #14: import the app object *before* uvicorn so a non-loopback bind
-    # can be wrapped in the same Bearer-token gate MCP already uses. Loopback
-    # binds keep the plain string form — no behaviour change for the normal case.
-    from raven.api import app as api_app
-
+    # Issue #14: the access gate is part of `raven.api.app` itself
+    # (raven/api/server.py → raven/core/access.py::TokenGate), so the desktop and
+    # standalone launchers serve the exact same policy. Wrapping it again here
+    # would be a second, divergent copy of the rule.
     if not _is_loopback_host(bind_host):
-        # Remote access is opt-in, but the API has no auth of its own, so the
-        # opt-in alone would still expose every vault read and
-        # `DELETE /api/vaults/{name}?force=true` to the LAN. Reuse the existing
-        # token owner: loopback/tailnet pass, every other source needs a token
-        # issued with `raven mcp token add <name>` — no tokens, no access.
-        from raven.mcp.auth import LanTokenAuth
-
         print(
             "🔐 [Desktop Core] API bound to "
             f"{bind_host} — loopback/tailnet open, LAN needs a Bearer token "
             "(raven mcp token add <name>)",
             file=sys.stderr,
         )
-        api_target = LanTokenAuth(api_app)
-    else:
-        api_target = "raven.api:app"
+    api_target = "raven.api:app"
 
     api_config = uvicorn.Config(
         api_target,

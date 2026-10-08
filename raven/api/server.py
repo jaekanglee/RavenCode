@@ -6,7 +6,9 @@ everything dynamic and supports multiple vaults.
 
 Design:
     - stateless: every request resolves the vault fresh
-    - CORS restricted to the local dashboard's known origins (v0.7.67+); production should add auth
+    - CORS restricted to the local dashboard's known origins (v0.7.67+); CORS is not access control
+    - access gate (Issue #14): loopback/tailnet sources pass, everyone else needs a Bearer token
+      issued by `raven mcp token add` (raven/core/access.py) — on every launcher
     - errors return {ok: false, error: "..."} (never raw stack traces)
     - all write ops use the engine; no shortcuts
 """
@@ -31,6 +33,7 @@ from raven.core import contracts
 from raven.core import policy as policy_module
 from raven.core.vault import Vault
 from raven.core import backup as backup_module
+from raven.core.access import TokenGate
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
 from raven import __version__ as raven_version
@@ -97,6 +100,13 @@ _cors_origin_regex = (
     r"192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
     r"172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$"
 )
+# Issue #14: 접근 게이트는 실행기가 아니라 앱에 붙는다. 데스크톱 런타임 /
+# `python -m raven.api` / `uvicorn raven.api:app` 어느 경로로 띄워도 같은 판정 —
+# loopback·tailnet 출처는 통과, 그 외는 `raven mcp token add`로 발급한 Bearer 토큰
+# 필수(발급 0개면 전부 401). 경로 예외 없음. 판정 로직은 MCP와 공유한다
+# (`raven/core/access.py`). CORS보다 먼저 add → CORS가 바깥: 브라우저 preflight는
+# CORS가 직접 응답해 핸들러에 닿지 않고, 401 응답에도 CORS 헤더가 붙는다.
+app.add_middleware(TokenGate)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

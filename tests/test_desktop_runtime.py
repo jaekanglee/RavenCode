@@ -240,8 +240,8 @@ def _spawn_core(
     """Start the runtime with host-related env scrubbed, then apply overrides.
 
     `host_arg` is passed as `--host` — exactly what the Tauri shell does
-    (core.rs → runtime_launch_spec → `--host <h>`); the runtime reads
-    `RAVEN_HOST` first, then that argument.
+    (core.rs → runtime_launch_spec → `--host <h>`); `--host` beats an
+    inherited `RAVEN_HOST`.
     """
     env = {
         k: v
@@ -434,8 +434,12 @@ def test_standalone_cli_bind_default_ignores_cors_switch() -> None:
 
     assert captured["host"] == "127.0.0.1", captured
 
-def test_standalone_cli_honours_explicit_host(monkeypatch) -> None:
-    """The explicit escape hatch still works — the gate is not a no-op."""
+def test_standalone_cli_honours_explicit_host_only_with_opt_in(monkeypatch) -> None:
+    """The escape hatch still works — but only with RAVEN_ALLOW_REMOTE (Issue #14).
+
+    This test used to assert that `--host 0.0.0.0` / `RAVEN_HOST=0.0.0.0` bound
+    every interface with no opt-in: the standalone half of the PR #21 BLOCKER.
+    """
     from raven.api.main import main as api_main
 
     captured: dict[str, object] = {}
@@ -445,28 +449,31 @@ def test_standalone_cli_honours_explicit_host(monkeypatch) -> None:
 
     monkeypatch.setattr("raven.api.main.uvicorn.run", fake_run)
     monkeypatch.delenv("RAVEN_HOST", raising=False)
+    monkeypatch.delenv("RAVEN_ALLOW_REMOTE", raising=False)
+    assert api_main(["--host", "0.0.0.0"]) == 2
+    assert captured == {}
+
+    monkeypatch.setenv("RAVEN_ALLOW_REMOTE", "1")
     assert api_main(["--host", "0.0.0.0"]) == 0
     assert captured["host"] == "0.0.0.0"
 
+    captured.clear()
     monkeypatch.setenv("RAVEN_HOST", "0.0.0.0")
     assert api_main([]) == 0
     assert captured["host"] == "0.0.0.0"
 
-def test_remote_bind_wraps_real_api_in_lan_token_gate() -> None:
+def test_remote_bind_serves_api_behind_its_own_token_gate() -> None:
     """Remote mode must not hand an unauthenticated API to the LAN.
 
-    `RAVEN_ALLOW_REMOTE=1` on its own was the whole opt-in, so the destructive
-    surface (`DELETE /api/vaults/{name}?force=true` → `shutil.rmtree`) stayed
-    open to every host on the network. The runtime now wraps the *real*
-    `raven.api.app` object in the same `LanTokenAuth` MCP uses, so a LAN client
-    is refused before the request reaches the app.
+    The gate now lives in `raven.api.app` itself (raven/core/access.py), so the
+    plain app object — what every launcher serves — refuses a LAN client before
+    the request reaches a handler. No runtime-side wrapper is involved.
     """
     import asyncio
 
     import httpx
     from raven.api import app as api_app
     from raven.desktop.runtime import _is_loopback_host
-    from raven.mcp.auth import LanTokenAuth
 
     assert not _is_loopback_host("0.0.0.0")
     assert not _is_loopback_host("::")
@@ -476,7 +483,7 @@ def test_remote_bind_wraps_real_api_in_lan_token_gate() -> None:
         assert _is_loopback_host(local), local
 
     async def call(client_ip: str) -> httpx.Response:
-        transport = httpx.ASGITransport(app=LanTokenAuth(api_app), client=(client_ip, 44444))
+        transport = httpx.ASGITransport(app=api_app, client=(client_ip, 44444))
         async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
             return await c.get("/api/vaults")
 

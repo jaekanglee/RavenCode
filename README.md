@@ -348,7 +348,7 @@ raven mcp token revoke 민수-노트북 # 재시작 없이 즉시 401
 } } }
 ```
 
-- 데스크톱 앱(Raven.app)의 MCP에만 적용된다. API가 `0.0.0.0`일 때 MCP도 `0.0.0.0`에 바인딩하고, 다시 tailnet으로만 좁히려면 `RAVEN_MCP_HOST=<tailnet IP>`
+- MCP 쪽은 데스크톱 앱(Raven.app)의 MCP에만 적용된다. Core API는 실행 경로와 무관하게 같은 판정·같은 토큰을 쓴다 (아래 "라이선스 / 상태"의 Core API 접근 게이트). API가 `0.0.0.0`일 때 MCP도 `0.0.0.0`에 바인딩하고, 다시 tailnet으로만 좁히려면 `RAVEN_MCP_HOST=<tailnet IP>`
 - standalone `python -m raven.mcp.cli`(team 인스턴스, Docker `mcp-http`)는 기존대로 인증 없음 — `--host`로 노출 범위를 직접 관리
 - 평문 HTTP라 같은 망에서 트래픽을 엿보면 토큰이 보인다 — 신뢰할 수 있는 망에서만 쓰고, 유출이 의심되면 revoke
 - 근거: [`_meta/decisions/adr-2026-09-30-mcp-lan-token-auth.md`](_meta/decisions/adr-2026-09-30-mcp-lan-token-auth.md)
@@ -624,7 +624,11 @@ cd dashboard && npm install
 - v0.7.179 (REST 관례 정리 + 에러 envelope 분류 + link 스캔 중복 제거)
 - v0.7.178 (동시 편집 precondition + 열화 정직화 + 선언-실제 재정합)
 - **전제 = 신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)**. auth/ACL은 여전히 non-goal이므로, 이 API에 도달할 수 있는 사람은 vault를 읽고 쓰고 지울 수 있다 — tailnet을 남과 공유하지 말 것.
-- v0.7.175+ 데스크톱/원격 **기본값은 loopback 바인딩**이다 (`raven/desktop/runtime.py`). 사설망으로 넓히려면 명시적 opt-in(`RAVEN_ALLOW_REMOTE=1` 또는 `--host tailscale`)이 필요하고, 그때도 API는 `LanTokenAuth`로 감싸여 loopback·tailnet 외 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 통과한다 (Issue #14). 실제 태세는 `GET /api/system/info`의 `bind_host` / `allow_all_cors`로 확인.
+- **Core API 접근 게이트 (Issue #14)** — 게이트는 실행기가 아니라 앱(`raven.api.app`)에 붙어 있어, 데스크톱 앱 · `python -m raven.api` · `uvicorn raven.api:app` 어느 경로든 판정이 같다 (`raven/core/access.py`, MCP와 같은 구현):
+  - loopback / tailnet(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) 출처 → 통과. 본인 tailnet = 신뢰 네트워크라는 위 전제를 따른다 — **tailnet 안의 기기는 vault를 읽고 쓰고 지울 수 있다.**
+  - 그 외 출처(LAN, Docker 게이트웨이 등) → `raven mcp token add`로 발급한 `Authorization: Bearer <token>` 필수. 발급 0개면 전부 401. health 등 예외 경로 없음.
+  - 출처는 소켓 주소로만 판단한다. Host/Origin/X-Forwarded-For는 무시 — `FORWARDED_ALLOW_IPS=*`로 띄우지 말 것.
+- **bind** — 기본은 loopback. 비루프백·와일드카드는 `RAVEN_ALLOW_REMOTE=1`(또는 `--host tailscale`)일 때만. opt-in 없이 `python -m raven.api --host 0.0.0.0` / `RAVEN_HOST=0.0.0.0`을 주면 **exit 2로 거부**, 데스크톱 앱은 창이 안 뜨는 일이 없게 loopback으로 낮춘다. 우선순위는 `--host` > `RAVEN_HOST`. Docker `api` 서비스는 컨테이너 안에서 `0.0.0.0`이 필요하므로 `.env`에 `RAVEN_ALLOW_REMOTE=1`을 둬야 뜨고, 그때 호스트·dashboard 컨테이너 요청은 게이트웨이 IP로 보여 토큰이 필요하다. 실제 태세는 `GET /api/system/info`의 `bind_host`로 확인.
 - 동시 편집은 precondition 토큰으로 lost update를 거부한다 (v0.7.178). 자동 merge는 non-goal.
 - 멀티 에이전트 write는 **experimental** (scope 명시 + 동시성 사용자 책임)
 - Not production-ready for multi-tenant (no auth, no ACL)

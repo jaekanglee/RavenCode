@@ -33,13 +33,27 @@ def test_ipv6_loopback_allowed(tmp_path, monkeypatch):
 
 
 def test_non_loopback_is_forbidden(tmp_path, monkeypatch):
+    """Two layers: the app-wide token gate (401) and this endpoint's loopback guard (403).
+
+    Issue #14 put an access gate on the whole app, so an unauthenticated LAN
+    source never reaches the handler. A LAN source *with* a valid token passes
+    the gate and still hits the path-taking endpoint's own loopback guard.
+    """
+    from raven.core import mcp_tokens
+
     monkeypatch.setenv("WIKI_VAULTS_DIR", str(tmp_path / "a"))
+    (tmp_path / "a").mkdir()
+    token = mcp_tokens.add_token("lan")
+    authed = {"Authorization": f"Bearer {token}"}
+    non_ip = TestClient(app, client=("testclient", 50000))
     for path, body in (
         ("/api/backup/export", {"dest_path": str(tmp_path / "x.zip")}),
         ("/api/backup/import", {"src_path": str(tmp_path / "x.zip")}),
     ):
-        assert remote.post(path, json=body).status_code == 403
-        assert TestClient(app).post(path, json=body).status_code == 403  # host "testclient"
+        assert remote.post(path, json=body).status_code == 401
+        assert non_ip.post(path, json=body).status_code == 401
+        assert remote.post(path, json=body, headers=authed).status_code == 403
+        assert non_ip.post(path, json=body, headers=authed).status_code == 403
 
 
 def test_ipv4_mapped_ipv6_loopback_allowed(tmp_path, monkeypatch):

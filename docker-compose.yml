@@ -10,6 +10,10 @@
 #   docker compose logs -f api    # 로그 follow
 #
 # 외부 접속 (.env에서 HOST=0.0.0.0 권장):
+#   Issue #14: api 서비스는 컨테이너 안에서 0.0.0.0에 바인딩하므로 .env에
+#   RAVEN_ALLOW_REMOTE=1 이 없으면 기동을 거부(exit 2)한다. 켜면 loopback/tailnet 외
+#   출처(포트 매핑을 거친 호스트·dashboard 컨테이너 = 게이트웨이 IP 포함)는
+#   `raven mcp token add`로 발급한 Bearer 토큰이 필요하다.
 #   http://<host>:8765      # API
 #   http://<host>:8766/mcp  # MCP HTTP
 #   http://<host>:5173      # Dashboard
