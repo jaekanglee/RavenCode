@@ -436,6 +436,26 @@ mod tests {
     }
 
     #[test]
+    fn core_api_defaults_to_loopback_not_all_interfaces() {
+        // Issue #14 회귀 가드: 기본 bind가 0.0.0.0이던 시절, 인증 없는 Core API가
+        // 사설망 전체에 열려 vault 읽기와 DELETE /api/vaults/{name}?force=true
+        // (shutil.rmtree)까지 노출됐다. 기본값은 loopback이어야 한다.
+        assert_eq!(super::core::DEFAULT_API_HOST, "127.0.0.1");
+
+        let spec = runtime_launch_spec(
+            PathBuf::from("/tmp/python"),
+            false,
+            None,
+            Some(super::core::DEFAULT_API_HOST.to_string()),
+            None,
+        );
+        assert_eq!(
+            spec.args,
+            vec!["-m", "raven.desktop.runtime", "--host", "127.0.0.1"]
+        );
+    }
+
+    #[test]
     fn default_capability_allows_backup_dialogs() {
         // 백업 내보내기/가져오기 대화상자. 권한이 빠지면 invoke가 조용히 거부된다
         // (f2a70b0 app_version 권한 누락과 같은 유형).

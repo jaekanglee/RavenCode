@@ -723,15 +723,24 @@ export function VaultManage() {
             <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 6 }}>
               <div>
                 <span style={{ color: "var(--color-muted)" }}>네트워크 수신:</span>{" "}
-                <span style={{ color: "var(--color-success-text)", fontWeight: 600 }}>0.0.0.0 (Tailscale & LAN 허용)</span>
+                <span style={{ color: "var(--color-ink)", fontWeight: 600, fontFamily: "monospace" }}>
+                  {sysInfo?.bind_host || "127.0.0.1"}
+                </span>{" "}
+                <span style={{ color: "var(--color-muted)" }}>
+                  {sysInfo?.bind_host && sysInfo.bind_host !== "127.0.0.1"
+                    ? "(loopback·tailnet 통과 · 그 외 출처는 토큰 필요)"
+                    : "(loopback 전용)"}
+                </span>
               </div>
               <div>
                 <span style={{ color: "var(--color-muted)" }}>CORS 보안:</span>{" "}
-                <span style={{ color: "var(--color-success-text)", fontWeight: 600 }}>전면 허용 (RAVEN_ALLOW_ALL_CORS)</span>
+                <span style={{ color: "var(--color-success-text)", fontWeight: 600 }}>
+                  {sysInfo?.allow_all_cors ? "전면 허용 (*)" : "허용 origin만"}
+                </span>
               </div>
               <div>
                 <span style={{ color: "var(--color-muted)" }}>표준 API 포트:</span>{" "}
-                <strong style={{ fontFamily: "monospace" }}>8765</strong>
+                <strong style={{ fontFamily: "monospace" }}>{sysInfo?.port || 8765}</strong>
               </div>
             </div>
           </div>

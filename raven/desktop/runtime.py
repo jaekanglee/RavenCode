@@ -11,9 +11,15 @@ Readiness protocol:
 The Tauri shell reads this line, then exposes the endpoint(s) to the webview
 via the ``core_endpoint`` / ``mcp_endpoint`` commands.
 
-External access (Tailscale):
-  --host 0.0.0.0  binds all interfaces (same pattern as ``python -m raven.api``).
-  The readiness JSON always reports 127.0.0.1 so the local webview keeps working.
+External access (Tailscale) — opt-in (Issue #14):
+  ``--host 0.0.0.0`` binds all interfaces (same pattern as ``python -m raven.api``),
+  but only when ``RAVEN_ALLOW_REMOTE=1`` is set. The API app carries its own
+  access gate (``raven/core/access.py::TokenGate``, shared with MCP and with
+  ``python -m raven.api``) — loopback/tailnet clients pass, every other source
+  needs a Bearer token from ``raven mcp token add``. Anything else —
+  unset, blank, malformed, wildcard, or a named address — falls back to
+  loopback. The readiness JSON always reports 127.0.0.1 so the local webview
+  keeps working.
 
   MCP binds separately (--mcp-host). v0.7.182 §31: when the API binds 0.0.0.0,
   MCP binds 0.0.0.0 too, behind ``raven.mcp.auth.LanTokenAuth`` — loopback and
@@ -49,7 +55,15 @@ import threading
 import time
 
 
-LOOPBACK_HOST = "127.0.0.1"
+# Issue #14: bind policy and the access gate are shared with the standalone
+# API (`python -m raven.api`) — one implementation in raven/core/access.py.
+from raven.core.access import (  # noqa: E402 — re-exported for callers/tests
+    LOOPBACK_HOST,
+    allow_remote_from_env,
+    is_loopback_host as _is_loopback_host,
+    safe_bind_host,
+    serve_kwargs,
+)
 
 # v0.7.184+: 8765였다 — API 기본 포트와 같은 값이어서, --mcp를 켜는 순간
 # API가 8765를 선점한 뒤 MCP가 같은 포트에 bind를 시도해 반드시 실패했다.
@@ -193,8 +207,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="raven-desktop-core")
     parser.add_argument(
         "--host",
-        default=LOOPBACK_HOST,
-        help="Bind address (127.0.0.1 default; 0.0.0.0 for Tailscale/external access)",
+        default=None,
+        help="Bind address (default: RAVEN_HOST or 127.0.0.1; 0.0.0.0 needs RAVEN_ALLOW_REMOTE=1)",
     )
     parser.add_argument("--mcp", action="store_true", help="Enable MCP HTTP listener")
     parser.add_argument("--mcp-port", type=int, default=DEFAULT_MCP_PORT, help="MCP HTTP port")
@@ -212,19 +226,35 @@ def main() -> int:
 
     import uvicorn
 
-    bind_host = os.environ.get("RAVEN_HOST", args.host)
-    if bind_host.lower() in ("tailscale", "auto-tailscale", "ts") or bind_host == "0.0.0.0":
+    # 우선순위: --host > RAVEN_HOST > loopback (standalone `raven.api.main`과 동일).
+    # Tauri는 RAVEN_DESKTOP_HOST > RAVEN_HOST로 고른 값을 --host로 넘기므로, 자식이
+    # 상속한 RAVEN_HOST가 그 결정을 뒤집으면 안 된다.
+    bind_host = args.host if args.host is not None else os.environ.get("RAVEN_HOST", "")
+    # `--host tailscale` is itself the opt-in: the tailnet is authenticated by
+    # Tailscale (same trust rule as `raven.mcp.auth`), so it needs no extra flag.
+    tailscale_requested = bind_host.strip().lower() in ("tailscale", "auto-tailscale", "ts")
+    allow_remote = allow_remote_from_env() or tailscale_requested
+    # Issue #14: resolve before anything else touches the host. A wildcard or
+    # named address only survives when remote access was opted into.
+    bind_host = safe_bind_host(bind_host, allow_remote)
+    if tailscale_requested:
         from raven.api.main import get_tailscale_ip
         ts_ip = get_tailscale_ip()
-        if ts_ip and bind_host.lower() in ("tailscale", "auto-tailscale", "ts"):
+        if ts_ip:
             bind_host = ts_ip
             print(f"🔒 [Desktop Core] Auto-bound to Tailscale IP: {ts_ip}", file=sys.stderr)
+        else:
+            # No tailnet is not an excuse to fall back to every interface.
+            bind_host = LOOPBACK_HOST
 
     api_port = _free_port(bind_host)
 
-    # Enable seamless CORS across Tailscale / LAN devices when binding externally
-    if bind_host == "0.0.0.0" or bind_host.lower() in ("tailscale", "auto-tailscale", "ts"):
-        os.environ["RAVEN_ALLOW_ALL_CORS"] = "1"
+    # Issue #14: RAVEN_ALLOW_ALL_CORS is NOT set here. `raven.api.main` imports
+    # `raven.api.server` (which snapshots the CORS config) before this module
+    # would set it, so the old auto-assignment never took effect — but leaving
+    # it in place invited a future import-order change to silently reopen `*`.
+    # CORS is allow-listed by origin in raven/api/server.py; it is not an access
+    # control, and a non-browser client ignores it entirely.
 
     # CORS: allow the Tauri webview origin (prod + dev) before app import.
     extra = os.environ.get("RAVEN_EXTRA_CORS_ORIGIN", "")
@@ -237,11 +267,27 @@ def main() -> int:
     os.environ["RAVEN_BOUND_HOST"] = bind_host
     os.environ["RAVEN_BOUND_PORT"] = str(api_port)
 
+    # Issue #14: the access gate is part of `raven.api.app` itself
+    # (raven/api/server.py → raven/core/access.py::TokenGate), so the desktop and
+    # standalone launchers serve the exact same policy. Wrapping it again here
+    # would be a second, divergent copy of the rule.
+    if not _is_loopback_host(bind_host):
+        print(
+            "🔐 [Desktop Core] API bound to "
+            f"{bind_host} — loopback/tailnet open, LAN needs a Bearer token "
+            "(raven mcp token add <name>)",
+            file=sys.stderr,
+        )
+    api_target = "raven.api:app"
+
     api_config = uvicorn.Config(
-        "raven.api:app",
+        api_target,
         host=bind_host,
         port=api_port,
         log_level="warning",
+        # PR #21 P0: FORWARDED_ALLOW_IPS must not let uvicorn rewrite the client
+        # before the gate runs — the gate reads proxy headers itself.
+        **serve_kwargs(),
     )
     api_server = uvicorn.Server(api_config)
 
@@ -269,6 +315,7 @@ def main() -> int:
                     host=mcp_host,
                     port=args.mcp_port,
                     log_level="warning",
+                    **serve_kwargs(),
                 )
                 mcp_server = uvicorn.Server(mcp_config)
             except Exception as exc:  # noqa: BLE001 — degrade, don't take the app down

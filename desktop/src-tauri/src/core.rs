@@ -4,6 +4,18 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+/// Default Core API bind host.
+///
+/// Issue #14: this used to be `0.0.0.0`, handing vault reads and
+/// `DELETE /api/vaults/{name}?force=true` to every host on the network.
+/// Loopback is the default; remote access is an explicit opt-in
+/// (`RAVEN_ALLOW_REMOTE=1`) that the Python runtime enforces, so the shell
+/// cannot widen the bind on its own. Even when opted in, the API app carries its
+/// own access gate (`raven/core/access.py`): loopback/tailnet pass, every other
+/// source needs a `raven mcp token add` Bearer token. The value passed here is
+/// sent as `--host`, which beats an inherited `RAVEN_HOST` in the runtime.
+pub(crate) const DEFAULT_API_HOST: &str = "127.0.0.1";
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeLaunchSpec {
     pub program: PathBuf,
@@ -31,12 +43,12 @@ pub(crate) fn mcp_enabled_from_env(raw: Option<String>) -> bool {
 /// Permission mode for the desktop MCP listener.
 ///
 /// Defaults to `admin` (operator's own machine), matching `.env`'s
-/// `RAVEN_MCP_MODE=admin` for the standalone operator instance. MCP has no
-/// authentication, so this is only sound because the listener binds the
-/// tailnet address rather than the API's 0.0.0.0 — see
-/// `raven/desktop/runtime.py::_resolve_mcp_host`. Narrow it with
-/// `RAVEN_DESKTOP_MCP_MODE=read|write`. An unrecognized value falls back to
-/// `read` — the safe direction — rather than failing the launch.
+/// `RAVEN_MCP_MODE=admin` for the standalone operator instance. A wide MCP bind
+/// is sound because the listener is wrapped in `raven.mcp.auth.LanTokenAuth`
+/// (LAN clients need a Bearer token; loopback/tailnet pass) — see
+/// `raven/desktop/runtime.py::_resolve_mcp_host`, which follows the API host.
+/// Narrow it with `RAVEN_DESKTOP_MCP_MODE=read|write`. An unrecognized value
+/// falls back to `read` — the safe direction — rather than failing the launch.
 pub(crate) fn mcp_mode_from_env(raw: Option<String>) -> String {
     match raw.as_deref().map(str::trim) {
         None | Some("") => "admin".to_string(),
@@ -105,7 +117,7 @@ impl ManagedCore {
             .ok()
             .or_else(|| env::var("RAVEN_HOST").ok())
             .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| "0.0.0.0".to_string());
+            .unwrap_or_else(|| DEFAULT_API_HOST.to_string());
         let mcp_mode = mcp_mode_from_env(env::var("RAVEN_DESKTOP_MCP_MODE").ok());
         let spec = runtime_launch_spec(python, mcp, python_path, Some(host), Some(mcp_mode));
         let mut cmd = Command::new(&spec.program);
