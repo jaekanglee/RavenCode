@@ -7,6 +7,7 @@
 // Contract:
 //  - 입력은 password 필드. 저장 전에 `<base>/api/vaults`로 검증한다 (헤더로만 전송).
 //  - 통과한 토큰만 host-auth(sessionStorage)에 저장 → onVerified (기본: 새로고침).
+//    저장이 거부되면(사생활 보호 모드 등) 성공으로 처리하지 않는다.
 //  - 거절되면 저장하지 않고, 오류 문구에 입력값을 넣지 않는다.
 import { useEffect, useState } from "react";
 import { Modal } from "./ui/Modal";
@@ -58,7 +59,10 @@ export function AuthTokenDialog({ onVerified = () => window.location.reload() }:
     try {
       const r = await fetch(`${base}/api/vaults`, { headers: { Authorization: `Bearer ${value}` } });
       if (r.ok) {
-        setHostToken(base, value);
+        if (!setHostToken(base, value)) {
+          setError("토큰은 맞지만 이 브라우저가 저장을 거부했습니다 (사생활 보호 모드·저장소 차단 확인).");
+          return;
+        }
         close();
         onVerified();
         return;

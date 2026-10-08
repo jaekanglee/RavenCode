@@ -309,11 +309,7 @@ class SPAHandler(SimpleHTTPRequestHandler):
             return
         body = self.rfile.read(length) if length else None
         if authorization is None:
-            msg = b'{"ok": false, "error": "unauthorized", "detail": "login required"}'
-            # Distinct from the API gate's `Bearer realm="raven"`: the dashboard sends the
-            # browser to this proxy's login page instead of asking for a token (#24).
-            self._send(401, msg, "application/json",
-                       [("WWW-Authenticate", 'Session realm="raven-dashboard"')])
+            self._session_required()
             return
         if from_cookie and method in _UNSAFE and not self._same_origin():
             self._send(403, b'{"ok": false, "error": "cross-origin request refused"}', "application/json")
@@ -323,6 +319,13 @@ class SPAHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             msg = f"API proxy error: {exc}".encode()
             self._send(502, msg, "text/plain")
+            return
+        if status == 401 and from_cookie:
+            # The session's token was revoked: drop the session and answer with this
+            # proxy's realm, so the dashboard returns to the login page instead of
+            # opening its Bearer token dialog for the gate's challenge (#25 review).
+            _SESSIONS.drop(self._session_id())
+            self._session_required([self._clear_cookie()])
             return
         self.send_response(status)
         for k, v in resp_headers:
@@ -334,6 +337,13 @@ class SPAHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         if method != "HEAD":
             self.wfile.write(resp_body)
+
+    def _session_required(self, extra: list[tuple[str, str]] = ()) -> None:
+        msg = b'{"ok": false, "error": "unauthorized", "detail": "login required"}'
+        # Distinct from the API gate's `Bearer realm="raven"`: the dashboard sends the
+        # browser to this proxy's login page instead of asking for a token (#24).
+        self._send(401, msg, "application/json",
+                   [("WWW-Authenticate", 'Session realm="raven-dashboard"'), *extra])
 
     def _require_session_for_page(self) -> bool:
         """Static/page requests: a valid credential or the login page."""

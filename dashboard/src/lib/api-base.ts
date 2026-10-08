@@ -16,7 +16,7 @@
  * switches target server context.
  */
 
-import { authHeaderFor, requestAuth } from "./host-auth";
+import { authHeaderFor, canonicalBase, clearHostToken, requestAuth } from "./host-auth";
 
 let apiBase = "";
 
@@ -55,33 +55,39 @@ function isApiPath(input: unknown): input is string {
   return typeof input === "string" && input.startsWith("/api/");
 }
 
-function withAuth(init: RequestInit | undefined, base: string): RequestInit | undefined {
+// A request that carries an auto-attached token must not follow redirects: the token
+// was meant for this host only, and stripping Authorization on a cross-origin hop is
+// left to each browser engine (the Core API itself never redirects /api calls).
+function withAuth(init: RequestInit | undefined, base: string): { init: RequestInit | undefined; auto: boolean } {
   const auth = authHeaderFor(base);
-  if (!auth) return init;
+  if (!auth) return { init, auto: false };
   const headers = new Headers(init?.headers);
-  if (!headers.has("authorization")) headers.set("Authorization", auth);
-  return { ...init, headers };
+  if (headers.has("authorization")) return { init, auto: false };
+  headers.set("Authorization", auth);
+  return { init: { ...init, headers, redirect: init?.redirect ?? "error" }, auto: true };
 }
 
-function handleUnauthorized(res: Response, base: string): void {
+function handleUnauthorized(res: Response, base: string, auto: boolean): void {
   if (res.status !== 401) return;
   const challenge = res.headers.get("www-authenticate") || "";
-  if (base === "" && challenge.startsWith('Session realm="raven-dashboard"')) {
+  if (base === "" && /^session\s+realm="raven-dashboard"/i.test(challenge)) {
     // Docker dashboard proxy: its own login page holds the session, not this tab.
     const next = window.location.pathname + window.location.search;
     window.location.assign(`/__raven/login?next=${encodeURIComponent(next)}`);
-  } else if (challenge.startsWith("Bearer")) {
+  } else if (/^bearer\b/i.test(challenge)) {
+    // The stored token was refused (revoked or wrong): drop it, ask again.
+    if (auto) clearHostToken(base);
     requestAuth(base);
   }
 }
 
-/** Origin of an absolute `http(s)://host/api/...` URL, else null. */
-function absoluteApiOrigin(input: unknown): string | null {
-  const raw = typeof input === "string" ? input : input instanceof URL ? input.href : null;
-  if (!raw || !/^https?:\/\//i.test(raw)) return null;
+/** Token key of an absolute `/api/...` URL: "" for the dashboard's own origin, else the origin. */
+function absoluteApiBase(raw: string): string | null {
+  if (!/^https?:\/\//i.test(raw)) return null;
   try {
     const url = new URL(raw);
-    return url.pathname.startsWith("/api/") ? url.origin : null;
+    if (!url.pathname.startsWith("/api/")) return null;
+    return typeof window !== "undefined" && url.origin === window.location.origin ? "" : url.origin;
   } catch {
     return null;
   }
@@ -89,22 +95,44 @@ function absoluteApiOrigin(input: unknown): string | null {
 
 if (typeof window !== "undefined") {
   const origFetch = window.fetch.bind(window);
+  const isActive = (base: string) => base === canonicalBase(getActiveTargetBaseUrl());
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     if (isApiPath(input)) {
       const targetBase = getActiveTargetBaseUrl();
-      return origFetch(targetBase + input, withAuth(init, targetBase)).then((res) => {
-        handleUnauthorized(res, targetBase);
+      const { init: authed, auto } = withAuth(init, targetBase);
+      return origFetch(targetBase + input, authed).then((res) => {
+        handleUnauthorized(res, targetBase, auto);
         return res;
       });
     }
-    // Absolute URLs (lib/api.ts apiFetch for a remote host): only the token stored
-    // for exactly this origin is attached — never another host's.
-    const origin = absoluteApiOrigin(input);
-    if (origin !== null) {
-      return origFetch(input, withAuth(init, origin)).then((res) => {
+    // Absolute URLs (lib/api.ts apiFetch for a remote host) and Request objects: only
+    // the token stored for exactly the origin the request goes to — never another host's.
+    if (typeof Request !== "undefined" && input instanceof Request) {
+      const base = absoluteApiBase(input.url);
+      if (base === null) return origFetch(input, init);
+      const merged = new Request(input, init);
+      let auto = false;
+      let req = merged;
+      const auth = authHeaderFor(base);
+      if (auth && !merged.headers.has("authorization")) {
+        const headers = new Headers(merged.headers);
+        headers.set("Authorization", auth);
+        req = new Request(merged, { headers, redirect: merged.redirect === "follow" ? "error" : merged.redirect });
+        auto = true;
+      }
+      return origFetch(req).then((res) => {
+        if (isActive(base)) handleUnauthorized(res, base, auto);
+        return res;
+      });
+    }
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : null;
+    const base = raw === null ? null : absoluteApiBase(raw);
+    if (base !== null) {
+      const { init: authed, auto } = withAuth(init, base);
+      return origFetch(input, authed).then((res) => {
         // Only the active host prompts; a probe of another host (HostPicker test)
         // reports its own 401 instead of opening the global dialog.
-        if (origin === getActiveTargetBaseUrl()) handleUnauthorized(res, origin);
+        if (isActive(base)) handleUnauthorized(res, base, auto);
         return res;
       });
     }
@@ -123,6 +151,7 @@ if (typeof window !== "undefined") {
           method: "POST",
           body: data ?? null,
           keepalive: true,
+          redirect: "error",
           headers: { Authorization: auth },
         }).catch(() => {});
         return true;

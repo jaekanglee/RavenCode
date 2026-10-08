@@ -115,13 +115,16 @@ export function HostPicker() {
       setTestResult({ ok: false, message: "IP 또는 URL 주소를 입력하세요." });
       return;
     }
+    if (token.trim() && !setHostToken(normalizeEndpoint(endpoint), token)) {
+      setTestResult({ ok: false, message: "❌ 이 브라우저가 토큰 저장을 거부했습니다 (사생활 보호 모드·저장소 차단 확인)." });
+      return;
+    }
     setSubmitting(true);
     const newHost = addHost({
       name: hostName.trim() || endpoint.trim(),
       endpoint: endpoint.trim(),
       isLocal: false,
     });
-    if (token.trim()) setHostToken(normalizeEndpoint(endpoint), token);
     setHosts(getHosts());
     setSubmitting(false);
     setModalOpen(false);

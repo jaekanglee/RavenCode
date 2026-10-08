@@ -12,8 +12,25 @@
 
 const KEY_PREFIX = "raven:host-token:";
 
+/**
+ * Canonical form of a host base URL: a bare `http(s)://host:port` becomes its URL
+ * origin (lower-cased host, default port dropped), so the stored key and the origin
+ * the fetch wrapper computes for an absolute URL always match. "" and bases with a
+ * path are only trimmed.
+ */
+export function canonicalBase(base: string): string {
+  const trimmed = base.trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    const url = new URL(trimmed);
+    return url.pathname === "/" && !url.search && !url.hash ? url.origin : trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
 function keyFor(base: string): string {
-  return KEY_PREFIX + base.trim().replace(/\/+$/, "");
+  return KEY_PREFIX + canonicalBase(base);
 }
 
 function store(): Storage | null {
@@ -32,13 +49,18 @@ export function getHostToken(base: string): string | null {
   }
 }
 
-export function setHostToken(base: string, token: string): void {
+/** Stores the token; false when it was blank or the browser refused to keep it. */
+export function setHostToken(base: string, token: string): boolean {
   const value = token.trim();
-  if (!value) return;
+  if (!value) return false;
   try {
-    store()?.setItem(keyFor(base), value);
+    const s = store();
+    if (!s) return false;
+    s.setItem(keyFor(base), value);
+    return s.getItem(keyFor(base)) === value;
   } catch {
-    // storage unavailable (private mode) — the request simply stays unauthenticated
+    // storage unavailable (private mode, quota) — the caller must not report success
+    return false;
   }
 }
 
