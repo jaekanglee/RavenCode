@@ -145,14 +145,25 @@ export function Layout() {
   // desktop(>744px)에서는 drawer 자체가 없다 → open state를 desktop sidebar/backdrop에
   // 전달하지 않는다. CSS(트리거 숨김)와 함께 JSX도 같은 계약을 주장한다:
   // "open/close state는 mobile drawer에만 의미를 가진다."
+  //
+  // desktop으로 crossing하면 mobile drawer state를 *폐기*한다. `&&`로 가리기만 하면
+  // mobile → desktop → mobile 왕복 시 mobileNavOpen=true가 살아남아, 사용자 입력 없이
+  // drawer가 다시 열린다 (PR #10 review blocker). desktop 구간에는 mobile 전용 state가
+  // 남지 않아야 계약이 성립한다.
+  useEffect(() => {
+    if (!isMobile) setMobileNavOpen(false);
+  }, [isMobile]);
+
   const drawerOpen = isMobile && mobileNavOpen;
 
+  // Escape listener는 *실제로 열려 있는* drawer에만 붙는다. desktop에서는 위 effect가
+  // mobileNavOpen을 폐기하므로 잔존 listener도 남지 않는다 (같은 root cause).
   useEffect(() => {
-    if (!mobileNavOpen) return;
+    if (!drawerOpen) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMobileNavOpen(false); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [mobileNavOpen]);
+  }, [drawerOpen]);
 
   useEffect(() => setMoreOpen(false), [location.pathname]);
 

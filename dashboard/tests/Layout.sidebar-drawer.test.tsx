@@ -41,6 +41,9 @@ type Listener = (event: MediaQueryListEvent) => void;
 interface FakeMql {
   matches: boolean;
   listeners: Set<Listener>;
+  /** 누적 구독/해제 횟수 — useSyncExternalStore subscription churn 감지용. */
+  subscribeCount: number;
+  unsubscribeCount: number;
 }
 
 const mqls = new Map<string, FakeMql>();
@@ -48,7 +51,7 @@ const mqls = new Map<string, FakeMql>();
 function fakeMql(query: string): FakeMql {
   let entry = mqls.get(query);
   if (!entry) {
-    entry = { matches: false, listeners: new Set() };
+    entry = { matches: false, listeners: new Set(), subscribeCount: 0, unsubscribeCount: 0 };
     mqls.set(query, entry);
   }
   return entry;
@@ -63,10 +66,22 @@ function installMatchMedia(): void {
       },
       media: query,
       onchange: null,
-      addEventListener: (_type: string, cb: Listener) => entry.listeners.add(cb),
-      removeEventListener: (_type: string, cb: Listener) => entry.listeners.delete(cb),
-      addListener: (cb: Listener) => entry.listeners.add(cb),
-      removeListener: (cb: Listener) => entry.listeners.delete(cb),
+      addEventListener: (_type: string, cb: Listener) => {
+        entry.listeners.add(cb);
+        entry.subscribeCount += 1;
+      },
+      removeEventListener: (_type: string, cb: Listener) => {
+        entry.listeners.delete(cb);
+        entry.unsubscribeCount += 1;
+      },
+      addListener: (cb: Listener) => {
+        entry.listeners.add(cb);
+        entry.subscribeCount += 1;
+      },
+      removeListener: (cb: Listener) => {
+        entry.listeners.delete(cb);
+        entry.unsubscribeCount += 1;
+      },
       dispatchEvent: () => false,
     } as unknown as MediaQueryList;
   }) as typeof window.matchMedia;
@@ -241,6 +256,112 @@ describe("mobile (≤744px) — off-canvas drawer semantics", () => {
 
     expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(false);
     expect(backdrop()).toBeNull();
+  });
+
+  it("mobile → desktop → mobile 왕복: desktop 구간에서 폐기된 drawer state가 되살아나지 않는다", async () => {
+    // PR #10 review blocker. `drawerOpen = isMobile && mobileNavOpen`처럼 `&&`로
+    // 가리기만 하면 mobileNavOpen=true가 desktop 구간 내내 살아남아, 다시 mobile로
+    // 돌아오는 순간 사용자 입력 없이 drawer가 열린다. desktop 진입 시 state를
+    // 실제로 폐기해야만 이 테스트가 GREEN이다.
+    setMobile();
+    renderLayout();
+    await screen.findByRole("complementary", {}, { timeout: 2000 });
+
+    // mobile: closed
+    expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(false);
+    expect(hamburger().getAttribute("aria-expanded")).toBe("false");
+    expect(backdrop()).toBeNull();
+
+    // → hamburger로 open
+    await interact(() => fireEvent.click(hamburger()));
+    expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(true);
+    expect(hamburger().getAttribute("aria-expanded")).toBe("true");
+    expect(backdrop()).not.toBeNull();
+
+    // → desktop으로 crossing: drawer는 닫히고 backdrop도 사라진다
+    await crossBreakpoint(DRAWER_MQ, false);
+    expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(false);
+    expect(hamburger().getAttribute("aria-expanded")).toBe("false");
+    expect(backdrop()).toBeNull();
+
+    // → 다시 mobile로 crossing: 사용자 입력이 없었으므로 CLOSED를 유지해야 한다
+    await crossBreakpoint(DRAWER_MQ, true);
+    expect(aside().classList.contains("sidebar-offcanvas-open")).toBe(false);
+    expect(hamburger().getAttribute("aria-expanded")).toBe("false");
+    expect(backdrop()).toBeNull();
+  });
+});
+
+describe("Escape listener lifecycle — 실제로 열린 drawer에만 붙는다", () => {
+  /** document에 등록된 keydown listener 수 (Cmd+K 등 Layout의 다른 listener 포함). */
+  function countKeydownListeners(): number {
+    return keydownActive.size;
+  }
+
+  const keydownActive = new Set<unknown>();
+
+  beforeEach(() => {
+    keydownActive.clear();
+    vi.spyOn(document, "addEventListener").mockImplementation(((type: string, l: unknown) => {
+      if (type === "keydown") keydownActive.add(l);
+    }) as never);
+    vi.spyOn(document, "removeEventListener").mockImplementation(((type: string, l: unknown) => {
+      if (type === "keydown") keydownActive.delete(l);
+    }) as never);
+  });
+
+  it("desktop으로 crossing하면 drawer 전용 Escape listener가 남지 않는다", async () => {
+    setMobile();
+    renderLayout();
+    await screen.findByRole("complementary", {}, { timeout: 2000 });
+
+    const closed = countKeydownListeners();
+    await interact(() => fireEvent.click(hamburger()));
+    const open = countKeydownListeners();
+    expect(open, "drawer가 열렸는데 Escape listener가 붙지 않았다").toBe(closed + 1);
+
+    await crossBreakpoint(DRAWER_MQ, false);
+    expect(countKeydownListeners(), "desktop에서 drawer Escape listener가 잔존한다").toBe(closed);
+
+    // 다시 mobile로 돌아와도 drawer는 닫힌 상태이므로 listener가 늘지 않는다.
+    await crossBreakpoint(DRAWER_MQ, true);
+    expect(countKeydownListeners()).toBe(closed);
+  });
+
+  it("desktop에서는 drawer Escape listener가 애초에 붙지 않는다", async () => {
+    setDesktop();
+    renderLayout();
+    await screen.findByRole("complementary", {}, { timeout: 2000 });
+
+    const baseline = countKeydownListeners();
+    await interact(() => fireEvent.click(hamburger()));
+    expect(countKeydownListeners()).toBe(baseline);
+  });
+});
+
+describe("useSyncExternalStore subscription identity — 무관한 re-render에 재구독하지 않는다", () => {
+  it("Layout의 무관한 state 변화(햄버거 클릭)로 media query 재구독 churn이 없다", async () => {
+    // PR #10 review: useSyncExternalStore의 subscribe/getSnapshot이 매 render 새
+    // closure면, Layout의 무관한 re-render마다 구독이 해제/재등록된다. stable
+    // identity 캐시로 churn을 없앴고, 이 테스트가 그 회귀를 잡는다.
+    setDesktop();
+    renderLayout();
+    await screen.findByRole("complementary", {}, { timeout: 2000 });
+
+    const drawerMql = fakeMql(DRAWER_MQ);
+    const subsAfterMount = drawerMql.subscribeCount;
+    const unsubsAfterMount = drawerMql.unsubscribeCount;
+    expect(subsAfterMount, "mount 시 drawer MQ를 구독하지 않았다").toBeGreaterThan(0);
+
+    // 무관한 re-render를 강제한다 (desktop에서 햄버거 클릭 → Layout state 변화).
+    await interact(() => fireEvent.click(hamburger()));
+    await interact(() => fireEvent.click(hamburger()));
+
+    expect(
+      drawerMql.subscribeCount,
+      "무관한 re-render마다 media query를 재구독한다 (subscription identity 불안정)"
+    ).toBe(subsAfterMount);
+    expect(drawerMql.unsubscribeCount).toBe(unsubsAfterMount);
   });
 });
 
