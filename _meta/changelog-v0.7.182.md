@@ -627,3 +627,21 @@ MCP는 인증이 없어서 데스크톱 앱이 tailnet 주소에만 바인딩했
 ### 검증
 
 `test_lint_v2.py::test_vault_root_index_is_not_orphan`(lint·garden 모두 — garden 쪽은 수정 전 RED 확인), `RawPanel.viewer-layout.contract.test.ts` 1건 추가. Python 972, vitest 316 통과, `tsc --noEmit` 0. 보관소 관리 900·1280px, raw 1280·700px, 로그·문서 화면 스크린샷 확인(가로 넘침 0).
+
+## 38. 보안 — Core API 접근 게이트 (Issue #14, PR #21)
+
+인증 없는 Core API가 LAN에 열려 있었다. 데스크톱 기본 bind가 `0.0.0.0`이었고, 경로에 따라 `DELETE /api/vaults/{name}?force=true`까지 닿았다. 게이트를 실행기가 아니라 앱 자체에 붙여 모든 실행 경로가 같은 판정을 받게 했다. 결정 근거: [[adr-2026-10-08-core-api-access-gate]].
+
+- **게이트** (`raven/core/access.py::TokenGate`, `raven/api/server.py`에 설치): loopback·tailnet은 통과하고, 그 외는 `raven mcp token add`로 발급한 Bearer 토큰이 필요하다. 발급 0개면 전부 401이고 경로 예외는 없다. MCP의 `LanTokenAuth`도 같은 클래스를 쓴다.
+- **프록시 헤더**: strict 모드(기본)에서는 X-Forwarded-For / Forwarded / X-Real-IP가 붙은 요청에 출처 신뢰를 주지 않는다. 그래서 `--forwarded-allow-ips '*'`여도 사칭할 수 없다. Raven 실행기는 `proxy_headers=False`로 띄우고, 이 기기의 프록시(vite `xfwd`)가 붙인 XFF만 해석한다.
+- **bind**: 기본은 loopback이다. 원격 bind는 `RAVEN_ALLOW_REMOTE=1`(또는 `--host tailscale`)일 때만 허용한다. standalone은 opt-in 없이 요청하면 exit 2로 거부한다. 우선순위는 `--host` > `RAVEN_HOST`다. CORS는 더 이상 `*`로 넓어지지 않는다.
+- **Docker**: compose가 `RAVEN_ALLOW_REMOTE=1`을 명시한다. 대시보드 프록시는 사용자 토큰(`/__raven/login` → HttpOnly·SameSite=Strict 쿠키)을 Bearer로 실어 보낸다. Docker 대역은 신뢰하지 않는다. 쿠키로 인증된 쓰기 요청은 같은 Origin일 때만 받는다.
+- **운영 변화**: Docker 대시보드는 첫 접속 때 토큰이 필요하다 (`docker compose exec api python -m raven.cli mcp token add <이름>`). 테스트에서 `TestClient`의 기본 출처 `"testclient"`는 IP가 아니라서 거부되므로, `tests/conftest.py`가 loopback을 기본값으로 준다.
+
+### 검증
+
+`test_core_api_access.py` 74건, `test_core_api_forwarded.py` 50건, `test_spa_server_auth.py` 14건을 추가했다. 세 파일 모두 수정 전 RED를 확인했다. Python 1127 passed / 1 failed / 1 skipped이고, 실패 1건은 기존 baseline인 `test_mcp_semantic_lint_queue::test_no_candidates_is_not_an_error`다. cargo test 13, vitest 380, `tsc -b` 0. 실제 확인 범위: LAN·tailnet 소켓, 실제 vite 프록시, `docker compose` 스택(다른 컨테이너 401 포함), Chrome 로그인, Tauri `tauri dev` 기본·원격 모드.
+
+### 후속
+
+#22 (원격 모드 포트 선택이 loopback 점유를 놓침), #23 (SIGTERM 후 Python Core 잔존).
