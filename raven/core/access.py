@@ -8,9 +8,10 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 판정 (출처 = ASGI ``scope["client"]``):
 
 - loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과
-- tailnet ``100.64.0.0/10``, ``fd7a:115c:a1e0::/48`` → 통과. Tailscale이 기기를 인증하고,
-  제품 전제가 "신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)"다 (README 보안 전제,
-  deployment D5, MCP ADR 2026-09-30).
+- tailnet ``100.64.0.0/10``, ``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이 기기의
+  Tailscale 주소로 나가는 출처 → 통과 (``is_tailnet_peer``). 범위 소속만으로는 신뢰 ❌ —
+  CGNAT LAN·다른 VPN·Docker 망. 제품 전제는 "신뢰된 단일 사용자 네트워크(localhost 또는
+  본인 tailnet)"다 (README 보안 전제, deployment D5, MCP ADR 2026-09-30).
 - 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
   통과. 발급된 토큰이 없으면 전부 401 (fail-closed). 경로 예외는 없다 — health 포함.
 
@@ -41,20 +42,29 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shutil
+import socket
+import subprocess
+import threading
+import time
 
 from raven.core.mcp_tokens import verify_token
 
 LOOPBACK_HOST = "127.0.0.1"
 ALLOW_REMOTE_ENV = "RAVEN_ALLOW_REMOTE"
 
-# loopback + Tailscale이 노드에 주는 주소 대역 (CGNAT IPv4 + Tailscale ULA IPv6).
-TRUSTED_NETWORKS = (
+LOOPBACK_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
+)
+# Tailscale이 노드에 주는 주소 대역 (CGNAT IPv4 + Tailscale ULA IPv6). **범위 소속만으로는
+# 신뢰하지 않는다** — CGNAT은 통신사 LAN·다른 mesh VPN·사용자 Docker 망도 쓴다.
+# 아래 ``is_tailnet_peer``가 라우트로 입증한다.
+TAILNET_NETWORKS = (
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("fd7a:115c:a1e0::/48"),
 )
-
+TRUSTED_NETWORKS = LOOPBACK_NETWORKS + TAILNET_NETWORKS  # 하위 호환 (범위 표기용)
 
 def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     candidate = host.strip()
@@ -70,14 +80,96 @@ def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
     return addr
 
 
+# ─── tailnet 입증 ─────────────────────────────────────────────
+#
+# TCP 연결은 클라이언트가 우리 SYN-ACK를 받아야 성립한다. 커널이 그 peer 주소로 가는
+# 응답을 **이 기기의 Tailscale 주소**(tailscaled가 `tailscale ip`로 알려주는 값)에서
+# 내보낸다면, SYN-ACK는 Tailscale로 들어갔고 Tailscale은 그 주소를 가진 WireGuard
+# 인증 노드에게만 전달한다. LAN에서 100.x를 사칭한 호스트는 SYN-ACK를 못 받아 연결을
+# 끝낼 수 없다. Tailscale이 없거나(CLI·daemon 부재), 응답이 다른 인터페이스로 나가면
+# (CGNAT LAN, 다른 VPN, Docker bridge) tailnet 신뢰는 없다 — 토큰 필요 (fail-closed).
+
+_TS_TTL = 30.0
+_TS_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+_TS_LOCK = threading.Lock()
+_TS_FALLBACK_PATHS = (
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/bin/tailscale",
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+)
+
+
+def _tailscale_binary() -> str | None:
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    for path in _TS_FALLBACK_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _tailscale_self_ips() -> frozenset[str]:
+    """This host's Tailscale addresses, from tailscaled itself (cached ``_TS_TTL`` s)."""
+    now = time.monotonic()
+    with _TS_LOCK:
+        hit = _TS_CACHE.get("ips")
+        if hit and now - hit[0] < _TS_TTL:
+            return hit[1]
+    ips: set[str] = set()
+    binary = _tailscale_binary()
+    if binary:
+        try:
+            out = subprocess.run(
+                [binary, "ip"], capture_output=True, text=True, timeout=2, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        for line in out.splitlines():
+            addr = _parse_ip(line)
+            if addr is not None and any(addr in net for net in TAILNET_NETWORKS):
+                ips.add(str(addr))
+    result = frozenset(ips)
+    with _TS_LOCK:
+        _TS_CACHE["ips"] = (now, result)
+    return result
+
+
+def _route_source(ip: str) -> str | None:
+    """Local address the kernel would send from to reach ``ip`` (no packet is sent)."""
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.connect((ip, 9))
+            source = s.getsockname()[0]
+    except OSError:
+        return None
+    addr = _parse_ip(source.split("%", 1)[0])
+    return str(addr) if addr is not None else None
+
+
+def is_tailnet_peer(host: str | None) -> bool:
+    """In a tailnet range *and* replies to it leave through this host's Tailscale address."""
+    addr = _parse_ip(host) if host else None
+    if addr is None or not any(addr in net for net in TAILNET_NETWORKS):
+        return False
+    self_ips = _tailscale_self_ips()
+    if not self_ips:
+        return False
+    return _route_source(str(addr)) in self_ips
+
+
 def is_trusted_client(host: str | None) -> bool:
-    """loopback 또는 tailnet 출처인가. IP가 아닌 값(None, "", "testclient")은 신뢰하지 않는다."""
+    """loopback, 또는 라우트로 입증된 tailnet 출처인가. IP가 아닌 값은 신뢰하지 않는다."""
     if not host:
         return False
     addr = _parse_ip(host)
     if addr is None:
         return False
-    return any(addr in net for net in TRUSTED_NETWORKS)
+    if any(addr in net for net in LOOPBACK_NETWORKS):
+        return True
+    return is_tailnet_peer(str(addr))
 
 
 _FORWARDING_HEADERS = (b"x-forwarded-for", b"forwarded", b"x-real-ip")

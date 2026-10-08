@@ -265,7 +265,8 @@ def test_proxy_strips_session_cookie_and_spoofed_forwarding_headers(tmp_path, mo
     port, spa = _start_spa(f"http://127.0.0.1:{echo.server_address[1]}", dist, dict(os.environ))
     try:
         _req(port, "GET", "/api/vaults", {
-            "Cookie": "raven_token=rvn_secret; theme=dark",
+            "Authorization": "Bearer rvn_secret",
+            "Cookie": "raven_session=whatever; theme=dark",
             "X-Forwarded-For": "127.0.0.1",
             "Forwarded": "for=127.0.0.1",
             "X-Real-IP": "127.0.0.1",
@@ -273,12 +274,180 @@ def test_proxy_strips_session_cookie_and_spoofed_forwarding_headers(tmp_path, mo
         assert seen, "proxy did not forward"
         fwd = seen[-1]
         assert fwd.get("authorization") == "Bearer rvn_secret"
-        assert "raven_token" not in fwd.get("cookie", "")
+        assert "raven_session" not in fwd.get("cookie", "")
+        assert fwd.get("cookie") == "theme=dark"
         assert fwd.get("x-forwarded-for") == "127.0.0.1"  # the proxy's real client, not the spoof
         assert "forwarded" not in fwd and "x-real-ip" not in fwd
-        # an explicit header wins over the cookie
-        _req(port, "GET", "/api/vaults", {"Cookie": "raven_token=rvn_a", "Authorization": "Bearer rvn_b"})
-        assert seen[-1]["authorization"] == "Bearer rvn_b"
+        # a cookie that is not a live session authenticates nothing
+        status, _, _ = _req(port, "GET", "/api/vaults", {"Cookie": "raven_session=rvn_a"})
+        assert status == 401
     finally:
         _stop(spa)
         echo.shutdown()
+
+
+# ─── PR #21 audit: session hardening ───
+
+
+def _session_cookie(headers):
+    raw = headers.get("set-cookie", "")
+    name, _, rest = raw.partition("=")
+    return name, rest.split(";", 1)[0], raw
+
+
+def test_cookie_holds_an_opaque_session_not_the_api_token(stack):
+    """Cookies are not port-isolated: anything else on this host receives them.
+    The cookie must not be the long-lived API token."""
+    _, headers, _ = _login(stack["port"], stack["token"])
+    name, value, raw = _session_cookie(headers)
+    assert name == "raven_session"
+    assert stack["token"] not in raw
+    assert len(value) >= 32
+    # a raw API token in the cookie is not a session
+    status, h, _ = _req(stack["port"], "GET", "/", {"Cookie": f"raven_session={stack['token']}"})
+    assert status == 303
+    assert _req(stack["port"], "GET", "/api/vaults", {"Cookie": f"raven_token={stack['token']}"})[0] == 401
+
+
+def test_logout_kills_the_session_server_side(stack):
+    p = stack["port"]
+    _, headers, _ = _login(p, stack["token"])
+    name, value, _ = _session_cookie(headers)
+    c = {"Cookie": f"{name}={value}"}
+    assert _req(p, "GET", "/api/vaults", c)[0] == 200
+    _req(p, "POST", "/__raven/logout", {**c, "Origin": f"http://127.0.0.1:{p}", "Host": f"127.0.0.1:{p}"})
+    assert _req(p, "GET", "/api/vaults", c)[0] == 401          # replayed cookie is dead
+    assert _req(p, "GET", "/", c)[0] == 303
+
+
+@pytest.mark.parametrize("length", ["abc", "-1", "99999999"])
+def test_login_rejects_bad_or_oversized_bodies(stack, length):
+    conn = http.client.HTTPConnection("127.0.0.1", stack["port"], timeout=10)
+    try:
+        conn.putrequest("POST", "/__raven/login")
+        conn.putheader("Content-Type", "application/x-www-form-urlencoded")
+        conn.putheader("Content-Length", length)
+        conn.endheaders()
+        res = conn.getresponse()
+        assert res.status in (400, 413), (length, res.status)
+        assert "set-cookie" not in {k.lower() for k, _ in res.getheaders()}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("token", ["x" * 5000, "rvn_ok\r\nSet-Cookie: a=b", "rvn_with space", "rvn_;semi"])
+def test_login_rejects_malformed_tokens(stack, token):
+    status, headers, body = _login(stack["port"], token)
+    assert status in (400, 401, 413)
+    assert "set-cookie" not in headers
+    assert token.encode()[:40] not in body
+
+
+def test_proxy_rejects_malformed_content_length(stack):
+    _, headers, _ = _login(stack["port"], stack["token"])
+    name, value, _ = _session_cookie(headers)
+    conn = http.client.HTTPConnection("127.0.0.1", stack["port"], timeout=10)
+    try:
+        conn.putrequest("POST", "/api/vaults")
+        conn.putheader("Cookie", f"{name}={value}")
+        conn.putheader("Origin", f"http://127.0.0.1:{stack['port']}")
+        conn.putheader("Content-Length", "-5")
+        conn.endheaders()
+        assert conn.getresponse().status == 400
+    finally:
+        conn.close()
+
+
+def test_token_never_reaches_urls_pages_or_logs(tmp_path, monkeypatch):
+    """Login success/failure: token absent from Location, response bodies and spa_server logs."""
+    lan = _lan_ip()
+    if lan is None:
+        pytest.skip("no LAN IP")
+    vaults = tmp_path / "vaults"
+    vaults.mkdir()
+    monkeypatch.setenv("WIKI_VAULTS_DIR", str(vaults))
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("x", encoding="utf-8")
+    api_port = _free_port()
+    api = subprocess.Popen([sys.executable, "-m", "raven.api", "--host", "0.0.0.0", "--port", str(api_port)],
+                           cwd=REPO_ROOT, env=_env(vaults, RAVEN_ALLOW_REMOTE="1"),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _wait(api_port, api)
+    port, spa = _start_spa(f"http://{lan}:{api_port}", dist, _env(vaults))
+    token = mcp_tokens.add_token("logcheck")
+    try:
+        bad = "rvn_" + "Q" * 43
+        for tok in (bad, token):
+            status, headers, body = _login(port, tok, "/x")
+            assert tok not in headers.get("location", "")
+            assert tok.encode() not in body
+    finally:
+        _stop(spa)
+        _stop(api)
+    logs = (spa.stdout.read() or "") + (spa.stderr.read() or "")
+    assert token not in logs and bad not in logs, logs[-500:]
+
+
+def test_secure_cookie_opt_in(tmp_path, monkeypatch):
+    """Behind TLS the operator can mark the session cookie Secure."""
+    lan = _lan_ip()
+    if lan is None:
+        pytest.skip("no LAN IP")
+    vaults = tmp_path / "vaults"
+    vaults.mkdir()
+    monkeypatch.setenv("WIKI_VAULTS_DIR", str(vaults))
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("x", encoding="utf-8")
+    api_port = _free_port()
+    api = subprocess.Popen([sys.executable, "-m", "raven.api", "--host", "0.0.0.0", "--port", str(api_port)],
+                           cwd=REPO_ROOT, env=_env(vaults, RAVEN_ALLOW_REMOTE="1"),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _wait(api_port, api)
+    port, spa = _start_spa(f"http://{lan}:{api_port}", dist, _env(vaults, RAVEN_DASHBOARD_SECURE_COOKIE="1"))
+    try:
+        _, headers, _ = _login(port, mcp_tokens.add_token("tls"))
+        assert "; secure" in headers["set-cookie"].lower()
+    finally:
+        _stop(spa)
+        _stop(api)
+
+
+def test_proxy_drops_upstream_cors_headers(tmp_path):
+    """The dashboard is same-origin; the API's CORS answers must not leak through the proxy."""
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:9999")
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    echo = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+    threading.Thread(target=echo.serve_forever, daemon=True).start()
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("x", encoding="utf-8")
+    port, spa = _start_spa(f"http://127.0.0.1:{echo.server_address[1]}", dist, dict(os.environ))
+    try:
+        status, headers, _ = _req(port, "GET", "/api/vaults", {"Authorization": "Bearer rvn_x",
+                                                                "Origin": "http://127.0.0.1:9999"})
+        assert status == 200
+        assert not any(k.startswith("access-control-") for k in headers), headers
+    finally:
+        _stop(spa)
+        echo.shutdown()
+
+
+def test_shipped_local_proxies_send_x_forwarded_for():
+    """Loopback peers without XFF are indistinguishable from local clients, so every proxy
+    Raven ships must forward the real client address (vite dev proxy; spa_server is covered
+    by test_proxy_strips_session_cookie_and_spoofed_forwarding_headers)."""
+    vite = (REPO_ROOT / "dashboard" / "vite.config.ts").read_text(encoding="utf-8")
+    assert "xfwd: true" in vite

@@ -13,7 +13,9 @@ Vite dev server의 proxy 설정을 프로덕션에서도 동일하게 재현.
   Docker 대역 전체를 신뢰하면 같은 망의 다른 컨테이너까지 관리자 권한을 얻으므로,
   대신 **사용자가 가진 토큰**을 실어 보낸다:
   - 브라우저: ``/__raven/login``에서 ``raven mcp token add``로 발급한 토큰을 한 번 입력 →
-    API로 검증 → ``HttpOnly; SameSite=Strict`` 쿠키 → 매 /api 요청에 Bearer로 변환.
+    API로 검증 → 메모리 세션 + ``HttpOnly; SameSite=Strict`` 쿠키(랜덤 세션 id — API 토큰 자체는
+    쿠키에 넣지 않는다. 쿠키는 포트를 구분하지 않아 같은 호스트의 다른 서비스도 받는다)
+    → 매 /api 요청에 Bearer로 변환. TLS 뒤라면 ``RAVEN_DASHBOARD_SECURE_COOKIE=1``.
   - 그 외 클라이언트: 자기 ``Authorization: Bearer``를 그대로 보낸다.
   - 자격 없는 요청은 로그인 페이지(와 데이터 없는 manifest/favicon) 외에 아무것도 받지 못한다.
     IP 기반 신뢰는 없다.
@@ -34,6 +36,10 @@ import html
 import http.client
 import http.cookies
 import os
+import re
+import secrets
+import threading
+import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,7 +47,7 @@ from pathlib import Path
 _API_URL: str = "http://127.0.0.1:8765"
 _STATIC_DIR: str = "."
 
-SESSION_COOKIE = "raven_token"
+SESSION_COOKIE = "raven_session"
 SESSION_MAX_AGE = 30 * 24 * 3600
 LOGIN_PATH = "/__raven/login"
 LOGOUT_PATH = "/__raven/logout"
@@ -49,6 +55,65 @@ _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 # Browsers fetch these without credentials (<link rel="manifest"> / favicon), and
 # they carry no vault data — the only static files served before login.
 _PUBLIC_STATIC = {"/manifest.webmanifest", "/favicon.svg"}
+_MAX_LOGIN_BODY = 4096
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.~-]{8,256}")
+_MAX_SESSIONS = 1024
+# Behind TLS (e.g. Caddy) the operator can mark the cookie Secure.
+_SECURE_COOKIE = os.environ.get("RAVEN_DASHBOARD_SECURE_COOKIE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+class _Sessions:
+    """Opaque session id → user token, in memory only.
+
+    Cookies are not port-isolated: every other service on this host receives
+    them. So the cookie carries a random id, never the API token (which also
+    works against the API and MCP directly). Ids die on logout, after
+    ``SESSION_MAX_AGE``, and on restart; the token itself is re-checked by the
+    API on every proxied call, so revoking it ends the session at once.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[str, float]] = {}
+
+    def create(self, token: str) -> str:
+        sid = secrets.token_urlsafe(32)
+        with self._lock:
+            if len(self._items) >= _MAX_SESSIONS:
+                oldest = min(self._items, key=lambda k: self._items[k][1])
+                del self._items[oldest]
+            self._items[sid] = (token, time.monotonic())
+        return sid
+
+    def token(self, sid: str) -> str | None:
+        with self._lock:
+            item = self._items.get(sid)
+            if item is None:
+                return None
+            if time.monotonic() - item[1] > SESSION_MAX_AGE:
+                del self._items[sid]
+                return None
+            return item[0]
+
+    def drop(self, sid: str | None) -> None:
+        if sid:
+            with self._lock:
+                self._items.pop(sid, None)
+
+
+_SESSIONS = _Sessions()
+
+
+def _content_length(value: str | None, limit: int | None = None) -> int | None:
+    """Parsed Content-Length, or None when malformed / negative / over ``limit``."""
+    if value is None or value.strip() == "":
+        return 0
+    if not value.strip().isdigit():
+        return None
+    n = int(value)
+    if limit is not None and n > limit:
+        return None
+    return n
 _STRIP_UPSTREAM = {"x-forwarded-for", "forwarded", "x-real-ip", "cookie", "authorization"}
 _HOP_BY_HOP = {"host", "connection", "transfer-encoding", "keep-alive",
                "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
@@ -98,7 +163,7 @@ class SPAHandler(SimpleHTTPRequestHandler):
 
     # ── reverse proxy ────────────────────────────────────────────────────────
 
-    def _session_token(self) -> str | None:
+    def _session_id(self) -> str | None:
         raw = self.headers.get("Cookie")
         if not raw:
             return None
@@ -109,6 +174,10 @@ class SPAHandler(SimpleHTTPRequestHandler):
             return None
         morsel = jar.get(SESSION_COOKIE)
         return morsel.value if morsel and morsel.value else None
+
+    def _session_token(self) -> str | None:
+        sid = self._session_id()
+        return _SESSIONS.token(sid) if sid else None
 
     def _credential(self) -> tuple[str | None, bool]:
         """(Authorization value to send upstream, came_from_cookie)."""
@@ -175,7 +244,8 @@ class SPAHandler(SimpleHTTPRequestHandler):
         self._send(303, b"", "text/plain", [("Location", location), *extra])
 
     def _clear_cookie(self) -> tuple[str, str]:
-        return ("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+        secure = "; Secure" if _SECURE_COOKIE else ""
+        return ("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
 
     def _to_login(self, clear: bool = False) -> None:
         target = f"{LOGIN_PATH}?next={urllib.parse.quote(_safe_next(self.path), safe='')}"
@@ -196,15 +266,23 @@ class SPAHandler(SimpleHTTPRequestHandler):
                 if self.headers.get("Origin") and not self._same_origin():
                     self._login_page(403, "다른 사이트에서 보낸 로그인 요청은 받지 않습니다.")
                     return True
-                length = int(self.headers.get("Content-Length") or 0)
-                form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8") if length else "")
+                length = _content_length(self.headers.get("Content-Length"), _MAX_LOGIN_BODY)
+                if length is None:
+                    self.close_connection = True
+                    self._send(413, b"login request too large or malformed", "text/plain")
+                    return True
+                raw = self.rfile.read(length) if length else b""
+                form = urllib.parse.parse_qs(raw.decode("utf-8", errors="replace"))
                 token = (form.get("token") or [""])[0].strip()
                 next_path = _safe_next((form.get("next") or ["/"])[0])
-                if not token or not self._token_is_valid(f"Bearer {token}"):
+                # Never echo the submitted token; reject odd shapes before calling the API.
+                if not _TOKEN_RE.fullmatch(token) or not self._token_is_valid(f"Bearer {token}"):
                     self._login_page(401, "토큰이 맞지 않습니다.", next_path)
                     return True
-                cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
-                          f"Max-Age={SESSION_MAX_AGE}")
+                _SESSIONS.drop(self._session_id())
+                secure = "; Secure" if _SECURE_COOKIE else ""
+                cookie = (f"{SESSION_COOKIE}={_SESSIONS.create(token)}; Path=/; HttpOnly; "
+                          f"SameSite=Strict; Max-Age={SESSION_MAX_AGE}{secure}")
                 self._redirect(next_path, [("Set-Cookie", cookie)])
             else:
                 self.send_error(405)
@@ -215,6 +293,7 @@ class SPAHandler(SimpleHTTPRequestHandler):
             elif not self._same_origin():
                 self._send(403, b"cross-origin logout refused", "text/plain")
             else:
+                _SESSIONS.drop(self._session_id())
                 self._redirect(LOGIN_PATH, [self._clear_cookie()])
             return True
         return False
@@ -223,7 +302,11 @@ class SPAHandler(SimpleHTTPRequestHandler):
 
     def _proxy(self, method: str) -> None:
         authorization, from_cookie = self._credential()
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        length = _content_length(self.headers.get("Content-Length"))
+        if length is None:
+            self.close_connection = True
+            self._send(400, b'{"ok": false, "error": "malformed Content-Length"}', "application/json")
+            return
         body = self.rfile.read(length) if length else None
         if authorization is None:
             msg = b'{"ok": false, "error": "unauthorized", "detail": "login required"}'
@@ -240,7 +323,9 @@ class SPAHandler(SimpleHTTPRequestHandler):
             return
         self.send_response(status)
         for k, v in resp_headers:
-            if k.lower() not in _HOP_BY_HOP and k.lower() != "content-length":
+            low = k.lower()
+            # same-origin dashboard: the API's CORS answers must not leak through
+            if low not in _HOP_BY_HOP and low != "content-length" and not low.startswith("access-control-"):
                 self.send_header(k, v)
         self.send_header("Content-Length", str(len(resp_body)))
         self.end_headers()
@@ -257,6 +342,8 @@ class SPAHandler(SimpleHTTPRequestHandler):
             return False
         is_document = not urllib.parse.urlsplit(self.path).path.startswith("/assets/")
         if is_document and not self._token_is_valid(authorization):
+            if from_cookie:
+                _SESSIONS.drop(self._session_id())
             self._to_login(clear=from_cookie)
             return False
         return True
