@@ -763,3 +763,71 @@ Core API가 401·403·5xx를 돌려주거나 연결이 끊기면, 대시보드(�
     - mutation 확인: `stale` 가드를 빼면 순서 테스트 2건, 호스트 가드를 빼면 전환 테스트 1건이 실패한다.
     - 전체 vitest 68 files, 430 passed / 1 skipped. tsc, build 통과.
     - 실화면(격리 Vite + 가짜 호스트 2개): HostPicker로 A→B 전환 시 B 503 오류만 표시되고 alpha 흔적이 없다. B 복구 후 재시도하면 beta가 표시된다.
+
+## 42. 대시보드 — 라우트 ErrorBoundary: 렌더 오류·청크 로딩 실패가 앱 전체를 비우지 않게 (Issue #1 A-1, 대시보드 부분)
+
+하위 화면 하나가 렌더 중 throw하거나 lazy 라우트의 청크를 못 받으면, 오류가 루트까지 올라가 React가 `#root`를 비웠다. 데스크톱 셸의 `RECOVER_IF_BLANK_JS`는 `#root`가 비면 `location.reload()`를 하므로, 번들이 깨진 상태에서는 창 포커스마다 reload → crash → blank가 반복될 수 있었다.
+
+- **수정** (`dashboard/src/components/RouteErrorBoundary.tsx` 신규, `App.tsx`):
+  - **라우트 단위 boundary** (`RouteErrorBoundary`): 13개 라우트를 `RouteSlot`(boundary + 기존 Suspense)으로 감쌌다. Layout의 Outlet 안이라 사이드바·헤더는 남는다. boundary가 Suspense 바깥이어서 lazy reject도 잡힌다. 화면 이동(`location.key` 변경) 시 오류 상태를 해제한다.
+  - **최상위 boundary** (`AppErrorBoundary`): Layout 자체가 터져도 빈 화면 대신 복구 UI를 그린다. 그래서 `#root`가 비지 않고, 셸의 blank 복구 reload도 발동하지 않는다.
+  - **복구 UI**: 기존 `EmptyState` + `Button` + `EmptyIcon.AlertTriangle`, `role="alert"`. 렌더 오류에는 "이 화면을 표시하지 못했습니다" + "다시 시도"를, 청크 실패에는 "화면 파일을 불러오지 못했습니다" + "다시 시도" + "앱 다시 불러오기"를 보여 준다.
+  - **`lazyRoute`**: `React.lazy`는 reject된 import를 영구 캐시한다. 그래서 사용자 재시도(버튼·화면 이동) 뒤 첫 렌더에서만 새 lazy를 만든다.
+- **무한 반복 방지**: 자동 재시도·자동 새로고침은 없다. 재시도는 사용자 조작 1회당 import 1회다. 실패 즉시 lazy를 갈아 끼우던 1차 구현은 React가 오류 직후 하는 자동 재렌더 때문에 클릭 0회에 import가 5회 나갔다(테스트로 잡음). 이후 재시도 회차(`retryEpoch`)로 막았다. `window.location.reload()`는 청크 실패 화면에서 사용자가 "앱 다시 불러오기"를 누를 때만 부른다.
+- **실측 — Chrome은 실패한 동적 import를 다시 요청하지 않는다**: Chrome 154에서 청크를 404로 막았다. 첫 시도 후 "다시 시도"를 2회 눌러도 요청은 1회뿐이었고, 청크를 되살린 뒤에도 "다시 시도"로는 복구되지 않았다. 사용자가 누른 "앱 다시 불러오기"로는 복구됐다. 그래서 청크 실패 화면에서는 "앱 다시 불러오기"를 기본 버튼으로 둔다. Tauri 웹뷰(macOS WKWebView)의 동작은 확인하지 못했다.
+- **검증 (RED → GREEN)**:
+  - 신규 `tests/App.route-error-boundary.test.tsx` 10건: 실제 `App`(라우트 표 + Layout)을 렌더하고 라우트 모듈만 mock했다. master의 `App.tsx`에서는 9건이 실패했다. 나머지 1건은 정상 라우팅 회귀 가드라 원래 통과한다.
+  - 전체 vitest 69 files, 440 passed / 1 skipped. `tsc --noEmit` 통과. `vite build` 성공.
+  - 실화면: 빌드 산출물을 scratch 정적 서버에 띄우고 GardenPage 청크만 404로 막아 확인했다. 운영 API·Vite는 쓰지 않았다.
+    - 청크 실패 → 복구 UI, 사이드바·헤더 유지
+    - 5초 대기 동안 추가 요청·자동 새로고침 없음
+    - 홈으로 이동하면 오류 해제
+    - "앱 다시 불러오기" → 정원 정상 표시
+- **범위 밖·남는 것**:
+  - Issue #1 A-1의 셸 쪽 수용 기준(`RECOVER_IF_BLANK_JS` 재시도 카운터·쿨다운)은 Rust/Tauri 셸 정책 변경이라 이번에 하지 않았다.
+  - A-2~A-5도 그대로다. 그래서 PR은 Issue #1을 자동 종료하지 않는다.
+  - 렌더 오류의 실화면 확인, Tauri 창 안 동작은 UNKNOWN이다(단위 테스트로만 확인).
+
+### PR #33 Tauri 검증 보완 — 데스크톱에서는 "앱 다시 불러오기" 대신 앱 재실행 안내
+
+- **Tauri 실측** (실제 Raven 데스크톱 셸, macOS WKWebView): 격리 identifier와 가짜 Core를 쓰고, 프런트엔드는 scratch 빌드로 띄웠다. 운영 API·MCP·Vite와 실제 vault는 쓰지 않았다.
+  - **PASS**:
+    - 정상 라우트
+    - 실제 렌더 오류 → 복구 UI, 사이드바·헤더 유지
+    - 다른 화면으로 이동하거나 "다시 시도"로 복구
+    - 청크 실패 → 복구 UI
+    - 자동 새로고침 없음
+  - **셸과의 상호작용**: 오류 화면에서 창 포커스를 옮겨도 셸은 새로고침하지 않았다. 대조로 `#root`를 비우고 포커스를 옮기면 셸이 새로고침했다. 새로고침된 페이지는 오류 화면에 머물렀고 추가 새로고침은 없었다.
+  - **FAIL**: 청크를 되살린 뒤 "앱 다시 불러오기"를 눌러도 같은 화면이 계속 실패했다.
+    - 같은 URL을 `fetch`하면 200이 왔다.
+    - 같은 URL로 `import()`하면 여전히 실패했다.
+    - `?x=1`을 붙이면 성공했다.
+    - 즉 WKWebView는 실패한 모듈 URL을 같은 프로세스 안에서 `location.reload()` 뒤에도 기억한다. WebKit 오류 문구에 URL이 없어 앱 코드로 캐시를 피할 수도 없다.
+- **수정** (`RouteErrorBoundary.tsx`): 데스크톱(`__TAURI_INTERNALS__`)의 청크 실패 화면에서는 "앱 다시 불러오기" 버튼을 없애고 "앱을 종료한 뒤 다시 실행하세요"라고 안내한다.
+  - 브라우저 동작과 렌더 오류 화면은 그대로다.
+  - 앱 relaunch(`tauri-plugin-process`)는 Python Core까지 재시작하므로 이번 UI 수정 범위에서 제외했다.
+- **검증**:
+  - 테스트 2건을 추가했다(데스크톱 청크 실패, 데스크톱 렌더 오류). 브라우저 청크 실패 테스트에는 재실행 안내가 없는지 확인하는 단언을 더했다. 수정 전에는 1건이 RED였다.
+  - 전체 vitest 69 files, 442 passed / 1 skipped. `tsc --noEmit` 통과. `vite build` 성공(scratch outDir).
+  - Tauri 재검증:
+    - 청크 실패 화면에 재실행 안내와 "다시 시도" 버튼만 있다.
+    - 사이드바·헤더가 유지된다.
+    - 다시 시도하고 15초를 기다려도 자동 새로고침이 없다.
+    - 렌더 오류 화면은 기존 안내 그대로이고, 홈으로 이동하면 해제된다.
+- **남는 것**:
+  - 앱 재실행(새 프로세스)으로 복구되는지는 UNKNOWN이다.
+  - 앱에 내장된 정식 번들(`tauri build`)로는 검증하지 않았다.
+  - 셸 `RECOVER_IF_BLANK_JS` 재시도 상한(Issue #1 A-1의 셸 부분)은 그대로 남아 있다.
+
+### PR #33 마무리 — 데스크톱 청크 실패 화면에서 "다시 시도"도 제거
+
+- **이유**: Tauri 재검증에서 데스크톱(WKWebView) 청크 실패 후 "다시 시도"를 누르면 같은 모듈 재요청조차 나가지 않았다(차단 서버 요청 1회 그대로). 버튼을 남기면 복구할 수 있다는 잘못된 기대를 준다.
+- **수정** (`RouteErrorBoundary.tsx`): 데스크톱 청크 실패 화면은 버튼 없이 앱 재실행만 안내한다. 렌더 오류의 "다시 시도"와 브라우저 청크 실패의 "다시 시도"·"앱 다시 불러오기"는 그대로다. 화면 이동으로 다른 메뉴를 쓰는 것은 계속 된다.
+- **검증**:
+  - 데스크톱 청크 실패 테스트에 "다시 시도 없음" 단언을 추가했다(수정 전 RED).
+  - 전체 vitest 69 files, 442 passed / 1 skipped. `tsc --noEmit` 통과. `vite build` 성공(scratch outDir).
+  - Tauri 재검증:
+    - 검색 청크 실패 → 재실행 안내만, 버튼 0개
+    - 사이드바·헤더 유지
+    - 15초 동안 자동 새로고침 없음
+    - 렌더 오류는 "다시 시도" 유지, 홈 이동 시 해제
