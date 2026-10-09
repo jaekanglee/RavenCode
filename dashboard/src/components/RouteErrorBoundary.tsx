@@ -11,6 +11,8 @@
 //  - lazyRoute: React.lazy는 한 번 reject된 import를 영구 캐시하므로, 사용자 재시도 뒤에는
 //    새 lazy로 import를 다시 부른다. 단 브라우저가 실패한 모듈 URL을 캐시하면(Chrome) 재요청이
 //    나가지 않으므로, 청크 실패에는 사용자가 누르는 "앱 다시 불러오기"를 함께 둔다.
+//    데스크톱(Tauri WKWebView)은 실패한 모듈 URL을 새로고침 뒤에도 같은 프로세스 안에서 기억하므로
+//    (PR #33 실측: fetch 200, 같은 URL import 실패, ?x=1 import 성공) 새로고침 버튼 대신 앱 재실행을 안내한다.
 import { Component, lazy, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { EmptyState } from "./ui/EmptyState";
@@ -69,11 +71,18 @@ class ErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   }
 }
 
-function describe(error: unknown): { title: string; description: string } {
+/** 데스크톱 셸(Tauri) 안인가 — 렌더 시점에 판단한다. */
+function isDesktopShell(): boolean {
+  return typeof window !== "undefined" && !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+}
+
+function describe(error: unknown, desktop: boolean): { title: string; description: string } {
   if (isChunkLoadError(error)) {
     return {
       title: "화면 파일을 불러오지 못했습니다",
-      description: "네트워크가 불안정하거나 앱이 방금 업데이트되었을 수 있습니다. 앱을 다시 불러오거나 다른 화면으로 이동하세요.",
+      description: desktop
+        ? "앱 파일을 읽는 중 문제가 생겼습니다. 다른 화면은 계속 사용할 수 있습니다. 이 화면이 계속 열리지 않으면 앱을 종료한 뒤 다시 실행하세요."
+        : "네트워크가 불안정하거나 앱이 방금 업데이트되었을 수 있습니다. 앱을 다시 불러오거나 다른 화면으로 이동하세요.",
     };
   }
   return {
@@ -84,19 +93,21 @@ function describe(error: unknown): { title: string; description: string } {
 
 function ErrorFallback({ error, retry }: { error: unknown; retry: () => void }) {
   const chunk = isChunkLoadError(error);
+  const desktop = isDesktopShell();
   return (
     <div role="alert">
       <EmptyState
         icon={<EmptyIcon.AlertTriangle />}
-        {...describe(error)}
+        {...describe(error, desktop)}
         action={
           <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
             <Button variant={chunk ? "secondary" : "primary"} onClick={retry}>
               다시 시도
             </Button>
             {/* Chrome은 실패한 동적 import를 같은 URL로 다시 요청하지 않는다(실측, Chrome 154) —
-                청크 실패의 실제 복구는 새로고침. 자동이 아니라 사용자가 누를 때만. */}
-            {chunk && (
+                청크 실패의 실제 복구는 새로고침. 자동이 아니라 사용자가 누를 때만.
+                데스크톱은 새로고침으로도 복구되지 않아(WKWebView 실측) 버튼을 두지 않는다. */}
+            {chunk && !desktop && (
               <Button variant="primary" onClick={() => window.location.reload()}>
                 앱 다시 불러오기
               </Button>

@@ -134,8 +134,9 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
     await renderAppAt("/garden");
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("화면 파일을 불러오지 못했습니다");
-    // Chrome은 실패한 모듈 URL을 다시 요청하지 않으므로(실측) 사용자가 누르는 새로고침을 함께 둔다
+    // Chrome은 실패한 모듈 URL을 다시 요청하지 않으므로(실측) 브라우저에서는 사용자가 누르는 새로고침을 함께 둔다
     expect(screen.getByRole("button", { name: "앱 다시 불러오기" })).toBeTruthy();
+    expect(alert.textContent).not.toContain("다시 실행");
     await expectShellAlive();
   });
 
@@ -173,6 +174,37 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
       expect(screen.getByRole("alert")).toBeTruthy();
     } finally {
       Object.defineProperty(window, "location", { configurable: true, value: realLocation });
+    }
+  });
+
+  it("데스크톱(Tauri) 청크 실패: 복구되지 않는 새로고침 버튼 대신 앱 재실행을 안내한다", async () => {
+    // WKWebView는 실패한 모듈 URL을 location.reload() 뒤에도 같은 프로세스 안에서 기억한다
+    // (PR #33 Tauri 실측) — 새로고침 버튼은 눌러도 같은 오류로 돌아온다.
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      ctl.garden = "import";
+      await renderAppAt("/garden");
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("화면 파일을 불러오지 못했습니다");
+      expect(alert.textContent).toContain("앱을 종료한 뒤 다시 실행하세요");
+      expect(screen.queryByRole("button", { name: "앱 다시 불러오기" })).toBeNull();
+      await expectShellAlive();
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("데스크톱(Tauri) 렌더 오류: 기존 안내 그대로 (재실행 안내는 청크 실패에만)", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      ctl.garden = "render";
+      await renderAppAt("/garden");
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("이 화면을 표시하지 못했습니다");
+      expect(alert.textContent).not.toContain("다시 실행");
+      expect(screen.getByRole("button", { name: "다시 시도" })).toBeTruthy();
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
     }
   });
 
