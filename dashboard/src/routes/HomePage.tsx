@@ -176,6 +176,8 @@ export function HomePage() {
   const [loading, setLoading] = useState(true);
   // Issue #30: 목록 조회 실패는 "vault 0개"와 다르다 — 첫 vault 만들기 CTA를 띄우지 않는다.
   const [loadFailed, setLoadFailed] = useState(false);
+  // 로드 effect는 원래 mount 1회뿐이라 실패 후 같은 인스턴스에서 재조회할 길이 없었다.
+  const [reloadKey, setReloadKey] = useState(0);
   const [activeVault, setActiveVault] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [pages, setPages] = useState<HomePageSummary[]>([]);
@@ -209,6 +211,7 @@ export function HomePage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadFailed(false);
     (async () => {
       let metas: Awaited<ReturnType<typeof fetchVaults>>;
       try {
@@ -253,7 +256,7 @@ export function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
 
   const sorted = useMemo(
     () =>
@@ -475,7 +478,12 @@ export function HomePage() {
         {loading ? (
           <p className="text-muted">불러오는 중…</p>
         ) : loadFailed ? (
-          <p className="text-muted">보관소 목록을 불러오지 못했습니다.</p>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <p className="text-muted">보관소 목록을 불러오지 못했습니다.</p>
+            <Button variant="secondary" size="sm" onClick={() => setReloadKey((k) => k + 1)}>
+              다시 시도
+            </Button>
+          </div>
         ) : visibleVaults.length === 0 ? (
           <div className="card-flat" style={{ padding: 24, borderRadius: 8 }}>
             <p className="text-muted" style={{ marginBottom: 12 }}>

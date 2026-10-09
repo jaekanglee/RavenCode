@@ -6,9 +6,9 @@ import { UpdateChecker } from "./UpdateChecker";
 import { EmptyState } from "./ui/EmptyState";
 import { Button } from "./ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
-import { ApiHttpError, fetchRawList, fetchVaults, fetchTree, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
+import { ApiHttpError, fetchRawList, fetchVaults, fetchTree, getActiveHostUrl, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
 import { useIsCompactNav, useIsDrawerMobile } from "../lib/useMediaQuery";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TreeNode, VaultMeta } from "../types";
 
 // v0.7.97.3+: 헤더에서 sub-nav 레일로 분리. 전역 섹션 nav (앱 내 페이지 전환).
@@ -112,6 +112,8 @@ export function Layout() {
   const [vaults, setVaults] = useState<VaultMeta[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [vaultsError, setVaultsError] = useState<VaultsFailure | null>(null);
+  // 지금 표시 중인 vaults를 받아 온 호스트. 실패 시 이전 목록 유지는 같은 호스트일 때만.
+  const vaultsHostRef = useRef<string | null>(null);
   const [trees, setTrees] = useState<Record<string, TreeNode | null>>({});
   const [rawItems, setRawItems] = useState<Record<string, RawItem[]>>({});
   const [refreshKey, setRefreshKey] = useState(0);
@@ -152,10 +154,29 @@ export function Layout() {
   }, [theme]);
 
   useEffect(() => {
-    // 실패 시 이전 목록은 그대로 둔다 — 실패를 "0개"로 덮어쓰면 /vault/new 오인 이동이 된다.
+    // 늦게 도착한 이전 요청(다른 호스트일 수 있음)이 최신 결과를 덮지 않게 한다.
+    let stale = false;
+    const host = getActiveHostUrl();
     fetchVaults()
-      .then((vs) => { setVaults(vs); setVaultsError(null); setLoaded(true); })
-      .catch((err) => { setVaultsError(classifyVaultsFailure(err)); setLoaded(true); });
+      .then((vs) => {
+        if (stale) return;
+        vaultsHostRef.current = host;
+        setVaults(vs);
+        setVaultsError(null);
+        setLoaded(true);
+      })
+      .catch((err) => {
+        if (stale) return;
+        // 같은 호스트의 일시 장애면 이전 목록을 유지한다 — 실패를 "0개"로 덮어쓰면
+        // /vault/new 오인 이동이 된다. 다른 호스트의 목록은 이 호스트 것처럼 남기지 않는다.
+        if (vaultsHostRef.current !== host) {
+          vaultsHostRef.current = null;
+          setVaults([]);
+        }
+        setVaultsError(classifyVaultsFailure(err));
+        setLoaded(true);
+      });
+    return () => { stale = true; };
   }, [refreshKey]);
 
   useEffect(() => {
@@ -241,6 +262,10 @@ export function Layout() {
   }
 
   const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
+  // vault 이름은 localStorage에서 오므로 다른 호스트의 것일 수 있다. 지금 표시 중인 목록에
+  // 있을 때만 사이드바·팔레트로 내린다 — B 실패 화면에 A의 vault를 "현재 보관소"로 보이거나
+  // 팔레트가 그 이름으로 B에 요청하지 않게.
+  const listedVault = vaults.some((v) => v.name === vault) ? vault : "";
   const navPlan = planSectionNav(compactNav ? 390 : 1024);
   const moreActive = isMoreNavActive(location.pathname);
 
@@ -250,7 +275,7 @@ export function Layout() {
         vaults={vaults}
         trees={trees}
         rawItems={rawItems}
-        activeVault={vault}
+        activeVault={listedVault}
         activeSlug={activeSlug}
         onSelectVault={(name) => { setVault(name); setActiveVault(name); setRefreshKey((k) => k + 1); }}
         onRefresh={() => setRefreshKey((k) => k + 1)}
@@ -491,7 +516,7 @@ export function Layout() {
         </div>
       </main>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} vault={vault} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} vault={listedVault} />
       <UpdateChecker />
     </div>
   );
