@@ -663,4 +663,27 @@ PR #21은 tailnet 출처를 라우트 검사로 판정해 토큰 없이 받았�
   - Docker 프록시의 401은 로그인 화면으로 보낸다(`spa_server`에 `Session realm` 표기 추가).
   - 호스트 추가 화면에 토큰 칸을 추가했다.
 - **Breaking change**: tailnet에서 토큰 없이 쓰던 대시보드 멀티호스트, 원격 브라우저, 스크립트는 401을 받는다. 마이그레이션 절차는 README "Breaking change (Issue #24)"에 있다.
-- **남는 위험 (해결 주장 ❌)**: loopback 프로세스 신뢰와 XFF 없는 비공식 로컬 프록시, MCP의 tailnet 라우트 판정, 평문 HTTP의 토큰 노출, sessionStorage 토큰의 XSS 노출.
+- **범위**: **Core API 한정**이다. MCP 인증 정책은 바꾸지 않았다(2026-10-09 결정, 후속 #26).
+- **보안 심층 리뷰 반영 (PR #25 리뷰)**: 토큰 유출 결함은 발견되지 않았다. 아래 결함은 모두 RED→GREEN으로 고쳤다.
+  - `fetch(Request)`가 토큰 없이 나가던 것. 코드베이스에는 사용처가 없다.
+  - 대소문자나 기본 포트가 다른 호스트 키가 토큰을 못 받던 것. origin으로 정규화했다.
+  - 자동으로 붙인 토큰이 실린 요청이 redirect를 따라가던 것. `redirect: "error"`로 막았다.
+  - sessionStorage 저장 실패를 성공으로 표시하던 것.
+  - 거절된 저장 토큰이 남던 것. 스킴도 대소문자 구분 없이 판정한다.
+  - Docker에서 폐기된 세션의 Bearer 401이 토큰 입력창을 띄우던 것. 세션 인증과 Bearer 인증이 섞였다. 이제 `spa_server`가 자기 realm으로 답한다.
+  - 실증 (Chrome 154, 실제 서버 2개):
+    - 브라우저 기본: cross-origin 302/307/308에서 Authorization이 제거된다. 다른 origin을 거친 체인에서는 원래 origin으로 돌아와도 복구되지 않는다.
+    - 자동 토큰 요청은 첫 hop에서 멈춘다.
+    - HTTP↔HTTPS 전환과 WKWebView는 UNKNOWN.
+- **원격 API 직접 서빙 대시보드** (`http://<tailnet-IP>:8765/`)가 HTML부터 401로 막히는 동작은 의도된 breaking change로 승인했다(2026-10-09). 인증 없는 HTML 예외 경로는 두지 않는다. 대체 경로는 데스크톱 멀티호스트, Docker 로그인 화면, vite 개발 대시보드다.
+- **남는 위험 (해결 주장 ❌)**:
+  - **MCP tailnet 무인증 — 실제 소켓으로 확인**. 데스크톱 원격 모드(`RAVEN_ALLOW_REMOTE=1`, MCP admin)에서 이 기기의 tailnet IP로 보낸 요청 결과:
+    - Core API DELETE → 401
+    - MCP `wiki_delete` → 토큰 없이 성공(임시 vault 페이지 archive)
+    - 즉 원격 모드에서는 Core API 토큰을 MCP로 우회할 수 있다.
+    - standalone `raven.mcp.cli`(team, Docker)는 게이트 자체가 없다(코드 확인).
+    - 후속 #26. 임시 완화책은 `RAVEN_DESKTOP_MCP=0`(MCP 끄기) 또는 `RAVEN_DESKTOP_MCP_MODE=read`(읽기는 열림).
+  - loopback 프로세스 신뢰와 XFF 없는 비공식 로컬 프록시
+  - 평문 HTTP의 토큰 노출
+  - sessionStorage 토큰의 XSS 노출
+  - 실제 원격 tailnet 기기 미검증(UNKNOWN)
