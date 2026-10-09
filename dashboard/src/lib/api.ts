@@ -317,10 +317,21 @@ export interface VaultInfo {
   default: boolean;
 }
 
+/** non-2xx 응답. 호출자가 401/403/5xx를 구분할 수 있게 status를 싣는다. */
+export class ApiHttpError extends Error {
+  constructor(readonly status: number, path: string) {
+    super(`HTTP ${status} ${path}`);
+    this.name = "ApiHttpError";
+  }
+}
+
+// Issue #30: 실패를 []로 바꾸면 "vault 0개"와 구분되지 않아 Layout이 /vault/new로
+// 보냈고, 그 []가 성공 값으로 30초 캐시됐다. 실패는 reject — cachedFetch는 reject를
+// 캐시하지 않으므로 다음 호출(재시도)은 실제 요청이 된다.
 export async function fetchVaults(): Promise<VaultInfo[]> {
   return cachedFetch("vaults", 30_000, async () => {
     const r = await apiFetch("/api/vaults");
-    if (!r.ok) return [];
+    if (!r.ok) throw new ApiHttpError(r.status, "/api/vaults");
     const d = await r.json();
     return d.vaults || [];
   });

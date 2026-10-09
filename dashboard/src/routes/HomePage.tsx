@@ -174,6 +174,8 @@ export function pickUnfinishedPages<T extends HomePageSummary>(pages: T[], limit
 export function HomePage() {
   const [vaults, setVaults] = useState<VaultWithStats[]>([]);
   const [loading, setLoading] = useState(true);
+  // Issue #30: 목록 조회 실패는 "vault 0개"와 다르다 — 첫 vault 만들기 CTA를 띄우지 않는다.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [activeVault, setActiveVault] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [pages, setPages] = useState<HomePageSummary[]>([]);
@@ -208,7 +210,16 @@ export function HomePage() {
     let cancelled = false;
     setLoading(true);
     (async () => {
-      const metas = await fetchVaults();
+      let metas: Awaited<ReturnType<typeof fetchVaults>>;
+      try {
+        metas = await fetchVaults();
+      } catch {
+        if (!cancelled) {
+          setLoadFailed(true);
+          setLoading(false);
+        }
+        return;
+      }
       if (cancelled) return;
       // active vault: localStorage(Sidebar/VaultPicker 동기화) → default → first
       const stored = getActiveVault();
@@ -304,6 +315,8 @@ export function HomePage() {
           subtitle={
             loading
               ? "보감소를 불러오는 중…"
+              : loadFailed
+              ? "보관소 목록을 불러오지 못했습니다."
               : vaults.length === 0
               ? "아직 등록된 보감소가 없습니다. 새 vault를 만들어 시작하세요."
               : activeVault
@@ -461,6 +474,8 @@ export function HomePage() {
 
         {loading ? (
           <p className="text-muted">불러오는 중…</p>
+        ) : loadFailed ? (
+          <p className="text-muted">보관소 목록을 불러오지 못했습니다.</p>
         ) : visibleVaults.length === 0 ? (
           <div className="card-flat" style={{ padding: 24, borderRadius: 8 }}>
             <p className="text-muted" style={{ marginBottom: 12 }}>
