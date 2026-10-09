@@ -317,10 +317,24 @@ export interface VaultInfo {
   default: boolean;
 }
 
+/** non-2xx 응답. 호출자가 401/403/5xx를 구분할 수 있게 status를 싣는다. */
+export class ApiHttpError extends Error {
+  constructor(readonly status: number, path: string) {
+    super(`HTTP ${status} ${path}`);
+    this.name = "ApiHttpError";
+  }
+}
+
+// Issue #30: 실패를 []로 바꾸면 "vault 0개"와 구분되지 않아 Layout이 /vault/new로
+// 보냈고, 그 []가 성공 값으로 30초 캐시됐다. 실패는 reject — cachedFetch는 reject를
+// 캐시하지 않으므로 다음 호출(재시도)은 실제 요청이 된다.
+// 캐시 키는 호스트별 — api-base는 매 요청 localStorage의 활성 호스트를 읽으므로, 다른
+// 탭에서 호스트가 바뀌면 호스트 무관 키는 A의 목록을 B의 응답으로 돌려준다.
+// invalidateCache("vaults")는 prefix 매칭이라 그대로 동작한다.
 export async function fetchVaults(): Promise<VaultInfo[]> {
-  return cachedFetch("vaults", 30_000, async () => {
+  return cachedFetch(`vaults@${getActiveHostUrl()}`, 30_000, async () => {
     const r = await apiFetch("/api/vaults");
-    if (!r.ok) return [];
+    if (!r.ok) throw new ApiHttpError(r.status, "/api/vaults");
     const d = await r.json();
     return d.vaults || [];
   });

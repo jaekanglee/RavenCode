@@ -720,3 +720,46 @@ PR #21은 tailnet 출처를 라우트 검사로 판정해 토큰 없이 받았�
   - 실제 원격 tailnet 기기 E2E는 UNKNOWN이다. 자기 Tailscale IPv6 자기 접속은 macOS에서 불가했다.
   - loopback 무인증 신뢰는 그대로다. MCP는 DNS-rebinding 보호가 꺼져 있어, rebinding으로 loopback에 닿는 브라우저 페이지도 이 신뢰에 포함될 수 있다(추론, 실증 안 함).
   - 평문 HTTP의 토큰 노출.
+
+## 41. 대시보드 — Core 실패를 "vault 0개"로 오인하던 /vault/new 이동 제거 (Issue #30)
+
+Core API가 401·403·5xx를 돌려주거나 연결이 끊기면, 대시보드(데스크톱 웹뷰 포함)가 "등록된 vault 0개"로 판단해 **새 vault 추가 화면으로 강제 이동**했다. 토큰 입력창을 닫으면 사용자는 vault를 새로 만들라는 폼 앞에 남았다.
+
+- **원인**:
+  - `fetchVaults`가 `!r.ok`를 `[]`로 바꿨다.
+  - 그 `[]`가 성공 값으로 `cachedFetch("vaults", 30s)`에 들어가, Core가 복구돼도 30초 동안 잘못된 상태가 남았다.
+  - `Layout`의 `.catch(() => setVaults([]))`가 네트워크 오류도 빈 목록으로 만들었다. `loaded && vaults.length === 0` 하나로 이동을 결정해서 실패와 빈 목록을 구분할 수 없었다.
+- **수정**:
+  - `fetchVaults`는 HTTP 실패 시 `ApiHttpError(status)`로 reject한다. `cachedFetch`는 원래 reject를 캐시하지 않으므로, 재시도는 실제 재요청이 된다.
+  - `Layout`은 실패를 `auth`/`forbidden`/`server`/`network`로 분류한다(`classifyVaultsFailure`). 기존 `EmptyState` + `Button`으로 상태별 메시지와 "다시 시도"를 보여 준다(`role="alert"`).
+  - `/vault/new` 이동은 **성공한 빈 목록**에서만 한다. 실패 시 이전 목록을 덮어쓰지 않는다. 목록을 한 번도 받지 못했다면 하위 페이지를 띄우지 않는다.
+  - 401은 기존 흐름(`api-base` 래퍼 → `AuthTokenDialog`)을 그대로 쓴다. 새 모달은 없다. "다시 시도"가 재요청하면 래퍼가 같은 입력창을 다시 연다.
+  - 두 번째 호출부인 `HomePage`도 reject를 잡는다. 이전에는 실패 시 "첫 vault 만들기" CTA가 떴고, 이제 reject를 잡지 않으면 "불러오는 중…"에 멈춘다. 이제 실패 문구를 표시한다.
+- **검증 (RED → GREEN)**:
+  - 신규 `Layout.vaults-failure.test.tsx` 12건: 실제 `api.ts`·`api-base.ts`를 거치고 `window.fetch`만 stub했다. 수정 전에는 8건 실패했다.
+  - 신규 `HomePage.vaults-failure.test.tsx` 2건: 수정 전 1건 실패.
+  - 전체 vitest 67 files, 423 passed / 1 skipped. `tsc --noEmit` 통과.
+  - 실화면: 격리된 Vite(5199)와 가짜 Core stub으로 확인했다. 운영 API·vault는 쓰지 않았다.
+    - 503 → 오류 + 재시도 → 정상 복귀
+    - 401 → 기존 입력창 1개, 닫으면 안내만 남고, 재시도하면 입력창이 다시 열린다
+    - 403 → 권한 오류
+    - 200 + 빈 목록 → `/vault/new`
+- **범위 밖·남는 것**:
+  - 실패 상태에서도 사이드바는 "보관소 없음"과 Stats 위젯 "—"를 표시한다(#3 정보 구조 작업에서 처리).
+  - 데스크톱 앱(Tauri) 창 안에서의 실화면 확인은 UNKNOWN이다.
+  - 실제 네트워크 오류(연결 거부)는 단위 테스트로만 확인했다. Vite 프록시 경유 시에는 프록시가 5xx로 바꾼다.
+- **PR #31 리뷰 보완**:
+  - **HomePage 실패 복구**: 로드 effect가 mount 1회(`[]`)뿐이었다. 실패하면 같은 인스턴스에서 재조회할 경로가 없었다(Layout 재시도는 목록이 있으면 Outlet을 remount하지 않는다). 오류가 "남는" 버그는 아니었지만 복구할 길도 없었다. 실패 상태에 "다시 시도"를 추가했다(`reloadKey`, 시작 시 `loadFailed` 초기화). 실패 → 재시도 → 성공 회귀 테스트를 추가했다.
+  - **호스트 전환과 이전 목록**:
+    - 같은 탭의 HostPicker 전환은 전체 페이지 이동이라 state가 남지 않는다(실화면 확인).
+    - 그러나 `api-base`는 매 요청마다 localStorage의 활성 호스트를 읽는다. 다른 탭에서 호스트를 바꾸면 이 탭의 다음 요청은 새 호스트로 간다. 이 경로에서 세 가지 결함이 재현됐다(테스트 RED 6건).
+      1. `fetchVaults` 캐시 키(`"vaults"`)가 호스트와 무관해, A의 목록이 B의 응답으로 반환됐다. → `vaults@<host>`로 바꿨다. `invalidateCache("vaults")`는 prefix 매칭이라 그대로 동작한다.
+      2. B 실패 시 A의 목록이 유지됐다. → 이전 목록 유지는 그 목록을 받아 온 호스트와 같을 때만 한다(`vaultsHostRef`). 다른 호스트면 비우고, 하위 페이지를 띄우지 않는다.
+      3. 늦게 도착한 이전 요청(성공·실패 모두)이 최신 결과를 덮었다. → effect cleanup의 `stale` 가드를 추가했다.
+    - 실화면에서 하나 더 발견했다: B 실패 화면에서 사이드바 하단 위젯이 localStorage에 남은 A의 vault를 "alpha / 현재 보관소"로 보여 줬다(팔레트도 그 이름으로 B에 요청할 수 있었다). → 현재 목록에 있는 vault만 사이드바·팔레트로 내린다(`listedVault`).
+    - 같은 호스트의 일시 장애에서 이전 목록을 유지하는 정책은 보존했고 테스트로 고정했다.
+  - **검증**:
+    - 신규 `Layout.vaults-host-switch.test.tsx` 6건, HomePage +1건.
+    - mutation 확인: `stale` 가드를 빼면 순서 테스트 2건, 호스트 가드를 빼면 전환 테스트 1건이 실패한다.
+    - 전체 vitest 68 files, 430 passed / 1 skipped. tsc, build 통과.
+    - 실화면(격리 Vite + 가짜 호스트 2개): HostPicker로 A→B 전환 시 B 503 오류만 표시되고 alpha 흔적이 없다. B 복구 후 재시도하면 beta가 표시된다.

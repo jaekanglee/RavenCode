@@ -3,9 +3,12 @@ import clsx from "clsx";
 import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "./CommandPalette";
 import { UpdateChecker } from "./UpdateChecker";
-import { fetchRawList, fetchVaults, fetchTree, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
+import { EmptyState } from "./ui/EmptyState";
+import { Button } from "./ui/Button";
+import { EmptyIcon } from "../lib/emptyIcons";
+import { ApiHttpError, fetchRawList, fetchVaults, fetchTree, getActiveHostUrl, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
 import { useIsCompactNav, useIsDrawerMobile } from "../lib/useMediaQuery";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TreeNode, VaultMeta } from "../types";
 
 // v0.7.97.3+: 헤더에서 sub-nav 레일로 분리. 전역 섹션 nav (앱 내 페이지 전환).
@@ -62,10 +65,55 @@ export function chooseLayoutVault(vaults: VaultMeta[], current: string, stored: 
   return vaults.find((v) => v.default)?.name || vaults[0]?.name || "";
 }
 
+// Issue #30: vault 목록 조회 실패의 종류. "vault 0개"(성공한 빈 목록)와는 별개 상태다.
+export type VaultsFailure =
+  | { kind: "auth" }
+  | { kind: "forbidden" }
+  | { kind: "server"; status: number }
+  | { kind: "network" };
+
+export function classifyVaultsFailure(err: unknown): VaultsFailure {
+  if (err instanceof ApiHttpError) {
+    if (err.status === 401) return { kind: "auth" };
+    if (err.status === 403) return { kind: "forbidden" };
+    return { kind: "server", status: err.status };
+  }
+  return { kind: "network" };
+}
+
+function describeVaultsFailure(f: VaultsFailure): { title: string; description: string } {
+  switch (f.kind) {
+    case "auth":
+      // 토큰 입력창은 api-base 래퍼가 띄운다(AuthTokenDialog). 여기서 모달을 또 열지 않는다.
+      return {
+        title: "인증이 필요합니다",
+        description: "이 호스트는 접근 토큰을 요구합니다. 다시 시도하면 토큰 입력창이 열립니다.",
+      };
+    case "forbidden":
+      return {
+        title: "보관소 목록을 볼 권한이 없습니다",
+        description: "Core API가 요청을 거부했습니다 (HTTP 403). 호스트 설정과 토큰을 확인하세요.",
+      };
+    case "server":
+      return {
+        title: `${f.status >= 500 ? "Core 서버 오류" : "Core 응답 오류"} (HTTP ${f.status})`,
+        description: "Core가 요청을 처리하지 못했습니다. 재시작 중일 수 있으니 잠시 후 다시 시도하세요.",
+      };
+    case "network":
+      return {
+        title: "Core에 연결할 수 없습니다",
+        description: "Core가 실행 중인지, 선택한 호스트 주소가 맞는지 확인하세요.",
+      };
+  }
+}
+
 export function Layout() {
   const [vault, setVault] = useState<string>(() => getActiveVault() || "");
   const [vaults, setVaults] = useState<VaultMeta[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [vaultsError, setVaultsError] = useState<VaultsFailure | null>(null);
+  // 지금 표시 중인 vaults를 받아 온 호스트. 실패 시 이전 목록 유지는 같은 호스트일 때만.
+  const vaultsHostRef = useRef<string | null>(null);
   const [trees, setTrees] = useState<Record<string, TreeNode | null>>({});
   const [rawItems, setRawItems] = useState<Record<string, RawItem[]>>({});
   const [refreshKey, setRefreshKey] = useState(0);
@@ -106,7 +154,29 @@ export function Layout() {
   }, [theme]);
 
   useEffect(() => {
-    fetchVaults().then((vs) => { setVaults(vs); setLoaded(true); }).catch(() => { setVaults([]); setLoaded(true); });
+    // 늦게 도착한 이전 요청(다른 호스트일 수 있음)이 최신 결과를 덮지 않게 한다.
+    let stale = false;
+    const host = getActiveHostUrl();
+    fetchVaults()
+      .then((vs) => {
+        if (stale) return;
+        vaultsHostRef.current = host;
+        setVaults(vs);
+        setVaultsError(null);
+        setLoaded(true);
+      })
+      .catch((err) => {
+        if (stale) return;
+        // 같은 호스트의 일시 장애면 이전 목록을 유지한다 — 실패를 "0개"로 덮어쓰면
+        // /vault/new 오인 이동이 된다. 다른 호스트의 목록은 이 호스트 것처럼 남기지 않는다.
+        if (vaultsHostRef.current !== host) {
+          vaultsHostRef.current = null;
+          setVaults([]);
+        }
+        setVaultsError(classifyVaultsFailure(err));
+        setLoaded(true);
+      });
+    return () => { stale = true; };
   }, [refreshKey]);
 
   useEffect(() => {
@@ -186,11 +256,16 @@ export function Layout() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
-  if (loaded && vaults.length === 0 && location.pathname !== "/vault/new") {
+  // /vault/new 이동은 *성공한* 빈 목록에서만 (Issue #30).
+  if (loaded && !vaultsError && vaults.length === 0 && location.pathname !== "/vault/new") {
     return <Navigate to="/vault/new" replace />;
   }
 
   const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
+  // vault 이름은 localStorage에서 오므로 다른 호스트의 것일 수 있다. 지금 표시 중인 목록에
+  // 있을 때만 사이드바·팔레트로 내린다 — B 실패 화면에 A의 vault를 "현재 보관소"로 보이거나
+  // 팔레트가 그 이름으로 B에 요청하지 않게.
+  const listedVault = vaults.some((v) => v.name === vault) ? vault : "";
   const navPlan = planSectionNav(compactNav ? 390 : 1024);
   const moreActive = isMoreNavActive(location.pathname);
 
@@ -200,7 +275,7 @@ export function Layout() {
         vaults={vaults}
         trees={trees}
         rawItems={rawItems}
-        activeVault={vault}
+        activeVault={listedVault}
         activeSlug={activeSlug}
         onSelectVault={(name) => { setVault(name); setActiveVault(name); setRefreshKey((k) => k + 1); }}
         onRefresh={() => setRefreshKey((k) => k + 1)}
@@ -415,16 +490,33 @@ export function Layout() {
             background: "var(--color-canvas)",
           }}
         >
-          <Outlet
-            context={{
-              vault,
-              refresh: () => setRefreshKey((k) => k + 1),
-            }}
-          />
+          {vaultsError && (
+            <div role="alert" style={{ marginBottom: 24 }}>
+              <EmptyState
+                icon={<EmptyIcon.AlertTriangle />}
+                {...describeVaultsFailure(vaultsError)}
+                action={
+                  <Button variant="primary" onClick={() => setRefreshKey((k) => k + 1)}>
+                    다시 시도
+                  </Button>
+                }
+              />
+            </div>
+          )}
+          {/* 목록을 한 번도 못 받았으면 하위 페이지를 띄우지 않는다 — vault 없는 화면이
+              "등록된 vault가 없습니다"로 오인되는 것을 막는다. 이전 목록이 있으면 유지. */}
+          {(!vaultsError || vaults.length > 0) && (
+            <Outlet
+              context={{
+                vault,
+                refresh: () => setRefreshKey((k) => k + 1),
+              }}
+            />
+          )}
         </div>
       </main>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} vault={vault} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} vault={listedVault} />
       <UpdateChecker />
     </div>
   );
