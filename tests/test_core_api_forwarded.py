@@ -98,7 +98,7 @@ def test_strict_mode_forwarding_headers_need_a_token(vaults_root, strict_mode, p
 
 def test_strict_mode_without_forwarding_headers_is_unchanged(vaults_root, strict_mode):
     assert _call("GET", "/api/vaults", "127.0.0.1").status_code == 200
-    assert _call("GET", "/api/vaults", "100.100.1.2").status_code == 200
+    assert _call("GET", "/api/vaults", "100.100.1.2").status_code == 401  # #24: tailnet needs a token
     assert _call("GET", "/api/vaults", "192.168.1.50").status_code == 401
 
 
@@ -119,8 +119,8 @@ def test_strict_mode_token_still_works_but_handlers_see_unknown_source(vaults_ro
     [
         ("127.0.0.1", 200),                         # local browser via local proxy
         ("::ffff:127.0.0.1", 200),                  # node reports v4-mapped
-        ("100.101.1.2", 200),                       # tailnet browser via local proxy
-        ("fd7a:115c:a1e0::9", 200),
+        ("100.101.1.2", 401),                       # tailnet browser via local proxy (#24: token)
+        ("fd7a:115c:a1e0::9", 401),
         ("192.168.1.50", 401),                      # LAN browser via local proxy
         ("127.0.0.1, 192.168.1.50", 401),           # LAN spoofs loopback, proxy appends real IP
         ("100.101.1.2, 192.168.1.50", 401),         # LAN spoofs tailnet

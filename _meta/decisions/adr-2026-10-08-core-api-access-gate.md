@@ -25,7 +25,7 @@ status: accepted
 | 출처 (게이트가 판정한 실효 출처) | 처리 |
 |---|---|
 | loopback `127.0.0.0/8`, `::1` (IPv4-mapped 포함) | 통과 |
-| tailnet `100.64.0.0/10`, `fd7a:115c:a1e0::/48` **이면서 응답 라우트가 이 기기의 Tailscale 주소로 나가는** 출처 | 통과. MCP와 같은 신뢰 모델이고, 파괴적 API에도 같다. 대역 소속만으로는 통과 ❌ (아래 "tailnet 판정") |
+| tailnet `100.64.0.0/10`, `fd7a:115c:a1e0::/48` **이면서 응답 라우트가 이 기기의 Tailscale 주소로 나가는** 출처 | **Core API는 #24로 대체 — Bearer 필수** ([[adr-2026-10-08-core-api-tailnet-token]]). MCP만 통과. MCP와 같은 신뢰 모델이고, 파괴적 API에도 같다. 대역 소속만으로는 통과 ❌ (아래 "tailnet 판정") |
 | 그 외 (LAN, Docker bridge·gateway, IP가 아닌 값) | Bearer 토큰 필수. 발급 0개면 전부 401. 경로 예외 없음 |
 
 - **위치**: `raven/core/access.py::TokenGate`. `raven/api/server.py`가 CORS 안쪽에 한 번 설치한다. MCP의 `LanTokenAuth`는 이 클래스를 상속한다. 거부된 요청은 핸들러에 닿지 않는다. http와 websocket 요청 모두 검사한다.

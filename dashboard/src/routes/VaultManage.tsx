@@ -728,7 +728,7 @@ export function VaultManage() {
                 </span>{" "}
                 <span style={{ color: "var(--color-muted)" }}>
                   {sysInfo?.bind_host && sysInfo.bind_host !== "127.0.0.1"
-                    ? "(loopback·tailnet 통과 · 그 외 출처는 토큰 필요)"
+                    ? "(같은 PC만 토큰 없이 · tailnet 포함 그 외 출처는 토큰 필요)"
                     : "(loopback 전용)"}
                 </span>
               </div>

@@ -71,12 +71,16 @@ def _call(peer, headers=None):
     return asyncio.run(go())
 
 
-def test_tailnet_peer_routed_through_tailscale_is_trusted(vaults_root, monkeypatch):
+def test_tailnet_peer_routed_through_tailscale_is_recognised(vaults_root, monkeypatch):
+    """The route check still recognises tailnet peers (MCP uses it); the Core API
+    no longer lets that recognition stand in for a token (#24)."""
     _routes(monkeypatch, {SELF_TS4, SELF_TS6},
             lambda ip: SELF_TS6 if ":" in ip else SELF_TS4)
-    assert _call("100.101.1.2").status_code == 200
-    assert _call("fd7a:115c:a1e0::77").status_code == 200
-    assert _call("::ffff:100.101.1.2").status_code == 200
+    for peer in ("100.101.1.2", "fd7a:115c:a1e0::77", "::ffff:100.101.1.2"):
+        assert access.is_tailnet_peer(peer), peer
+        assert access.is_trusted_client(peer) is True                       # MCP view
+        assert access.is_trusted_client(peer, allow_tailnet=False) is False  # Core API view
+        assert _call(peer).status_code == 401, peer
 
 
 @pytest.mark.parametrize("peer", ["100.64.200.3", "100.101.1.2", "fd7a:115c:a1e0::77"])
@@ -103,7 +107,10 @@ def test_route_lookup_failure_is_fail_closed(vaults_root, monkeypatch):
 def test_xff_derived_tailnet_source_is_route_checked(vaults_root, monkeypatch):
     monkeypatch.setattr(access, "_socket_peer", True)
     _routes(monkeypatch, {SELF_TS4}, lambda ip: SELF_TS4 if ip.startswith("100.101.") else "100.64.200.1")
-    assert _call("127.0.0.1", {"X-Forwarded-For": "100.101.1.2"}).status_code == 200
+    assert access.effective_client({"client": ("127.0.0.1", 1), "headers": [(b"x-forwarded-for", b"100.101.1.2")]}) == "100.101.1.2"
+    assert access.is_tailnet_peer("100.101.1.2") and not access.is_tailnet_peer("100.64.200.3")
+    # Core API: neither earns trust without a token (#24)
+    assert _call("127.0.0.1", {"X-Forwarded-For": "100.101.1.2"}).status_code == 401
     assert _call("127.0.0.1", {"X-Forwarded-For": "100.64.200.3"}).status_code == 401
 
 

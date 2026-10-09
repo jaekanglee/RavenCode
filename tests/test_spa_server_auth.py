@@ -451,3 +451,31 @@ def test_shipped_local_proxies_send_x_forwarded_for():
     by test_proxy_strips_session_cookie_and_spoofed_forwarding_headers)."""
     vite = (REPO_ROOT / "dashboard" / "vite.config.ts").read_text(encoding="utf-8")
     assert "xfwd: true" in vite
+
+
+def test_dashboard_401_names_its_own_realm(stack):
+    """#24: the dashboard tells a gate 401 (Bearer realm="raven" → token dialog) from the
+    Docker proxy's own 401 (Session realm → its login page)."""
+    status, headers, _ = _req(stack["port"], "GET", "/api/vaults")
+    assert status == 401
+    assert headers.get("www-authenticate", "").startswith('Session realm="raven-dashboard"'), headers
+
+
+def test_revoked_session_answers_with_its_own_realm_not_the_gate_challenge(stack):
+    """#25 review: a cookie session whose token was revoked used to pass the API gate's
+    `Bearer realm="raven"` 401 through, so the dashboard opened its Bearer token dialog
+    (and stored a token in sessionStorage) instead of returning to this proxy's login —
+    mixing the two auth models. The proxy now drops the dead session and answers itself."""
+    p = stack["port"]
+    _, headers, _ = _login(p, stack["token"])
+    c = {"Cookie": _cookie(headers)}
+    mcp_tokens.revoke_token("me")
+    status, h, _ = _req(p, "GET", "/api/vaults", c)
+    assert status == 401
+    assert h.get("www-authenticate", "").startswith('Session realm="raven-dashboard"'), h
+    assert "set-cookie" in h and "max-age=0" in h["set-cookie"].lower(), h
+    # the dead session is gone server-side: the same cookie no longer reaches upstream
+    assert _req(p, "GET", "/api/vaults", c)[1].get("www-authenticate", "").startswith("Session")
+    # header clients keep seeing the gate's own challenge
+    status, h, _ = _req(p, "GET", "/api/vaults", {"Authorization": "Bearer rvn_nope"})
+    assert status == 401 and h.get("www-authenticate", "").startswith("Bearer"), h

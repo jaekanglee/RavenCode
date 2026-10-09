@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
+import { AuthTokenDialog } from "./components/AuthTokenDialog";
 
 // ── 코드 스플리팅 (P1-a): 전 라우트 lazy ──
 // force-graph(6.3MB)가 GraphPage 전용 청크로 분리되어 초기 번들 감소.
@@ -47,6 +48,8 @@ export default function App() {
           <Route path="/raw/:vault/*" element={<Suspense fallback={<RouteFallback />}><RawPanel /></Suspense>} />
         </Route>
       </Routes>
+      {/* Issue #24: gate 401 from a remote/tailnet host → token prompt */}
+      <AuthTokenDialog />
     </BrowserRouter>
   );
 }
