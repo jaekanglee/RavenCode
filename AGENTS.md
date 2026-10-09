@@ -67,9 +67,11 @@ Raven은 **4개 진입점만** 제공합니다. **5번째 진입점 추가 ❌**
 **MCP는 어디에 떠 있나 (v0.7.184+)** — 외부 에이전트의 1차 창구는 **데스크톱 앱**이다.
 Raven.app이 API 8765와 함께 MCP 8766을 항상 서빙한다(기본 mode=admin, `RAVEN_DESKTOP_MCP=0`
 으로 끄고 `RAVEN_DESKTOP_MCP_MODE`로 좁힌다). v0.7.182 §31부터 MCP도 API처럼 0.0.0.0에 바인딩되고
-`raven/mcp/auth.py::LanTokenAuth`가 앞단을 지킨다 — loopback·tailnet은 통과, **내부망은 `raven mcp token add`로
-발급한 Bearer 토큰 필수**(발급 0개면 전부 401). 토큰 파일은 해시만(`raven/core/mcp_tokens.py`).
-standalone `raven.mcp.cli`(team/Docker)는 범위 밖 — `adr-2026-09-30-mcp-lan-token-auth.md`.
+`raven/mcp/auth.py::LanTokenAuth`가 앞단을 지킨다 — **직접 loopback만 통과, tailnet을 포함한 그 외 모든 출처는
+`raven mcp token add`로 발급한 Bearer 토큰 필수**(발급 0개면 전부 401, #26). 토큰 파일은 해시만(`raven/core/mcp_tokens.py`).
+standalone `raven.mcp.cli`(`./raven.sh start`, team launchd, Docker `mcp-http`)도 HTTP 전송이면 같은 게이트 뒤에서 뜬다
+(`raven.mcp.cli.build_http_app`). 인증 opt-out은 없다. stdio 전송은 네트워크 리스너가 아니라 범위 밖이다
+— `adr-2026-10-09-mcp-remote-token.md`.
 `./raven.sh start`는 서버/헤드리스 배포용이고, 포트가 이미 점유돼 있으면 건너뛴다.
 MCP SDK는 `mcp>=2.0`(`mcp.server.mcpserver.MCPServer`)이며 핀은 `requirements.txt` 한 곳에만 둔다.
 

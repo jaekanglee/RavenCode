@@ -552,6 +552,40 @@ def register_tools(mcp: Any, mode: str) -> None:
             )
 
 
+# ────────────────────────── HTTP app ───────────────────────────────
+
+
+def build_http_app(mode: str, host: str):
+    """Streamable-HTTP MCP app behind the network gate (Issue #26).
+
+    Every MCP HTTP listener — desktop runtime, ``./raven.sh start``, the team launchd
+    instance, Docker ``mcp-http`` — serves this app. ``LanTokenAuth`` sits outside the
+    whole Starlette app, so initialize, tools/list, tools/call, the GET stream and
+    session DELETE all pass it first: direct loopback needs no token, every other
+    source (tailnet included) needs ``Authorization: Bearer`` from
+    ``raven mcp token add``. There is no opt-out and no unauthenticated path.
+    """
+    from raven.core.registry import registry
+    from raven.mcp.auth import LanTokenAuth
+
+    vault_names = sorted(v.name for v in registry().list())
+    mcp = MCPServer(
+        "wiki",
+        instructions=server_instructions(vault_names),
+    )
+    register_tools(mcp, mode)
+    register_resources(mcp)
+    # v0.7.148+ fix (mcp 2.0에서 인자 위치만 이동): SDK의 transport_security는
+    # `host` 미지정 시 Host 헤더 검증을 127.0.0.1/localhost/::1로 자동 잠근다
+    # (mcp/server/transport_security.py). 그 탓에 Tailscale IP·LAN IP로 붙는
+    # 원격 클라이언트가 uvicorn 바인딩과 무관하게 421 "Invalid Host header"를
+    # 맞았다. DNS-rebinding 보호는 끄고, 출처 판단은 소켓 주소를 보는 게이트에 맡긴다.
+    return LanTokenAuth(mcp.streamable_http_app(
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        host=host,
+    ))
+
+
 # ────────────────────────── main ───────────────────────────────────
 
 
@@ -589,39 +623,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.transport == "http":
         print(f"🌐 bind:     {args.host}:{args.port}", file=sys.stderr)
 
-    mcp = MCPServer(
-        "wiki",
-        instructions=server_instructions(vault_names),
-    )
-    register_tools(mcp, args.mode)
-    register_resources(mcp)
-
     if args.transport == "stdio":
         # Default: local in-process transport for desktop / local clients.
+        # Not a network listener — the HTTP gate below does not apply (#26 scope).
+        mcp = MCPServer(
+            "wiki",
+            instructions=server_instructions(vault_names),
+        )
+        register_tools(mcp, args.mode)
+        register_resources(mcp)
         mcp.run()
     else:
         # streamable-http for Tailscale/LAN-bound remote access.
         import uvicorn
 
-        # v0.7.148+ fix (mcp 2.0에서 인자 위치만 이동): SDK의 transport_security는
-        # `host` 미지정 시 Host 헤더 검증을 127.0.0.1/localhost/::1로 자동 잠근다
-        # (mcp/server/transport_security.py). 그 탓에 Tailscale IP·LAN IP로 붙는
-        # 원격 클라이언트가 uvicorn 바인딩과 무관하게 421 "Invalid Host header"를
-        # 맞았다. DNS-rebinding 보호를 끄는 건 여기서 수용 가능하다 — 이 서버는
-        # 브라우저 대면 surface가 없고 Tailscale/내부망의 직접 MCP 클라이언트만
-        # 상대한다.
-        app = mcp.streamable_http_app(  # MCPServer starlette app
-            transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
-            host=args.host,
-        )
+        from raven.core.access import serve_kwargs
 
         uvicorn.run(
-            app,
+            build_http_app(args.mode, args.host),
             host=args.host,
             port=args.port,
-            forwarded_allow_ips="*",
-            proxy_headers=True,
             log_level="info",
+            # Issue #26: like the Core API — scope["client"] stays the socket peer
+            # and the gate itself reads X-Forwarded-For, only from a loopback proxy.
+            # `forwarded_allow_ips="*"` + `proxy_headers=True` let any client claim
+            # any address.
+            **serve_kwargs(),
         )
 
     return 0

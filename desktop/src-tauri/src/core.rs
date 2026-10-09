@@ -11,8 +11,8 @@ use std::process::{Child, Command, Stdio};
 /// Loopback is the default; remote access is an explicit opt-in
 /// (`RAVEN_ALLOW_REMOTE=1`) that the Python runtime enforces, so the shell
 /// cannot widen the bind on its own. Even when opted in, the API app carries its
-/// own access gate (`raven/core/access.py`): loopback/tailnet pass, every other
-/// source needs a `raven mcp token add` Bearer token. The value passed here is
+/// own access gate (`raven/core/access.py`): loopback passes, every other
+/// source (tailnet included, #24) needs a `raven mcp token add` Bearer token. The value passed here is
 /// sent as `--host`, which beats an inherited `RAVEN_HOST` in the runtime.
 pub(crate) const DEFAULT_API_HOST: &str = "127.0.0.1";
 
@@ -45,7 +45,7 @@ pub(crate) fn mcp_enabled_from_env(raw: Option<String>) -> bool {
 /// Defaults to `admin` (operator's own machine), matching `.env`'s
 /// `RAVEN_MCP_MODE=admin` for the standalone operator instance. A wide MCP bind
 /// is sound because the listener is wrapped in `raven.mcp.auth.LanTokenAuth`
-/// (LAN clients need a Bearer token; loopback/tailnet pass) — see
+/// (every non-loopback client, tailnet included since #26, needs a Bearer token) — see
 /// `raven/desktop/runtime.py::_resolve_mcp_host`, which follows the API host.
 /// Narrow it with `RAVEN_DESKTOP_MCP_MODE=read|write`. An unrecognized value
 /// falls back to `read` — the safe direction — rather than failing the launch.

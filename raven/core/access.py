@@ -8,11 +8,9 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 판정 (출처 = ASGI ``scope["client"]``):
 
 - loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과
-- tailnet: **Core API는 토큰 필수** (#24). MCP(``LanTokenAuth``)만 ``100.64.0.0/10``,
-  ``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이 기기의 Tailscale 주소로 나가는 출처를
-  통과시킨다 (``is_tailnet_peer``, ADR 2026-09-30). 범위 소속만으로는 신뢰 ❌ —
-  CGNAT LAN·다른 VPN·Docker 망. 제품 전제는 "신뢰된 단일 사용자 네트워크(localhost 또는
-  본인 tailnet)"다 (README 보안 전제, deployment D5, MCP ADR 2026-09-30).
+- tailnet: **토큰 필수** — Core API는 #24, MCP(``LanTokenAuth``)는 #26부터. 라우트 판정
+  (``is_tailnet_peer``: ``100.64.0.0/10``·``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이
+  기기의 Tailscale 주소로 나가는 출처)은 남아 있지만, 그 결과로 토큰을 면제하는 게이트는 없다.
 - 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
   통과. 발급된 토큰이 없으면 전부 401 (fail-closed). 경로 예외는 없다 — health 포함.
 
@@ -89,7 +87,7 @@ def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
 # 인증 노드에게만 전달한다 — 라우팅이 대칭이고 연결 이후 바뀌지 않는다는 전제에서, LAN에서
 # 100.x를 사칭한 호스트는 SYN-ACK를 못 받아 연결을 끝낼 수 없다. 이 검사는 요청 시점의
 # 송신 라우트를 보는 **추론**이며, 수락된 소켓의 수신 경로나 WireGuard 인증을 직접 증명하지
-# 않는다 (승인된 잔여 위험; Tailnet 토큰 필수화는 #24). Tailscale이 없거나(CLI·daemon 부재), 응답이 다른 인터페이스로 나가면
+# 않는다 — 그래서 #24(Core API)·#26(MCP)부터 어느 게이트도 이 판정으로 토큰을 면제하지 않는다. Tailscale이 없거나(CLI·daemon 부재), 응답이 다른 인터페이스로 나가면
 # (CGNAT LAN, 다른 VPN, Docker bridge) tailnet 신뢰는 없다 — 토큰 필요 (fail-closed).
 
 _TS_TTL = 30.0
@@ -172,8 +170,8 @@ def is_loopback_client(host: str | None) -> bool:
 def is_trusted_client(host: str | None, *, allow_tailnet: bool = True) -> bool:
     """loopback, 또는 (``allow_tailnet``이면) 라우트로 판정한 tailnet 출처인가.
 
-    Core API 게이트는 ``allow_tailnet=False``로 부른다 (#24). MCP는 ADR 2026-09-30대로
-    route-judged tailnet을 계속 신뢰한다.
+    Core API(#24)와 MCP(#26) 게이트 모두 ``allow_tailnet=False``로 부른다 — 라우트 판정은
+    추론이지 연결의 WireGuard 인증 증명이 아니다. ``True``를 쓰는 게이트는 없다.
     """
     if is_loopback_client(host):
         return True
@@ -257,10 +255,9 @@ class TokenGate:
     """
 
     realm = "raven"
-    # Issue #24: the Core API trusts loopback only — a tailnet source needs a token
+    # Issue #24 (Core API) / #26 (MCP): loopback only — a tailnet source needs a token
     # like any other. The route check behind ``is_tailnet_peer`` is an inference,
-    # not proof of the connection's WireGuard authentication. MCP's LanTokenAuth
-    # opts back in (ADR 2026-09-30); nothing else should.
+    # not proof of the connection's WireGuard authentication. No gate opts back in.
     trust_tailnet = False
     detail = (
         "원격 접근에는 Authorization: Bearer <token>이 필요합니다 "
