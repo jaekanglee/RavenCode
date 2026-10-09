@@ -9,6 +9,8 @@ status: accepted
 
 # MCP LAN Token Auth
 
+> ⚠️ **2026-10-09 대체:** tailnet 무인증 통과와 "standalone `raven.mcp.cli`는 범위 밖"은 [[adr-2026-10-09-mcp-remote-token]]으로 대체됐다 (Issue #26). 이제 모든 MCP HTTP 리스너가 loopback만 토큰 없이 받는다. 아래 본문은 역사 보존용이다.
+
 > **결정:** 데스크톱 앱의 MCP를 내부망(LAN)까지 연다. loopback과 tailnet 출처는 지금처럼 그대로 통과시키고, 그 밖의 출처는 vault owner가 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 통과시킨다. 발급된 토큰이 없으면 내부망 요청은 전부 401이다.
 
 ## 맥락

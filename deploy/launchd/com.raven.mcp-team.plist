@@ -9,8 +9,13 @@
   RAVEN_MCP_TEAM_* 설정은 `./raven.sh start`만 소비하므로, 데스크톱 앱만 띄운
   머신에서는 8767이 영원히 뜨지 않는다. 이 LaunchAgent가 그 간극을 메운다.
 
-  admin(8766)은 여기 포함하지 않는다 — 인증이 없어 tailnet 전용 바인딩을 유지해야
-  한다(raven/desktop/runtime.py::_resolve_mcp_host). LAN에는 write 인스턴스만 연다.
+  admin(8766)은 여기 포함하지 않는다. LAN에는 write 인스턴스만 연다.
+
+  인증 (Issue #26): 이 인스턴스도 HTTP 게이트(raven.mcp.auth.LanTokenAuth) 뒤에서 뜬다.
+  같은 머신의 loopback 외에는 tailnet 포함 모두 Bearer 토큰이 필요하다 — 팀원마다
+  `raven mcp token add <이름>`으로 발급해 MCP 클라이언트 headers에 넣게 한다. 인증을
+  끄는 옵션은 없다. 앱 번들 코드를 실행하므로 #26 이전에 설치한 Raven.app이면
+  재설치(`make install-app`)해야 게이트가 적용된다.
 
   왜 소스 트리가 아니라 앱 번들을 실행하나
   ----------------------------------------

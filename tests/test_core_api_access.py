@@ -9,7 +9,7 @@ Contract (모든 실행 경로 공통):
   1. 접근 게이트는 앱(``raven.api.app``) 자체에 있다 — 실행 경로가 무엇이든 같은 판정.
      출처는 소켓 주소(ASGI ``scope["client"]``)로만 본다. Host/Origin/X-Forwarded-For는 무시.
      - loopback(127.0.0.0/8, ::1, ::ffff:127.x) → 통과
-     - tailnet(100.64.0.0/10, fd7a:115c:a1e0::/48) → 통과 (MCP와 같은 신뢰 모델)
+     - tailnet(100.64.0.0/10, fd7a:115c:a1e0::/48) → #24부터 토큰 필요 (MCP도 #26부터 동일)
      - 그 외 → ``Authorization: Bearer <raven mcp token add 토큰>``이 맞아야 통과, 아니면 401.
        발급 0개면 전부 401. 예외 경로(health 등) 없음.
   2. bind: 기본 loopback. 비루프백/와일드카드는 ``RAVEN_ALLOW_REMOTE``가 참(1/true/yes/on)일

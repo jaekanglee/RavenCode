@@ -72,14 +72,14 @@ def _call(peer, headers=None):
 
 
 def test_tailnet_peer_routed_through_tailscale_is_recognised(vaults_root, monkeypatch):
-    """The route check still recognises tailnet peers (MCP uses it); the Core API
+    """The route check still recognises tailnet peers; the Core API
     no longer lets that recognition stand in for a token (#24)."""
     _routes(monkeypatch, {SELF_TS4, SELF_TS6},
             lambda ip: SELF_TS6 if ":" in ip else SELF_TS4)
     for peer in ("100.101.1.2", "fd7a:115c:a1e0::77", "::ffff:100.101.1.2"):
         assert access.is_tailnet_peer(peer), peer
-        assert access.is_trusted_client(peer) is True                       # MCP view
-        assert access.is_trusted_client(peer, allow_tailnet=False) is False  # Core API view
+        assert access.is_trusted_client(peer) is True                       # allow_tailnet=True (no gate uses it since #26)
+        assert access.is_trusted_client(peer, allow_tailnet=False) is False  # Core API + MCP gates
         assert _call(peer).status_code == 401, peer
 
 

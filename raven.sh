@@ -13,8 +13,9 @@
 #   Dashboard: 5173 (RAVEN_DASHBOARD_PORT, Vite dev)
 #
 # Host 바인딩은 .env(git-ignored)에서 머신별로 설정 (.env.example.company / .env.example.house 참고) —
-# 인증 체계가 없으므로 신뢰 수준에 맞게 RAVEN_MCP_HOST / RAVEN_MCP_TEAM_HOST /
-# RAVEN_DASHBOARD_HOST 를 머신마다 다르게 둘 것.
+# MCP(8766/8767)는 #26부터 loopback 외 모든 출처(tailnet 포함)에 Bearer 토큰을 요구한다
+# (`raven mcp token add <이름>`). 그래도 노출 범위는 신뢰 수준에 맞게 RAVEN_MCP_HOST /
+# RAVEN_MCP_TEAM_HOST / RAVEN_DASHBOARD_HOST 로 머신마다 좁혀 둘 것.
 #
 # 데스크톱 앱과의 관계 (v0.7.184+)
 #   Raven.app도 같은 포트 매트릭스로 API 8765 + MCP 8766을 서빙한다. 외부 에이전트의

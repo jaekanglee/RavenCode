@@ -1,16 +1,16 @@
 """MCP 내부망 토큰 인증 (v0.7.182 §31, ADR 2026-09-30).
 
-MCP는 내부망(LAN)까지 열리되, loopback·tailnet이 아닌 출처는
+MCP는 내부망(LAN)까지 열리되, loopback이 아닌 출처(tailnet 포함, Issue #26)는
 `Authorization: Bearer <token>`이 맞아야 통과한다.
 
 Contract:
   1. 토큰 파일(`<VAULTS_ROOT>/.mcp-tokens.json`)에는 해시만 — 평문 ❌, 권한 0600
   2. add → 평문은 한 번만 반환, 같은 이름 중복 ❌, revoke → 즉시 무효
-  3. loopback / tailnet(100.64.0.0/10, fd7a:115c:a1e0::/48) 출처는 토큰 없이 통과
+  3. loopback 출처만 토큰 없이 통과. tailnet(100.64.0.0/10, fd7a:115c:a1e0::/48)도 토큰 필요 (#26)
   4. 내부망 출처: 토큰 없음/틀림 → 401, 맞으면 통과. 발급 0개면 전부 401
   5. 파일은 요청마다 다시 읽는다 — revoke가 재시작 없이 반영
   6. 데스크톱 MCP 기본 바인딩 = 0.0.0.0 (API가 0.0.0.0일 때), 광고 주소는 접속 가능한 IP,
-     앱은 LanTokenAuth로 감싼다 (standalone raven.mcp.cli는 범위 밖 — team/Docker 보호)
+     앱은 LanTokenAuth로 감싼다 (#26부터 standalone raven.mcp.cli·team·Docker도 — test_mcp_remote_auth.py)
   7. CLI `raven mcp token add/list/revoke`
 """
 from __future__ import annotations
@@ -89,12 +89,17 @@ def test_verify_and_revoke(vaults_root):
 # ─── 3-5. 미들웨어 ───────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "ip",
-    ["127.0.0.1", "::1", "100.116.203.33", "100.64.0.1", "fd7a:115c:a1e0::1"],
-)
-def test_loopback_and_tailnet_pass_without_token(vaults_root, ip):
+@pytest.mark.parametrize("ip", ["127.0.0.1", "::1"])
+def test_loopback_passes_without_token(vaults_root, ip):
     assert _request(ip).status_code == 200
+
+
+@pytest.mark.parametrize("ip", ["100.116.203.33", "100.64.0.1", "fd7a:115c:a1e0::1"])
+def test_tailnet_needs_a_token_too(vaults_root, ip):
+    """Issue #26: route-judged tailnet peers are no longer trusted without a token."""
+    assert _request(ip).status_code == 401
+    token = auth.add_token(f"t-{abs(hash(ip))}")
+    assert _request(ip, {"Authorization": f"Bearer {token}"}).status_code == 200
 
 
 def test_lan_without_any_issued_token_is_rejected(vaults_root):

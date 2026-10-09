@@ -9,7 +9,7 @@ status: accepted
 
 # Core API Tailnet Token
 
-> **결정:** Core API는 loopback 직접 연결만 토큰 없이 받는다. tailnet을 포함한 그 밖의 모든 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 한다. 이 결정은 [[adr-2026-10-08-core-api-access-gate]]의 tailnet 무인증 신뢰를 Core API에 한해 대체한다 (Issue #24). MCP는 [[adr-2026-09-30-mcp-lan-token-auth]]를 그대로 따른다. **범위는 Core API 한정**이다(2026-10-09 결정). MCP는 #26에서 따로 다룬다.
+> **결정:** Core API는 loopback 직접 연결만 토큰 없이 받는다. tailnet을 포함한 그 밖의 모든 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 한다. 이 결정은 [[adr-2026-10-08-core-api-access-gate]]의 tailnet 무인증 신뢰를 Core API에 한해 대체한다 (Issue #24). **범위는 Core API 한정**이다(2026-10-09 결정). MCP는 #26에서 같은 정책으로 바꿨다 → [[adr-2026-10-09-mcp-remote-token]].
 
 ## 맥락
 
@@ -45,7 +45,7 @@ status: accepted
 - 토큰은 창을 닫으면 지워진다. 다시 열면 다시 입력해야 한다 (영구 저장 회피를 우선함).
 - 남는 위험 (해결로 주장하지 않음):
   - loopback 프로세스 신뢰와 XFF 없는 비공식 로컬 프록시는 그대로다.
-  - **MCP의 tailnet 무인증은 그대로다 — Core API 토큰을 우회하는 경로다.**
+  - **MCP의 tailnet 무인증은 이 결정 시점에 그대로였다 — Core API 토큰을 우회하는 경로였다.** #26([[adr-2026-10-09-mcp-remote-token]])에서 해결했다. 아래는 결정 당시 기록이다.
     - 실제 소켓 재현 (PR #25 리뷰, 임시 vault, 데스크톱 원격 모드 + MCP admin, 이 기기의 tailnet IP):
       - Core API DELETE → 401
       - MCP `wiki_delete` → 토큰 없이 성공(페이지 archive)
@@ -57,5 +57,5 @@ status: accepted
 
 ## 후속 후보
 
-- MCP tailnet 토큰 필수화 — #26 (2026-10-09 분리 결정)
+- MCP tailnet 토큰 필수화 — #26에서 처리 ([[adr-2026-10-09-mcp-remote-token]])
 - 원격 브라우저용 로그인 경로(API가 서빙하는 대시보드) — 현재 계획 없음. 사용자 요구가 확인되면 인증 예외 없는 로그인 프록시로 검토한다.

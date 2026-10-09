@@ -10,8 +10,8 @@ trust for the Core API:
      → 401 before any handler runs, on every method and on WebSocket handshakes.
   3. XFF from a local proxy cannot turn a tailnet/LAN client into a trusted one;
      only loopback XFF hops are honoured (launcher mode), unchanged.
-  4. MCP keeps its own policy (ADR 2026-09-30): `LanTokenAuth` still trusts
-     route-judged tailnet peers. That is a separate surface, not touched by #24.
+  4. MCP follows the same policy since Issue #26 (`LanTokenAuth.trust_tailnet = False`,
+     tests/test_mcp_remote_auth.py).
 
 In-process tests run with conftest's fake tailnet, i.e. the route check *does*
 answer "tailnet" — so a 401 here proves the policy, not a failed route lookup.
@@ -137,15 +137,15 @@ def test_websocket_handshake_from_tailnet_is_refused(vaults_root):
     assert sent and sent[0]["type"] == "websocket.close"
 
 
-def test_api_gate_and_mcp_gate_differ_only_in_tailnet_trust():
+def test_api_gate_and_mcp_gate_share_the_tailnet_policy():
     from raven.mcp.auth import LanTokenAuth
 
     assert access.TokenGate.trust_tailnet is False
-    assert LanTokenAuth.trust_tailnet is True
+    assert LanTokenAuth.trust_tailnet is False  # Issue #26
 
 
-def test_mcp_keeps_route_judged_tailnet_trust(vaults_root):
-    """#24 scope is the Core API; MCP stays under ADR 2026-09-30 (explicitly, not by accident)."""
+def test_mcp_also_requires_a_token_from_the_tailnet(vaults_root):
+    """#26 extended #24's policy to MCP (ADR 2026-10-09 mcp-remote-token)."""
     from starlette.applications import Starlette
     from starlette.responses import PlainTextResponse
     from starlette.routing import Route
@@ -162,8 +162,9 @@ def test_mcp_keeps_route_judged_tailnet_trust(vaults_root):
         async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
             return await c.post("/mcp")
 
-    assert asyncio.run(go("100.101.1.2")).status_code == 200
+    assert asyncio.run(go("100.101.1.2")).status_code == 401
     assert asyncio.run(go("192.168.1.50")).status_code == 401
+    assert asyncio.run(go("127.0.0.1")).status_code == 200
 
 
 # ─── real sockets ───

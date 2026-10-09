@@ -687,3 +687,36 @@ PR #21은 tailnet 출처를 라우트 검사로 판정해 토큰 없이 받았�
   - 평문 HTTP의 토큰 노출
   - sessionStorage 토큰의 XSS 노출
   - 실제 원격 tailnet 기기 미검증(UNKNOWN)
+
+## 40. 보안 — MCP 원격 접근 토큰 필수화 (Issue #26)
+
+§39는 Core API에서만 tailnet 무인증 신뢰를 걷어냈다. MCP는 같은 기기에서 그 토큰을 우회하는 경로로 남아 있었다. 이번에 **모든 MCP HTTP 리스너**를 같은 정책으로 맞췄다. 직접 loopback만 토큰 없이 받고, tailnet을 포함한 다른 모든 출처는 Bearer 토큰이 필요하다. 결정 근거: [[adr-2026-10-09-mcp-remote-token]]. [[adr-2026-09-30-mcp-lan-token-auth]]의 tailnet 통과와 standalone 범위 밖을 대체한다.
+
+- **수정 전 상태 (실제 소켓·이미지로 재현)**:
+  - 데스크톱 원격 모드: tailnet 무토큰 `initialize`·`wiki_delete`가 통과했다.
+  - standalone `raven.mcp.cli`(`./raven.sh start`, team launchd, Docker `mcp-http`): 게이트가 없었다. LAN·tailnet·Docker CGNAT IPv4·IPv6에서 무토큰 `initialize`가 200이었다.
+  - Docker에서는 XFF·Host·Origin을 위조해도, 잘못된 토큰을 보내도 200이었다. uvicorn이 `forwarded_allow_ips="*"`와 `proxy_headers=True`로 떠 있었다.
+- **서버**:
+  - `LanTokenAuth.trust_tailnet = False`.
+  - 새 `raven.mcp.cli.build_http_app()`이 MCP 앱 전체를 게이트로 감싼다. 데스크톱 런타임과 standalone이 같은 빌더를 쓴다.
+  - standalone은 Core API와 같은 `serve_kwargs()`(`proxy_headers=False`)로 뜬다.
+  - opt-out과 경로 예외는 없다. stdio는 범위 밖이다.
+  - 운영 메시지, CLI 도움말, Rust·Docker·launchd·`raven.sh` 주석, AGENTS.md §2를 실제 정책에 맞췄다.
+- **검증 (RED → GREEN, 임시 vault)**:
+  - 프로세스 안에서 실제 MCP 앱으로 확인했다. 데스크톱·standalone 각각 tailnet IPv4·IPv6, LAN, Docker bridge, ULA 출처에서 다음이 모두 401이었고 `wiki_delete`는 실행되지 않았다.
+    - initialize, tools/list, tools/call(wiki_delete), GET, DELETE
+    - 발급 0개 상태, 틀린 토큰
+    - XFF·Forwarded·X-Real-IP·Host·Origin 위조
+  - 실제 소켓으로 데스크톱 런타임, standalone, team plist 인자 그대로를 확인했다.
+    - LAN IP와 이 기기의 Tailscale IPv4에서 무토큰 → 401
+    - 유효 토큰 → SDK 연결 성공. 데스크톱·standalone에서는 `wiki_delete`도 실행됐다.
+    - loopback 무토큰 → 연결 성공
+  - Docker E2E: 실제 `mcp-http` entrypoint, CGNAT `100.64.200.0/24`와 `fd7a:115c:a1e0:ab::/64`.
+    - 수정 전 이미지: 무토큰 200
+    - 수정 후 이미지: 무토큰·위조·틀린 토큰 401, 유효 토큰 200, 컨테이너 내부 loopback 200
+    - 서버 로그에 토큰 0줄
+- **Breaking change**: 원격 MCP 클라이언트는 토큰을 설정해야 한다. 같은 PC의 에이전트는 영향이 없다. 설정·복구 방법은 README "에이전트 인터페이스 (MCP) → 원격 접근 — 토큰"에 있다. team 인스턴스는 앱 번들 코드를 실행하므로 Raven.app을 재설치해야 적용된다.
+- **남는 위험 (해결 주장 ❌)**:
+  - 실제 원격 tailnet 기기 E2E는 UNKNOWN이다. 자기 Tailscale IPv6 자기 접속은 macOS에서 불가했다.
+  - loopback 무인증 신뢰는 그대로다. MCP는 DNS-rebinding 보호가 꺼져 있어, rebinding으로 loopback에 닿는 브라우저 페이지도 이 신뢰에 포함될 수 있다(추론, 실증 안 함).
+  - 평문 HTTP의 토큰 노출.
