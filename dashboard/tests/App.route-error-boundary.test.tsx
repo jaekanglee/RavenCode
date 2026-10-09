@@ -177,7 +177,7 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
     }
   });
 
-  it("데스크톱(Tauri) 청크 실패: 복구되지 않는 새로고침 버튼 대신 앱 재실행을 안내한다", async () => {
+  it("데스크톱(Tauri) 청크 실패: 복구되지 않는 버튼 없이 앱 재실행을 안내한다", async () => {
     // WKWebView는 실패한 모듈 URL을 location.reload() 뒤에도 같은 프로세스 안에서 기억한다
     // (PR #33 Tauri 실측) — 새로고침 버튼은 눌러도 같은 오류로 돌아온다.
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
@@ -188,6 +188,8 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
       expect(alert.textContent).toContain("화면 파일을 불러오지 못했습니다");
       expect(alert.textContent).toContain("앱을 종료한 뒤 다시 실행하세요");
       expect(screen.queryByRole("button", { name: "앱 다시 불러오기" })).toBeNull();
+      // 같은 모듈 재요청조차 나가지 않으므로(WKWebView 실측) "다시 시도"도 두지 않는다
+      expect(screen.queryByRole("button", { name: "다시 시도" })).toBeNull();
       await expectShellAlive();
     } finally {
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;

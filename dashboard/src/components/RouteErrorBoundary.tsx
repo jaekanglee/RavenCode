@@ -12,7 +12,7 @@
 //    새 lazy로 import를 다시 부른다. 단 브라우저가 실패한 모듈 URL을 캐시하면(Chrome) 재요청이
 //    나가지 않으므로, 청크 실패에는 사용자가 누르는 "앱 다시 불러오기"를 함께 둔다.
 //    데스크톱(Tauri WKWebView)은 실패한 모듈 URL을 새로고침 뒤에도 같은 프로세스 안에서 기억하므로
-//    (PR #33 실측: fetch 200, 같은 URL import 실패, ?x=1 import 성공) 새로고침 버튼 대신 앱 재실행을 안내한다.
+//    (PR #33 실측: fetch 200, 같은 URL import 실패, ?x=1 import 성공) 청크 실패에는 버튼 없이 앱 재실행을 안내한다.
 import { Component, lazy, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { EmptyState } from "./ui/EmptyState";
@@ -94,25 +94,29 @@ function describe(error: unknown, desktop: boolean): { title: string; descriptio
 function ErrorFallback({ error, retry }: { error: unknown; retry: () => void }) {
   const chunk = isChunkLoadError(error);
   const desktop = isDesktopShell();
+  // 데스크톱 청크 실패는 같은 프로세스 안에서 어떤 버튼으로도 복구되지 않는다(WKWebView 실측:
+  // 다시 시도해도 재요청이 나가지 않고, 새로고침 뒤에도 실패) — 버튼 없이 앱 재실행만 안내한다.
+  const recoverable = !(chunk && desktop);
   return (
     <div role="alert">
       <EmptyState
         icon={<EmptyIcon.AlertTriangle />}
         {...describe(error, desktop)}
         action={
-          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-            <Button variant={chunk ? "secondary" : "primary"} onClick={retry}>
-              다시 시도
-            </Button>
-            {/* Chrome은 실패한 동적 import를 같은 URL로 다시 요청하지 않는다(실측, Chrome 154) —
-                청크 실패의 실제 복구는 새로고침. 자동이 아니라 사용자가 누를 때만.
-                데스크톱은 새로고침으로도 복구되지 않아(WKWebView 실측) 버튼을 두지 않는다. */}
-            {chunk && !desktop && (
-              <Button variant="primary" onClick={() => window.location.reload()}>
-                앱 다시 불러오기
+          recoverable ? (
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+              <Button variant={chunk ? "secondary" : "primary"} onClick={retry}>
+                다시 시도
               </Button>
-            )}
-          </div>
+              {/* Chrome은 실패한 동적 import를 같은 URL로 다시 요청하지 않는다(실측, Chrome 154) —
+                  청크 실패의 실제 복구는 새로고침. 자동이 아니라 사용자가 누를 때만. */}
+              {chunk && (
+                <Button variant="primary" onClick={() => window.location.reload()}>
+                  앱 다시 불러오기
+                </Button>
+              )}
+            </div>
+          ) : undefined
         }
       />
     </div>
