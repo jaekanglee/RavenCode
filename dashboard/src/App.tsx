@@ -1,8 +1,9 @@
-import { Suspense, type ReactNode } from "react";
+import { Suspense, useEffect, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { AuthTokenDialog } from "./components/AuthTokenDialog";
 import { AppErrorBoundary, RouteErrorBoundary, lazyRoute } from "./components/RouteErrorBoundary";
+import { installTabHostSync } from "./lib/tab-host-sync";
 
 // ── 코드 스플리팅 (P1-a): 전 라우트 lazy ──
 // force-graph(6.3MB)가 GraphPage 전용 청크로 분리되어 초기 번들 감소.
@@ -40,6 +41,8 @@ function RouteSlot({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
+  // Issue #32: 다른 탭이 활성 호스트를 바꾸면 이 탭도 캐시를 비우고 "/"로 재로드한다.
+  useEffect(() => installTabHostSync(), []);
   return (
     <BrowserRouter>
       {/* Issue #1 A-1: Layout 자체가 터져도 #root를 비우지 않는다 (셸 blank 복구 reload 방지) */}

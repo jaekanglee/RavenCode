@@ -5,6 +5,7 @@
  * Components read this through `useActiveVault()` and refresh when needed.
  */
 import type { TreeNode } from "../types";
+import { getTabHostEndpoint, getTabHostId } from "./api-base";
 
 // ─── TTL cache + in-flight dedup (P1-b) ─────────────────────
 // fetchVaults/fetchPages/fetchTree가 여러 컴포넌트에서 중복 호출되는 문제.
@@ -15,30 +16,43 @@ interface CacheEntry<T> {
 }
 const _cache = new Map<string, CacheEntry<unknown>>();
 const _inflight = new Map<string, Promise<unknown>>();
+// Issue #32: 무효화 세대. 무효화 이전에 시작된 요청은 늦게 끝나도 캐시에 쓰지 않고,
+// 무효화 뒤의 호출이 그 요청에 합류하지도 않는다 (쓰기 직전 상태가 15초간 되살아나는 것 방지).
+let _generation = 0;
 
 function cachedFetch<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
   const hit = _cache.get(key);
   if (hit && Date.now() - hit.ts < ttlMs) return Promise.resolve(hit.data as T);
   const pending = _inflight.get(key);
   if (pending) return pending as Promise<T>;
+  const gen = _generation;
   const p = fn().then((data) => {
-    _cache.set(key, { data, ts: Date.now() });
-    _inflight.delete(key);
+    if (gen === _generation) _cache.set(key, { data, ts: Date.now() });
+    if (_inflight.get(key) === p) _inflight.delete(key);
     return data;
   }).catch((err) => {
-    _inflight.delete(key);
+    if (_inflight.get(key) === p) _inflight.delete(key);
     throw err;
   });
   _inflight.set(key, p);
   return p;
 }
 
-/** mutation 후 호출 — 해당 key 또는 전체 캐시 무효화. */
+/** mutation 후 호출 — 해당 key 또는 전체 캐시 무효화. 진행 중인 해당 요청도 캐시에 쓰지 못하게 한다. */
 export function invalidateCache(keyPrefix?: string): void {
-  if (!keyPrefix) { _cache.clear(); return; }
+  _generation += 1;
+  if (!keyPrefix) { _cache.clear(); _inflight.clear(); return; }
   for (const k of _cache.keys()) {
     if (k.startsWith(keyPrefix)) _cache.delete(k);
   }
+  for (const k of _inflight.keys()) {
+    if (k.startsWith(keyPrefix)) _inflight.delete(k);
+  }
+}
+
+/** 캐시 키의 호스트 꼬리 — 이 탭의 호스트(로드 시 고정). fetchVaults와 같은 `@<host>` 형식. */
+function hostTag(): string {
+  return `@${getActiveHostUrl()}`;
 }
 
 export const ACTIVE_VAULT_KEY = "raven:active_vault";
@@ -128,22 +142,28 @@ export function removeHost(id: string): void {
   if (id === "local") return;
   const hosts = getHosts().filter((h) => h.id !== id);
   saveHosts(hosts);
-  if (getActiveHostId() === id) {
+  // 저장된 선택(다음 로드부터 쓰일 호스트)이 지워진 호스트면 로컬로 되돌린다.
+  if (typeof window !== "undefined" && (localStorage.getItem(ACTIVE_HOST_KEY) || "local") === id) {
     setActiveHostId("local");
   }
 }
 
+// Issue #32: "활성 호스트" = 이 탭이 보여 주고 요청하는 호스트 (api-base가 로드 시 고정).
+// 저장된 선택(localStorage)은 다른 탭이 바꿀 수 있으므로 요청·표시에 직접 쓰지 않는다.
 export function getActiveHostId(): string {
-  if (typeof window === "undefined") return "local";
-  return localStorage.getItem(ACTIVE_HOST_KEY) || "local";
+  return getTabHostId();
 }
 
 export function getActiveHost(): HostConnection {
-  const hosts = getHosts();
-  const activeId = getActiveHostId();
-  return hosts.find((h) => h.id === activeId) || hosts[0] || LOCAL_HOST;
+  const id = getTabHostId();
+  const endpoint = getTabHostEndpoint();
+  if (!endpoint) return getHosts().find((h) => h.id === "local") || LOCAL_HOST;
+  const listed = getHosts().find((h) => h.id === id);
+  // 다른 탭이 이 호스트를 지우거나 주소를 바꿨어도, 이 탭이 실제로 쓰는 주소를 보여 준다.
+  return { id, name: listed?.name || endpoint, endpoint, isLocal: false };
 }
 
+/** 저장된 선택만 바꾼다 — 호출자는 반드시 전체 재로드해야 새 호스트가 적용된다 (HostPicker). */
 export function setActiveHostId(id: string): void {
   if (typeof window === "undefined") return;
   localStorage.setItem(ACTIVE_HOST_KEY, id);
@@ -151,9 +171,7 @@ export function setActiveHostId(id: string): void {
 }
 
 export function getActiveHostUrl(): string {
-  const host = getActiveHost();
-  if (!host || host.isLocal || !host.endpoint) return "";
-  return host.endpoint.replace(/\/+$/, "");
+  return getTabHostEndpoint();
 }
 
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -332,7 +350,7 @@ export class ApiHttpError extends Error {
 // 탭에서 호스트가 바뀌면 호스트 무관 키는 A의 목록을 B의 응답으로 돌려준다.
 // invalidateCache("vaults")는 prefix 매칭이라 그대로 동작한다.
 export async function fetchVaults(): Promise<VaultInfo[]> {
-  return cachedFetch(`vaults@${getActiveHostUrl()}`, 30_000, async () => {
+  return cachedFetch(`vaults${hostTag()}`, 30_000, async () => {
     const r = await apiFetch("/api/vaults");
     if (!r.ok) throw new ApiHttpError(r.status, "/api/vaults");
     const d = await r.json();
@@ -352,7 +370,7 @@ export async function fetchPages(vault: string, opts: { type?: string; tag?: str
   if (opts.type) params.set("type", opts.type);
   if (opts.tag) params.set("tag", opts.tag);
   const qs = params.toString();
-  const key = `pages:${vault}${qs ? ":" + qs : ""}`;
+  const key = `pages:${vault}${qs ? ":" + qs : ""}${hostTag()}`;
   return cachedFetch(key, 15_000, async () => {
     const r = await apiFetch(`/api/vaults/${vault}/pages${qs ? "?" + qs : ""}`);
     if (!r.ok) return [];
@@ -362,7 +380,7 @@ export async function fetchPages(vault: string, opts: { type?: string; tag?: str
 }
 
 export async function fetchTree(vault: string): Promise<TreeNode | null> {
-  return cachedFetch(`tree:${vault}`, 15_000, async () => {
+  return cachedFetch(`tree:${vault}${hostTag()}`, 15_000, async () => {
     const r = await apiFetch(`/api/vaults/${vault}/tree`);
     if (!r.ok) return null;
     const d = await r.json();
@@ -1270,4 +1288,13 @@ export async function releaseLock(vault: string, slug: string): Promise<{ ok: bo
   });
   if (!r.ok) throw new Error(`release lock failed: ${r.status}`);
   return r.json();
+}
+/**
+ * 편집 초안 localStorage 키. Issue #32: 원격 호스트는 키에 호스트를 넣어, 같은 vault·slug를 가진
+ * 다른 호스트의 페이지에 이 초안이 복구 대상으로 뜨지(→ 저장되지) 않게 한다. 로컬은 기존 키 그대로
+ * (이미 저장된 초안 보존).
+ */
+export function draftStorageKey(vault: string, slug: string): string {
+  const host = getActiveHostUrl();
+  return host ? `raven:draft@${host}:${vault}:${slug}` : `raven:draft:${vault}:${slug}`;
 }

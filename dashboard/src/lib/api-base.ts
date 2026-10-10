@@ -11,9 +11,16 @@
  * host-auth.ts; a gate 401 raises `raven:auth-required` (AuthTokenDialog).
  *
  * Multi-host mode (v0.8.0+): if an active remote host is selected,
- * the fetch/sendBeacon wrappers below dynamically prepend the active host's
- * endpoint to every /api/... request so the whole dashboard smoothly
- * switches target server context.
+ * the fetch/sendBeacon wrappers below prepend that host's endpoint to every
+ * /api/... request.
+ *
+ * Issue #32: the host is fixed per tab when the document loads. The active host
+ * lives in localStorage, which every tab shares — reading it on each request
+ * sent this tab's saves and deletes to whatever host another tab had just
+ * picked, while this tab still showed the old host's data. A host switch is
+ * always a full reload (HostPicker), and another tab's switch is picked up by
+ * watchTabHostChange → reload (tab-host-sync.ts), so the tab's requests,
+ * tokens and screen always refer to one host.
  */
 
 import { authHeaderFor, canonicalBase, clearHostToken, requestAuth } from "./host-auth";
@@ -28,20 +35,63 @@ export function getApiBase(): string {
   return apiBase;
 }
 
-export function getActiveTargetBaseUrl(): string {
-  if (typeof window === "undefined") return apiBase;
+const ACTIVE_HOST_KEY = "raven:active_host";
+const HOSTS_KEY = "raven:hosts";
+
+/** Host the stored selection points at: its id and remote endpoint ("" = this dashboard's own Core). */
+interface TabHost {
+  id: string;
+  endpoint: string;
+}
+
+function readStoredHost(): TabHost {
+  if (typeof window === "undefined") return { id: "local", endpoint: "" };
   try {
-    const activeId = localStorage.getItem("raven:active_host") || "local";
-    if (activeId === "local") return apiBase;
-    const raw = localStorage.getItem("raven:hosts");
-    if (!raw) return apiBase;
+    const activeId = localStorage.getItem(ACTIVE_HOST_KEY) || "local";
+    if (activeId === "local") return { id: "local", endpoint: "" };
+    const raw = localStorage.getItem(HOSTS_KEY);
+    if (!raw) return { id: "local", endpoint: "" };
     const hosts = JSON.parse(raw);
-    const found = hosts.find((h: any) => h.id === activeId);
+    const found = Array.isArray(hosts) ? hosts.find((h: any) => h && h.id === activeId) : null;
     if (found && found.endpoint && !found.isLocal) {
-      return found.endpoint.replace(/\/+$/, "");
+      return { id: activeId, endpoint: String(found.endpoint).replace(/\/+$/, "") };
     }
   } catch {}
-  return apiBase;
+  return { id: "local", endpoint: "" };
+}
+
+// Fixed once per document. Never re-read per request (see header).
+const tabHost: TabHost = readStoredHost();
+
+/** Id of the host this tab shows and talks to (fixed at load). */
+export function getTabHostId(): string {
+  return tabHost.id;
+}
+
+/** Remote endpoint of this tab's host, or "" for the dashboard's own Core. */
+export function getTabHostEndpoint(): string {
+  return tabHost.endpoint;
+}
+
+export function getActiveTargetBaseUrl(): string {
+  return tabHost.endpoint || apiBase;
+}
+
+/**
+ * Calls onChange when another tab changes the stored host selection so that it
+ * no longer matches this tab's host (active id switched, this host's endpoint
+ * edited or removed, storage cleared). Same-tab writes fire no storage event.
+ */
+export function watchTabHostChange(onChange: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onStorage = (e: StorageEvent) => {
+    if (e.key !== null && e.key !== ACTIVE_HOST_KEY && e.key !== HOSTS_KEY) return;
+    const stored = readStoredHost();
+    if (stored.id === tabHost.id && stored.endpoint === tabHost.endpoint) return;
+    onChange();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
 }
 
 // ─── install wrappers (module-load time, before any component mounts) ───

@@ -28,7 +28,7 @@
  import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
  import MDEditor from "@uiw/react-md-editor";
  import { useNavigate } from "react-router-dom";
- import { deletePage, updatePage } from "../lib/api";
+ import { deletePage, draftStorageKey, updatePage } from "../lib/api";
  import { preprocessWikilinks } from "../lib/wikilink";
  import { Button } from "./ui/Button";
  import { TextField } from "./ui/TextField";
@@ -160,7 +160,8 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
    const [toast, setToast] = useState<string | null>(null);
    const [toastType, setToastType] = useState<"success" | "error">("success");
    const [showPreview, setShowPreview] = useState<boolean>(true);
-   const draftKey = `raven:draft:${vault}:${slug}`;
+   // Issue #32: 원격 호스트는 키에 호스트를 넣는다 — 다른 호스트의 같은 vault·slug에 이 초안이 뜨지 않게.
+   const draftKey = draftStorageKey(vault, slug);
    const [recoverableDraft, setRecoverableDraft] = useState<string | null>(null);
    const savedDraftRef = useRef<string | null>(null);
    const [colorMode, setColorMode] = useState<"light" | "dark">(() => {
