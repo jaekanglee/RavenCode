@@ -971,3 +971,39 @@ Core API가 401·403·5xx를 돌려주거나 연결이 끊기면, 대시보드(�
 - **Chrome 실증(44-1)에 미치는 영향**: 없다.
   - 그때 쓴 설정은 모두 저장소를 읽을 수 있었고, `local`만 `isLocal: true`였다. 바뀐 두 분기를 타지 않는다.
   - 게이트 버튼의 성공 경로도 같다.
+
+## 45. 데스크톱 셸 — `mcp_endpoint` 타임아웃을 빈 값이 아니라 오류로 전파 (Issue #1 A-4)
+
+`mcp_endpoint` Tauri 명령은 Python Core가 15초 안에 준비되지 않으면 `Ok("")`를 돌려줬다(`desktop/src-tauri/src/lib.rs`). 빈 문자열은 원래 "Core는 떠 있고 MCP는 꺼져 있음"(`RAVEN_DESKTOP_MCP=0`, 또는 Python이 MCP를 best-effort로 포기함)을 뜻한다. 그래서 Core 기동 실패·지연이 "MCP 꺼짐"으로 위장됐다. 같은 루프의 `core_endpoint`는 같은 상황에서 이미 `Err("Python Core startup timed out")`를 돌려주고 있었다.
+
+- **경로별 결과 (수정 후)**:
+
+  | 상황 | 결과 |
+  |---|---|
+  | Core 실행 중, MCP 켜짐 | `Ok("http://<mcp_host>:<port>/mcp")` |
+  | Core 실행 중, MCP 꺼짐 또는 MCP 기동 실패(best-effort) | `Ok("")` (정상 빈 값) |
+  | Core가 15초 안에 준비되지 않음 | `Err("Python Core startup timed out")` (이전: `Ok("")`) |
+  | Core 상태 lock 손상 | 같은 `Err` (이전: `Ok("")`) |
+
+  "연결 실패"와 "비정상 응답"(Python 기동 실패, readiness 형식 오류, loopback이 아닌 보고)은 `ManagedCore::start`가 `Err`를 내고 앱을 종료한다(대화상자). 이 명령에서는 Core 상태가 계속 비어 있는 경우, 즉 위의 타임아웃으로만 나타난다.
+- **수정**:
+  - 두 명령이 같은 대기 함수 `wait_for_core`를 쓴다. 타임아웃이면 `Err`, 기본값은 없다.
+  - 기존 오류 문구를 재사용했고, 타임아웃(15초)·폴링 간격(100ms)·재시도 정책은 바꾸지 않았다. `core_endpoint`의 동작도 같다.
+  - 오류 문구에는 경로·주소·토큰이 들어가지 않는다.
+- **호출자**:
+  - 저장소 안에서 `mcp_endpoint`를 호출하는 코드는 없다. 대시보드는 `core_status`(MCP 주소는 `Option`)를 쓴다.
+  - 따라서 현재 화면에 보이는 영향은 없고, 이 명령의 계약(웹뷰 권한 `default.toml`에 허용됨)을 바로잡는 수정이다. 호출하는 쪽에서는 Tauri `invoke`가 reject된다.
+- **검증**:
+  - Rust 단위 테스트 6건을 추가했다. 테스트 전용 `ManagedCore::for_test`로 실행 중인 Core를 흉내 낸다. 확인 항목은 다음과 같다:
+    - 정상 endpoint
+    - 정상 빈 값
+    - 타임아웃
+    - lock 손상
+    - 대기 중 준비 완료
+    - `core_endpoint` 회귀
+  - 수정 전 의미의 자리표시 구현에서 2건(타임아웃, lock 손상)이 `Ok("")`로 실패했다. 수정 후 `cargo test` 20건이 모두 통과했다.
+  - clippy 신규 경고는 없다. 기존 1건은 Reopen 처리부다. 새 코드는 rustfmt 형식에 맞췄다(기존 파일의 rustfmt 차이는 그대로 둠).
+- **범위 밖 발견 (수정하지 않음)**:
+  - `core_endpoint`/`mcp_endpoint`는 `async` 명령인데 `std::thread::sleep`로 대기해, 최대 15초 동안 async 런타임 스레드를 막는다.
+  - lock이 손상되면 회복되지 않는데도 15초를 다 기다린 뒤에 오류를 낸다.
+  - MCP 기동 실패와 MCP 꺼짐은 readiness JSON에서 구분되지 않는다(`mcp_port` 생략). 그래서 `core_status`와 `mcp_endpoint` 모두 둘을 같은 값으로 보고한다.

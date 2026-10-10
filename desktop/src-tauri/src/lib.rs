@@ -53,33 +53,58 @@ impl CoreState {
 /// Exposes the managed Python Core endpoint to the webview (waits until ready).
 #[command]
 async fn core_endpoint(state: State<'_, CoreState>) -> Result<String, String> {
+    core_endpoint_within(&state, CORE_READY_TIMEOUT, CORE_READY_POLL)
+}
+
+/// Exposes the MCP HTTP endpoint to the webview (waits until core is ready; empty string if MCP
+/// is off, an error if the Core isn't ready in time).
+#[command]
+async fn mcp_endpoint(state: State<'_, CoreState>) -> Result<String, String> {
+    mcp_endpoint_within(&state, CORE_READY_TIMEOUT, CORE_READY_POLL)
+}
+
+const CORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const CORE_READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Waits until the Python Core is running, then reads a value from it.
+///
+/// Issue #1 A-4: running out of time is an error, never a default value. `mcp_endpoint`
+/// used to answer `Ok("")` on timeout, which the webview cannot tell apart from a Core that
+/// runs with MCP disabled — a failed or stuck Core start looked like "MCP off".
+fn wait_for_core<T>(
+    state: &CoreState,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+    read: impl Fn(&core::ManagedCore) -> T,
+) -> Result<T, String> {
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(15);
     while start.elapsed() < timeout {
         if let Ok(guard) = state.0.lock() {
             if let Some(ref core) = *guard {
-                return Ok(core.endpoint.clone());
+                return Ok(read(core));
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(poll);
     }
     Err("Python Core startup timed out".to_string())
 }
 
-/// Exposes the MCP HTTP endpoint to the webview (waits until core is ready, empty string if disabled).
-#[command]
-async fn mcp_endpoint(state: State<'_, CoreState>) -> Result<String, String> {
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(15);
-    while start.elapsed() < timeout {
-        if let Ok(guard) = state.0.lock() {
-            if let Some(ref core) = *guard {
-                return Ok(core.mcp_endpoint.clone().unwrap_or_default());
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Ok(String::new())
+fn core_endpoint_within(
+    state: &CoreState,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> Result<String, String> {
+    wait_for_core(state, timeout, poll, |core| core.endpoint.clone())
+}
+
+/// `Ok("")` only when the Core is running without MCP (disabled, or MCP gave up at startup —
+/// see raven/desktop/runtime.py "MCP is best-effort"). Not ready in time → `Err`.
+fn mcp_endpoint_within(
+    state: &CoreState,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> Result<String, String> {
+    wait_for_core(state, timeout, poll, |core| core.mcp_endpoint.clone().unwrap_or_default())
 }
 
 /// Exposes the desktop app version.
@@ -320,6 +345,89 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    // Issue #1 A-4: mcp_endpoint는 Core가 준비되지 않은 채 타임아웃되면 Ok("")를 돌려줬다 —
+    // "MCP 꺼짐"(정상 빈 값)과 구분되지 않는 실패 위장. 타임아웃은 Err로 전파한다.
+    use super::{core::ManagedCore, core_endpoint_within, mcp_endpoint_within, CoreState};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const T: Duration = Duration::from_millis(300);
+    const P: Duration = Duration::from_millis(10);
+
+    fn ready(mcp: Option<&str>) -> CoreState {
+        let state = CoreState::default();
+        *state.0.lock().unwrap() = Some(ManagedCore::for_test("http://127.0.0.1:5555", mcp));
+        state
+    }
+
+    #[test]
+    fn mcp_endpoint_returns_running_endpoint() {
+        let state = ready(Some("http://100.64.0.1:8766/mcp"));
+        assert_eq!(
+            mcp_endpoint_within(&state, T, P),
+            Ok("http://100.64.0.1:8766/mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_endpoint_is_empty_only_when_core_runs_without_mcp() {
+        // MCP 꺼짐(RAVEN_DESKTOP_MCP=0) 또는 Python이 MCP를 best-effort로 포기한 정상 기동.
+        let state = ready(None);
+        assert_eq!(mcp_endpoint_within(&state, T, P), Ok(String::new()));
+    }
+
+    #[test]
+    fn mcp_endpoint_timeout_is_an_error_not_empty() {
+        // Core가 기동하지 못함(연결·readiness 실패로 상태가 비어 있음) 또는 아직 준비 중.
+        let state = CoreState::default();
+        let start = Instant::now();
+        let got = mcp_endpoint_within(&state, T, P);
+        assert!(start.elapsed() >= T, "타임아웃 전에 돌아오면 안 된다");
+        assert_eq!(got, Err("Python Core startup timed out".to_string()));
+    }
+
+    #[test]
+    fn mcp_endpoint_poisoned_state_is_an_error_not_empty() {
+        let state = Arc::new(CoreState::default());
+        let s2 = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s2.0.lock().unwrap();
+            panic!("poison the Core state lock");
+        })
+        .join();
+        assert!(state.0.is_poisoned());
+        assert!(mcp_endpoint_within(&state, T, P).is_err());
+    }
+
+    #[test]
+    fn mcp_endpoint_waits_for_core_that_becomes_ready() {
+        let state = Arc::new(CoreState::default());
+        let s2 = state.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            *s2.0.lock().unwrap() = Some(ManagedCore::for_test(
+                "http://127.0.0.1:5555",
+                Some("http://127.0.0.1:8766/mcp"),
+            ));
+        });
+        assert_eq!(
+            mcp_endpoint_within(&state, Duration::from_secs(5), P),
+            Ok("http://127.0.0.1:8766/mcp".to_string())
+        );
+        setter.join().unwrap();
+    }
+
+    #[test]
+    fn core_endpoint_unchanged_ready_and_timeout() {
+        assert_eq!(
+            core_endpoint_within(&ready(None), T, P),
+            Ok("http://127.0.0.1:5555".to_string())
+        );
+        assert_eq!(
+            core_endpoint_within(&CoreState::default(), T, P),
+            Err("Python Core startup timed out".to_string())
+        );
+    }
     // Issue #1 A-1: 셸이 eval하는 복구 스크립트가 예산 가드 진입점을 실제로 호출한다.
     // 동작 자체는 dashboard/tests/desktop.blank-recovery.test.ts가 같은 파일로 검증한다.
     #[test]

@@ -192,6 +192,16 @@ impl ManagedCore {
         })
     }
 
+    /// Test double: a "running" Core with the given endpoints (the child is a finished `true`).
+    #[cfg(test)]
+    pub(crate) fn for_test(endpoint: &str, mcp_endpoint: Option<&str>) -> Self {
+        Self {
+            child: Command::new("true").spawn().expect("spawn true"),
+            endpoint: endpoint.to_string(),
+            mcp_endpoint: mcp_endpoint.map(str::to_string),
+        }
+    }
+
     pub(crate) fn stop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
