@@ -8,8 +8,15 @@ use tauri::tray::TrayIconBuilder;
 /// Reveals the window and, if the webview's content process died while the
 /// window was hidden (macOS reclaims suspended WKWebView renderers, leaving
 /// the window permanently blank on redisplay), forces a reload to recover.
-const RECOVER_IF_BLANK_JS: &str =
-    "if (!document.getElementById('root')?.hasChildNodes()) { location.reload(); }";
+///
+/// Issue #1 A-1: a broken JS bundle keeps `#root` empty, so an unconditional
+/// reload repeated on every focus. The script now caps automatic reloads
+/// (3 until a healthy screen is seen, state in sessionStorage) and then draws
+/// a static notice instead — see blank_recovery.js for the full policy.
+const RECOVER_IF_BLANK_JS: &str = concat!(
+    include_str!("blank_recovery.js"),
+    "\n__ravenBlankRecovery();\n"
+);
 
 fn show_and_recover(window: &WebviewWindow) {
     window.show().unwrap();
@@ -313,6 +320,17 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    // Issue #1 A-1: 셸이 eval하는 복구 스크립트가 예산 가드 진입점을 실제로 호출한다.
+    // 동작 자체는 dashboard/tests/desktop.blank-recovery.test.ts가 같은 파일로 검증한다.
+    #[test]
+    fn recover_script_invokes_guarded_entrypoint() {
+        let js = super::RECOVER_IF_BLANK_JS;
+        assert!(js.contains("function __ravenBlankRecovery(env)"));
+        assert!(js.trim_end().ends_with("__ravenBlankRecovery();"));
+        assert!(js.contains("var MAX_RELOADS = 3;"));
+        assert!(!js.contains("if (!document.getElementById('root')?.hasChildNodes()) { location.reload(); }"));
+    }
+
     use super::core::{mcp_enabled_from_env, mcp_mode_from_env, runtime_launch_spec};
     use super::resolve_download_target;
     use std::path::PathBuf;
