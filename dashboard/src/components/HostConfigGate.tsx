@@ -4,7 +4,7 @@
 // 잘못됐으면 api-base가 이 탭의 /api 요청을 모두 거절한다(로컬 Core로 조용히 보내지 않는다).
 // 여기서는 앱 화면(요청을 보내는 Layout·라우트)을 그리지 않고 이유를 알린다.
 // 로컬로 바꾸는 것은 사용자가 버튼을 눌렀을 때만 — 자동 전환하지 않는다.
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { getTabHostError } from "../lib/api-base";
 import { setActiveHostId } from "../lib/api";
 import { EmptyState } from "./ui/EmptyState";
@@ -19,6 +19,7 @@ export function HostConfigGate({
   reload?: () => void;
 }) {
   const error = getTabHostError();
+  const [switchFailed, setSwitchFailed] = useState(false);
   if (!error) return <>{children}</>;
   return (
     // Layout(테마 적용)을 그리지 않으므로 화면 전체를 canvas로 채운다 — 부트 화면 배경과 섞이지 않게.
@@ -33,7 +34,13 @@ export function HostConfigGate({
               <Button
                 variant="primary"
                 onClick={() => {
-                  setActiveHostId("local");
+                  // 저장소에 쓰지 못하면 재로드해도 같은 오류 — 실패를 알리고 머문다.
+                  try {
+                    setActiveHostId("local");
+                  } catch {
+                    setSwitchFailed(true);
+                    return;
+                  }
                   reload();
                 }}
               >
@@ -45,6 +52,11 @@ export function HostConfigGate({
             </div>
           }
         />
+        {switchFailed && (
+          <p style={{ textAlign: "center", fontSize: 14, color: "var(--color-error-text)" }}>
+            브라우저 저장소에 쓸 수 없어 로컬로 전환하지 못했습니다. 사이트 데이터 차단 설정을 확인한 뒤 새로고침하세요.
+          </p>
+        )}
       </div>
     </div>
   );

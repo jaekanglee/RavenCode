@@ -175,6 +175,9 @@ const BROKEN: Array<[string, () => void]> = [
   ["endpoint 빈 문자열", () => storeHosts("a", [{ id: "a", name: "A", endpoint: "", isLocal: false }])],
   ["endpoint가 URL이 아님", () => storeHosts("a", [{ id: "a", name: "A", endpoint: "not a url", isLocal: false }])],
   ["endpoint가 http(s)가 아님", () => storeHosts("a", [{ id: "a", name: "A", endpoint: "ftp://100.64.0.1", isLocal: false }])],
+  // PR #35 최종 경계: 원격 ID인데 isLocal:true — 로컬로 대체하지 않는다
+  ["모순: 활성 ID 'a'인데 a가 isLocal:true (endpoint 있음)", () => storeHosts("a", [HOSTS_OK[0], { id: "a", name: "A", endpoint: A, isLocal: true }])],
+  ["모순: 활성 ID 'a'인데 a가 isLocal:true (endpoint 없음)", () => storeHosts("a", [HOSTS_OK[0], { id: "a", name: "A", endpoint: "", isLocal: true }])],
 ];
 
 describe("P1-2 원격 호스트 설정이 깨지면 로컬로 조용히 보내지 않고 막는다", () => {
@@ -261,6 +264,89 @@ describe("P1-2 원격 호스트 설정이 깨지면 로컬로 조용히 보내�
     storeHosts("a", HOSTS_OK);
     window.dispatchEvent(new StorageEvent("storage", { key: "raven:hosts" }));
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── PR #35 최종 경계: 저장소 접근 실패 ─────────────────────────────
+
+/** 이 탭이 로드되는 동안만 localStorage 접근이 실패하게 한다 (SecurityError 등). */
+async function loadTabWithStorageFailure(mode: "getItem" | "getter") {
+  const restore: Array<() => void> = [];
+  if (mode === "getItem") {
+    const spy = vi.spyOn(localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+    restore.push(() => spy.mockRestore());
+  } else {
+    const desc = Object.getOwnPropertyDescriptor(window, "localStorage")!;
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("denied", "SecurityError");
+      },
+    });
+    restore.push(() => Object.defineProperty(window, "localStorage", desc));
+  }
+  try {
+    return { tab: await loadTab(), restore: () => restore.forEach((r) => r()) };
+  } catch (e) {
+    restore.forEach((r) => r());
+    throw e;
+  }
+}
+
+describe("저장소를 읽을 수 없으면 선택된 호스트를 알 수 없다 → 설정 오류, 요청 차단", () => {
+  it.each(["getItem", "getter"] as const)("localStorage %s 예외 → /api 읽기·쓰기·beacon 0건", async (mode) => {
+    storeHosts("a", HOSTS_OK); // 실제로는 원격 A를 골라 둔 상태
+    const { tab, restore } = await loadTabWithStorageFailure(mode);
+    try {
+      expect(tab.base.getTabHostError()).toMatch(/저장소/);
+      await expect(tab.api.updatePage(VAULT, SLUG, { content: "x" })).rejects.toThrow(/호스트 설정/);
+      await expect(window.fetch("/api/vaults")).rejects.toThrow(/호스트 설정/);
+      expect(navigator.sendBeacon?.("/api/vaults/notes/locks", "x") ?? false).toBe(false);
+      expect(calls).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("오류 화면의 '로컬로 전환'이 저장소 쓰기에 실패해도 화면이 깨지지 않고 재로드하지 않는다", async () => {
+    storeHosts("a", HOSTS_OK);
+    const { restore } = await loadTabWithStorageFailure("getItem");
+    const setSpy = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+    try {
+      const { HostConfigGate } = await import("../src/components/HostConfigGate");
+      const reload = vi.fn();
+      render(
+        <HostConfigGate reload={reload}>
+          <div>APP-SCREEN</div>
+        </HostConfigGate>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "로컬로 전환" }));
+      expect(reload).not.toHaveBeenCalled();
+      expect(screen.getByText(/저장소에 쓸 수 없어/)).toBeTruthy();
+      expect(screen.queryByText("APP-SCREEN")).toBeNull();
+    } finally {
+      setSpy.mockRestore();
+      restore();
+    }
+  });
+});
+
+describe("정상 로컬 선택은 막지 않는다 (회귀)", () => {
+  it.each<[string, () => void]>([
+    ["선택 없음(첫 실행)", () => localStorage.removeItem("raven:active_host")],
+    ["로컬 선택 + 호스트 목록 손상", () => storeHosts("local", "{not json")],
+    ["로컬 선택 + 다른 항목이 모순(isLocal)", () => storeHosts("local", [HOSTS_OK[0], { id: "a", name: "A", endpoint: A, isLocal: true }])],
+  ])("%s → 오류 없음, 로컬로 요청", async (_name, setup) => {
+    setup();
+    const { base, api } = await loadTab();
+    expect(base.getTabHostError()).toBeNull();
+    expect(api.getActiveHostId()).toBe("local");
+    await api.updatePage(VAULT, SLUG, { content: "x" });
+    expect(calls.map((c) => c.url)).toEqual(["/api/vaults/notes/pages/hello"]);
   });
 });
 

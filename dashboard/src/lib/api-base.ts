@@ -41,7 +41,8 @@ const HOSTS_KEY = "raven:hosts";
 /**
  * Host the stored selection points at: its id and remote endpoint ("" = this dashboard's own Core).
  * `error` is set when a remote host is selected but its settings can't be used (list missing or
- * corrupt, id not listed, endpoint missing or not http(s)). Such a tab sends no /api request at
+ * corrupt, id not listed, a remote id marked isLocal, endpoint missing or not http(s)), or when
+ * storage can't be read at all so the selection is unknown. Such a tab sends no /api request at
  * all — falling back to the local Core would silently write to a host the user didn't pick
  * (PR #35 review). HostConfigGate shows the error instead of the app.
  */
@@ -72,7 +73,9 @@ function readStoredHost(): TabHost {
     activeId = localStorage.getItem(ACTIVE_HOST_KEY) || "local";
     raw = localStorage.getItem(HOSTS_KEY);
   } catch {
-    return local; // storage unavailable: no selection can exist, so this is the local Core
+    // Storage unreadable (SecurityError, blocked site data): the selection may well be a remote
+    // host, so this tab can't tell where its requests belong — refuse rather than assume local.
+    return { id: "unknown", endpoint: "", error: "저장소를 읽을 수 없어 선택한 호스트를 확인할 수 없습니다." };
   }
   if (activeId === "local") return local;
   const broken = (why: string): TabHost => ({ id: activeId, endpoint: "", error: why });
@@ -86,7 +89,8 @@ function readStoredHost(): TabHost {
   if (!Array.isArray(hosts)) return broken("저장된 호스트 목록이 손상되었습니다.");
   const found = hosts.find((h: any) => h && h.id === activeId);
   if (!found) return broken("선택한 호스트가 목록에 없습니다.");
-  if (found.isLocal) return local;
+  // Only the built-in "local" entry is the local Core. A remote id marked isLocal contradicts itself.
+  if (found.isLocal) return broken("선택한 호스트 설정이 서로 맞지 않습니다 (원격 ID가 로컬로 표시됨).");
   const endpoint = remoteEndpoint(found.endpoint);
   if (!endpoint) return broken("선택한 호스트의 주소가 비어 있거나 올바르지 않습니다.");
   return { id: activeId, endpoint, error: null };
