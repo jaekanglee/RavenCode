@@ -5,6 +5,8 @@ import { AuthTokenDialog } from "./components/AuthTokenDialog";
 import { AppErrorBoundary, RouteErrorBoundary, lazyRoute } from "./components/RouteErrorBoundary";
 import { installTabHostSync } from "./lib/tab-host-sync";
 import { HostConfigGate } from "./components/HostConfigGate";
+// Issue #1 A-5: 미등록 경로 안내는 lazy로 두지 않는다 — 청크 실패로 다시 빈 화면이 되지 않게.
+import { NotFoundPage } from "./routes/NotFoundPage";
 
 // ── 코드 스플리팅 (P1-a): 전 라우트 lazy ──
 // force-graph(6.3MB)가 GraphPage 전용 청크로 분리되어 초기 번들 감소.
@@ -66,6 +68,8 @@ export default function App() {
               <Route path="/archive" element={<RouteSlot><ArchivePage /></RouteSlot>} />
               {/* v0.7.50+: raw/ folder panel */}
               <Route path="/raw/:vault/*" element={<RouteSlot><RawPanel /></RouteSlot>} />
+              {/* Issue #1 A-5: 미등록 경로가 #root를 비워 셸 blank 복구(reload 3회 → 차단)로 가지 않게 */}
+              <Route path="*" element={<RouteSlot><NotFoundPage /></RouteSlot>} />
             </Route>
           </Routes>
         </HostConfigGate>

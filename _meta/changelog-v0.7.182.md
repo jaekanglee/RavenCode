@@ -1007,3 +1007,37 @@ Core API가 401·403·5xx를 돌려주거나 연결이 끊기면, 대시보드(�
   - `core_endpoint`/`mcp_endpoint`는 `async` 명령인데 `std::thread::sleep`로 대기해, 최대 15초 동안 async 런타임 스레드를 막는다.
   - lock이 손상되면 회복되지 않는데도 15초를 다 기다린 뒤에 오류를 낸다.
   - MCP 기동 실패와 MCP 꺼짐은 readiness JSON에서 구분되지 않는다(`mcp_port` 생략). 그래서 `core_status`와 `mcp_endpoint` 모두 둘을 같은 값으로 보고한다.
+
+## 46. 대시보드 — 미등록 경로를 빈 화면 대신 "페이지를 찾을 수 없습니다"로 (Issue #1 A-5)
+
+A-5의 원래 질문은 Tauri 프로덕션 번들에서 `/page/vault/slug` 같은 경로를 직접 새로고침할 때 `index.html` fallback이 보장되느냐였다. 결론은 보장된다는 것이다. Tauri 2.11.5의 asset 해석(`get_asset`)이 `{path}` → `{path}.html` → `{path}/index.html` → `index.html` 순서로 찾는다. 격리 Tauri 런타임에서도 중첩 한글 경로 새로고침, query·hash가 붙은 직접 이동, `/raw/...` 경로가 모두 같은 경로에서 마운트됐다. 그래서 BrowserRouter를 유지하고 HashRouter로 바꾸지 않는다.
+
+문제가 남은 곳은 라우트 표다. catch-all이 없어서 미등록 경로(`/no/such/route`, vault가 빠진 `/page` 등)에서는 `<Routes>`가 아무것도 그리지 않았고, `#root`가 비었다. 데스크톱 셸의 blank 복구(§43)는 이 상태를 번들 고장과 구분하지 못한다. 그래서 자동 reload를 3회 한 뒤 "앱을 완전히 종료한 뒤 다시 실행해 주세요" 차단 안내로 끝났다(격리 Tauri 실측). 이 경로로 들어오게 되는 계기는 다음과 같다:
+- 본문에 직접 쓴 `[x](/foo)` 같은 링크
+- 바뀐 옛 주소
+- 오타
+
+본문 링크는 클릭할 때 문서 전체를 다시 불러오므로 바로 이 경로를 탄다.
+
+- **수정**:
+  - `App.tsx`의 Layout 아래 마지막 자식으로 `<Route path="*">` → `NotFoundPage`를 추가했다.
+  - `NotFoundPage`는 기존 `EmptyState`와 `Button`을 재사용한다. 디코드한 경로를 보여 주고, "홈으로 가기" 버튼은 `navigate("/")`로 문서를 다시 불러오지 않고 이동한다.
+  - 다른 라우트와 같은 `RouteSlot`으로 감싸지만 lazy로 두지 않는다. 청크 로딩이 실패해 다시 빈 화면이 되는 일을 피하기 위해서다.
+  - 기존 라우트의 순서와 파라미터, BrowserRouter, 셸 복구 스크립트는 바꾸지 않았다.
+- **검증**:
+  - `tests/App.unknown-route.test.tsx`에 7건을 추가했다. 실제 App을 `#root` 안에 렌더하고 라우트 모듈만 표식으로 mock한다. 확인 항목:
+    - 미등록 경로
+    - `/page`
+    - 한글 경로 디코드
+    - 홈 이동
+    - `/` 회귀
+    - 중첩 한글 경로의 파라미터·query·hash 회귀
+    - 셸 blank 복구 비대상: `blank_recovery.js`를 그대로 실행해 reload와 카운터가 0인지 확인
+  - 수정 전에는 5건이 실패했다(회귀 2건은 통과). 임시 probe로 측정하니 `#root` 자식이 0개였고, 복구 스크립트가 reload를 3회 호출했다.
+  - 수정 후 7건이 모두 통과했다. 전체 vitest는 73 files, 523 passed / 1 skipped다. `tsc -b --noEmit` 통과, `vite build` 성공(scratch outDir).
+  - Tauri 런타임 결과는 PR 본문에 둔다.
+- **범위 밖 (후속 후보, 수정하지 않음)**:
+  - wikilink `<a>` 클릭이 문서 전체를 다시 불러오는 문제(SPA 이동으로 바꾸는 것이 후보)
+  - 본문의 외부 링크가 웹뷰 자체를 다른 사이트로 이동시키는 문제
+  - Tauri에서 debug-log beacon이 `tauri://localhost/api/debug-log`로 가는 문제
+  - Core가 시작에 실패하면 "Raven 시작 중…"이 끝나지 않는 문제
