@@ -1290,11 +1290,19 @@ export async function releaseLock(vault: string, slug: string): Promise<{ ok: bo
   return r.json();
 }
 /**
- * 편집 초안 localStorage 키. Issue #32: 원격 호스트는 키에 호스트를 넣어, 같은 vault·slug를 가진
- * 다른 호스트의 페이지에 이 초안이 복구 대상으로 뜨지(→ 저장되지) 않게 한다. 로컬은 기존 키 그대로
- * (이미 저장된 초안 보존).
+ * 편집 초안 localStorage 키 — 항상 호스트를 넣는다 (로컬은 `@local`). Issue #32: 같은 vault·slug를 가진
+ * 다른 호스트의 페이지에 이 초안이 복구 대상으로 뜨지(→ 저장되지) 않게 한다.
+ * PR #35 review: 로컬도 레거시 키에 쓰지 않는다 — 레거시 키에는 PR #35 이전 여러 호스트의 초안이 섞여 있어,
+ * 새 로컬 초안까지 거기 쓰면 출처를 끝내 구분할 수 없다.
  */
 export function draftStorageKey(vault: string, slug: string): string {
-  const host = getActiveHostUrl();
-  return host ? `raven:draft@${host}:${vault}:${slug}` : `raven:draft:${vault}:${slug}`;
+  return `raven:draft@${getActiveHostUrl() || "local"}:${vault}:${slug}`;
+}
+
+/**
+ * PR #35 이전의 초안 키. 원격·로컬 어느 호스트에서 쓴 초안인지 알 수 없으므로 편집기로 불러오지 않고
+ * 읽기 전용으로만 보여 준다 (InlineMarkdownEditor). 자동으로 지우지 않는다.
+ */
+export function legacyDraftStorageKey(vault: string, slug: string): string {
+  return `raven:draft:${vault}:${slug}`;
 }

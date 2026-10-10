@@ -28,7 +28,7 @@
  import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
  import MDEditor from "@uiw/react-md-editor";
  import { useNavigate } from "react-router-dom";
- import { deletePage, draftStorageKey, updatePage } from "../lib/api";
+ import { deletePage, draftStorageKey, legacyDraftStorageKey, updatePage } from "../lib/api";
  import { preprocessWikilinks } from "../lib/wikilink";
  import { Button } from "./ui/Button";
  import { TextField } from "./ui/TextField";
@@ -163,6 +163,11 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
    // Issue #32: 원격 호스트는 키에 호스트를 넣는다 — 다른 호스트의 같은 vault·slug에 이 초안이 뜨지 않게.
    const draftKey = draftStorageKey(vault, slug);
    const [recoverableDraft, setRecoverableDraft] = useState<string | null>(null);
+   // PR #35 review: PR #35 이전 키의 초안은 어느 호스트에서 썼는지 알 수 없다 — 편집기로 불러와 저장하면
+   // 다른 호스트의 내용이 이 페이지를 덮는다. 읽기 전용으로만 보여 주고, 지우는 것은 사용자가 고를 때만.
+   const legacyKey = legacyDraftStorageKey(vault, slug);
+   const [legacyDraft, setLegacyDraft] = useState<string | null>(null);
+   const [legacyOpen, setLegacyOpen] = useState(false);
    const savedDraftRef = useRef<string | null>(null);
    const [colorMode, setColorMode] = useState<"light" | "dark">(() => {
      if (typeof document === "undefined") return "light";
@@ -237,6 +242,26 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
      }
      setRecoverableDraft(stored !== null && stored !== content ? stored : null);
    }, [draftKey, content]);
+
+   useEffect(() => {
+     let stored: string | null = null;
+     try {
+       stored = localStorage.getItem(legacyKey);
+     } catch {
+       stored = null;
+     }
+     setLegacyDraft(stored !== null && stored !== content ? stored : null);
+     setLegacyOpen(false);
+   }, [legacyKey, content]);
+
+   const discardLegacyDraft = useCallback(() => {
+     try {
+       localStorage.removeItem(legacyKey);
+     } catch {
+       // 지우지 못해도 이 화면에서는 숨긴다 (다음 로드에 다시 보인다).
+     }
+     setLegacyDraft(null);
+   }, [legacyKey]);
 
    useEffect(() => {
      if (mode !== "edit") return;
@@ -582,6 +607,45 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
         <Button type="button" variant="ghost" size="sm" onClick={discardDraft} aria-label="초안 버리기">
           버리기
         </Button>
+      </div>
+    )}
+
+    {legacyDraft !== null && mode === "view" && (
+      <div
+        role="status"
+        style={{
+          padding: "10px 14px",
+          marginBottom: 16,
+          border: "1px solid var(--color-hairline)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--color-surface)",
+          color: "var(--color-body)",
+          fontSize: 14,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span>
+            어느 호스트에서 작성됐는지 알 수 없는 이전 초안이 있습니다. 다른 호스트의 내용으로 이 페이지를 덮지
+            않도록 편집기로 불러오지 않습니다. 필요한 부분은 내용을 보고 직접 옮기세요.
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => setLegacyOpen((o) => !o)}
+            aria-label={legacyOpen ? "이전 초안 내용 숨기기" : "이전 초안 내용 보기"}
+          >
+            {legacyOpen ? "숨기기" : "내용 보기"}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={discardLegacyDraft} aria-label="이전 초안 버리기">
+            버리기
+          </Button>
+        </div>
+        {legacyOpen && (
+          <div style={{ marginTop: 12 }}>
+            <TextField label="이전 초안 내용 (읽기 전용)" multiline rows={8} readOnly value={legacyDraft} />
+          </div>
+        )}
       </div>
     )}
 

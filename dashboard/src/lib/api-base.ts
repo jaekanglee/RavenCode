@@ -38,26 +38,58 @@ export function getApiBase(): string {
 const ACTIVE_HOST_KEY = "raven:active_host";
 const HOSTS_KEY = "raven:hosts";
 
-/** Host the stored selection points at: its id and remote endpoint ("" = this dashboard's own Core). */
+/**
+ * Host the stored selection points at: its id and remote endpoint ("" = this dashboard's own Core).
+ * `error` is set when a remote host is selected but its settings can't be used (list missing or
+ * corrupt, id not listed, endpoint missing or not http(s)). Such a tab sends no /api request at
+ * all — falling back to the local Core would silently write to a host the user didn't pick
+ * (PR #35 review). HostConfigGate shows the error instead of the app.
+ */
 interface TabHost {
   id: string;
   endpoint: string;
+  error: string | null;
+}
+
+function remoteEndpoint(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    // Same string as before validation (token keys and cache keys are derived from it).
+    return raw.trim().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 function readStoredHost(): TabHost {
-  if (typeof window === "undefined") return { id: "local", endpoint: "" };
+  const local: TabHost = { id: "local", endpoint: "", error: null };
+  if (typeof window === "undefined") return local;
+  let activeId: string;
+  let raw: string | null;
   try {
-    const activeId = localStorage.getItem(ACTIVE_HOST_KEY) || "local";
-    if (activeId === "local") return { id: "local", endpoint: "" };
-    const raw = localStorage.getItem(HOSTS_KEY);
-    if (!raw) return { id: "local", endpoint: "" };
-    const hosts = JSON.parse(raw);
-    const found = Array.isArray(hosts) ? hosts.find((h: any) => h && h.id === activeId) : null;
-    if (found && found.endpoint && !found.isLocal) {
-      return { id: activeId, endpoint: String(found.endpoint).replace(/\/+$/, "") };
-    }
-  } catch {}
-  return { id: "local", endpoint: "" };
+    activeId = localStorage.getItem(ACTIVE_HOST_KEY) || "local";
+    raw = localStorage.getItem(HOSTS_KEY);
+  } catch {
+    return local; // storage unavailable: no selection can exist, so this is the local Core
+  }
+  if (activeId === "local") return local;
+  const broken = (why: string): TabHost => ({ id: activeId, endpoint: "", error: why });
+  if (!raw) return broken("저장된 호스트 목록이 없습니다.");
+  let hosts: unknown;
+  try {
+    hosts = JSON.parse(raw);
+  } catch {
+    return broken("저장된 호스트 목록이 손상되었습니다.");
+  }
+  if (!Array.isArray(hosts)) return broken("저장된 호스트 목록이 손상되었습니다.");
+  const found = hosts.find((h: any) => h && h.id === activeId);
+  if (!found) return broken("선택한 호스트가 목록에 없습니다.");
+  if (found.isLocal) return local;
+  const endpoint = remoteEndpoint(found.endpoint);
+  if (!endpoint) return broken("선택한 호스트의 주소가 비어 있거나 올바르지 않습니다.");
+  return { id: activeId, endpoint, error: null };
 }
 
 // Fixed once per document. Never re-read per request (see header).
@@ -71,6 +103,18 @@ export function getTabHostId(): string {
 /** Remote endpoint of this tab's host, or "" for the dashboard's own Core. */
 export function getTabHostEndpoint(): string {
   return tabHost.endpoint;
+}
+
+/** Why this tab's selected remote host can't be used, or null. When set, /api requests are refused. */
+export function getTabHostError(): string | null {
+  return tabHost.error;
+}
+
+export class HostConfigError extends Error {
+  constructor(reason: string) {
+    super(`원격 호스트 설정 오류로 요청을 보내지 않았습니다: ${reason}`);
+    this.name = "HostConfigError";
+  }
 }
 
 export function getActiveTargetBaseUrl(): string {
@@ -87,7 +131,7 @@ export function watchTabHostChange(onChange: () => void): () => void {
   const onStorage = (e: StorageEvent) => {
     if (e.key !== null && e.key !== ACTIVE_HOST_KEY && e.key !== HOSTS_KEY) return;
     const stored = readStoredHost();
-    if (stored.id === tabHost.id && stored.endpoint === tabHost.endpoint) return;
+    if (stored.id === tabHost.id && stored.endpoint === tabHost.endpoint && stored.error === tabHost.error) return;
     onChange();
   };
   window.addEventListener("storage", onStorage);
@@ -148,6 +192,7 @@ if (typeof window !== "undefined") {
   const isActive = (base: string) => base === canonicalBase(getActiveTargetBaseUrl());
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     if (isApiPath(input)) {
+      if (tabHost.error) return Promise.reject(new HostConfigError(tabHost.error));
       const targetBase = getActiveTargetBaseUrl();
       const { init: authed, auto } = withAuth(init, targetBase);
       return origFetch(targetBase + input, authed).then((res) => {
@@ -193,6 +238,7 @@ if (typeof window !== "undefined") {
   if (origBeacon) {
     navigator.sendBeacon = (url: string | URL, data?: BodyInit | null) => {
       if (!isApiPath(url)) return origBeacon(url, data);
+      if (tabHost.error) return false;
       const targetBase = getActiveTargetBaseUrl();
       const auth = authHeaderFor(targetBase);
       if (auth) {

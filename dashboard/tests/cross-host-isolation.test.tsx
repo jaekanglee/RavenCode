@@ -307,7 +307,7 @@ describe("문서 트리·페이지 캐시 (Issue #32 B)", () => {
 });
 
 describe("편집 초안은 호스트별로 분리된다 (Issue #32 D — 다른 호스트 내용 저장 방지)", () => {
-  it("원격 호스트의 초안 키에는 호스트가 들어가고, 로컬은 기존 키를 그대로 쓴다", async () => {
+  it("초안 키에는 항상 호스트가 들어간다 (원격 = endpoint, 로컬 = local)", async () => {
     storeActiveHost("a");
     const { api } = await loadTab();
     const { draftStorageKey } = await import("../src/lib/api");
@@ -317,6 +317,7 @@ describe("편집 초안은 호스트별로 분리된다 (Issue #32 D — 다른 
     storeActiveHost("local");
     await loadTab();
     const local = await import("../src/lib/api");
-    expect(local.draftStorageKey("notes", "hello")).toBe("raven:draft:notes:hello");
+    // PR #35 review: 로컬도 레거시 키(raven:draft:<vault>:<slug>)에 쓰지 않는다
+    expect(local.draftStorageKey("notes", "hello")).toBe("raven:draft@local:notes:hello");
   });
 });
