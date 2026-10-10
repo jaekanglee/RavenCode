@@ -19,7 +19,8 @@ import { InlineMarkdownEditor } from "../src/components/InlineMarkdownEditor";
 const VAULT = "v1";
 const SLUG = "content/hello";
 const BASE = "base body";
-const DRAFT_KEY = `raven:draft:${VAULT}:${SLUG}`;
+// Issue #32 / PR #35 review: 로컬 초안도 호스트를 넣은 키에 쓴다 (레거시 키는 읽기 전용, cross-host-review.test.tsx).
+const DRAFT_KEY = `raven:draft@local:${VAULT}:${SLUG}`;
 
 let mem: Map<string, string>;
 

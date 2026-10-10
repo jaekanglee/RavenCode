@@ -1,9 +1,10 @@
 /* Issue #30 / PR #31 review — "이전 목록 유지"는 같은 호스트의 일시 장애에만.
  *
  * 같은 탭의 HostPicker 전환은 setActiveHostId + 전체 페이지 이동(location.href)이라
- * React state가 남지 않는다. 그러나 api-base는 매 요청마다 localStorage의 활성
- * 호스트를 읽으므로, 다른 탭에서 호스트를 바꾸면 이 탭의 다음 요청은 새 호스트로 간다.
- * 그 경우:
+ * React state가 남지 않는다. PR #31 당시 api-base는 매 요청마다 localStorage의 활성
+ * 호스트를 읽어서, 다른 탭에서 호스트를 바꾸면 이 탭의 다음 요청이 새 호스트로 갔다.
+ * Issue #32부터는 탭이 로드 때의 호스트에 고정되므로(아래 주석) 같은 목적을 그 위에서 확인한다.
+ * PR #31의 목적:
  *   - 호스트 B 실패 시 A의 vault 목록이 B 화면에 남아 선택·조작 가능하면 안 된다.
  *   - A의 캐시된 목록이 B의 응답처럼 돌아오면 안 된다 (캐시 키가 호스트 무관이었음).
  *   - A로 보낸 늦은 응답이 B의 결과를 덮으면 안 된다 (완료 순서 역전).
@@ -132,76 +133,91 @@ describe("Layout — 호스트 전환과 이전 목록 (PR #31 review)", () => {
     expect(screen.queryByText("NEW-VAULT-PAGE")).toBeNull();
   });
 
-  it("호스트 A → B 전환 후 B 실패: A의 vault를 B 화면에 남기지 않는다", async () => {
-    await mount();
+  // Issue #32: 탭은 로드 때의 호스트에 고정된다. 다른 탭의 전환은 이 탭의 요청을 옮기지 않고
+  // (tab-host-sync가 "/"로 재로드), 새 호스트는 다음 로드에서 적용된다. 아래는 PR #31의 보호 목적
+  // — 다른 호스트의 목록·이름을 이 화면에 섞지 않는다, 늦은 응답이 최신 결과를 덮지 않는다 — 을
+  // 그 불변식 위에서 다시 확인한다.
+
+  it("다른 탭이 B로 바꿔도 이 탭은 A의 목록을 A에만 다시 요청한다 (B 요청 0회)", async () => {
+    const api = await mount();
     await waitFor(() => expect(selectorVaults()).toEqual(["alpha"]));
     outcome[B] = { status: 503 };
-    switchActiveHost("b");
+    switchActiveHost("b"); // 다른 탭의 전환
+    api.invalidateCache();
     refresh();
+    await waitFor(() => expect(vaultCalls[""]).toBe(2));
+    expect(vaultCalls[B]).toBeUndefined();
+    expect(selectorVaults()).toEqual(["alpha"]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("B 호스트로 로드한 탭이 실패하면: 저장된 A의 vault 이름을 B의 '현재 보관소'로 보이지 않는다", async () => {
+    localStorage.setItem("raven:active_vault", "alpha"); // A를 쓰던 시절의 선택이 남아 있음
+    outcome[B] = { status: 503 };
+    switchActiveHost("b");
+    await mount(); // 재로드 = B로 로드
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(selectorVaults()).not.toContain("alpha");
-    // localStorage에 남은 A의 활성 vault 이름도 B의 "현재 보관소"로 표시하지 않는다
-    // (실화면에서 사이드바 하단 위젯이 "alpha / 현재 보관소"를 보여 준 것을 잡음)
+    expect(selectorVaults()).toEqual([]);
+    // (실화면에서 사이드바 하단 위젯이 "alpha / 현재 보관소"를 보여 준 것을 잡은 PR #31 가드)
     expect(screen.queryByText("alpha")).toBeNull();
-    // 목록이 없으니 하위 페이지(조작 UI)도 띄우지 않는다
     expect(screen.queryByRole("button", { name: "REFRESH" })).toBeNull();
     expect(screen.queryByText("NEW-VAULT-PAGE")).toBeNull();
     expect(vaultCalls[B]).toBeGreaterThan(0);
+    expect(vaultCalls[""]).toBeUndefined();
   });
 
-  it("호스트 A → B 전환: A의 캐시된 목록을 B의 응답으로 쓰지 않는다", async () => {
+  it("B 호스트로 로드한 탭은 B의 목록만 받는다 (A 요청 0회)", async () => {
+    switchActiveHost("b");
     await mount();
-    await waitFor(() => expect(selectorVaults()).toEqual(["alpha"]));
-    switchActiveHost("b"); // TTL(30s) 안 — 캐시 키가 호스트 무관이면 alpha가 그대로 나온다
-    refresh();
     await waitFor(() => expect(selectorVaults()).toEqual(["beta"]));
+    expect(vaultCalls[""]).toBeUndefined();
   });
 
-  it("완료 순서 역전: A로 보낸 늦은 성공 응답이 B의 결과를 덮지 않는다", async () => {
+  it("완료 순서 역전: 먼저 보낸 요청의 늦은 성공 응답이 나중 요청의 결과를 덮지 않는다", async () => {
     const api = await mount();
     await waitFor(() => expect(selectorVaults()).toEqual(["alpha"]));
-    const slowA = deferred();
-    outcome[""] = { pending: slowA };
+    const slow = deferred();
+    outcome[""] = { pending: slow };
     api.invalidateCache();
-    refresh(); // A 요청 진행 중
+    refresh(); // 1번 요청 진행 중
     await waitFor(() => expect(vaultCalls[""]).toBe(2));
-    switchActiveHost("b");
-    refresh(); // B 요청 → 즉시 beta
+    outcome[""] = { vaults: ["beta"] };
+    api.invalidateCache();
+    refresh(); // 2번 요청 → 즉시 beta
     await waitFor(() => expect(selectorVaults()).toEqual(["beta"]));
     await act(async () => {
-      slowA.resolve(json(200, vaultsBody(["alpha", "alpha-2"])));
-      await slowA.promise;
+      slow.resolve(json(200, vaultsBody(["alpha", "alpha-2"])));
+      await slow.promise;
     });
     await new Promise((r) => setTimeout(r, 20));
     expect(selectorVaults()).toEqual(["beta"]);
   });
 
-  it("완료 순서 역전: A로 보낸 늦은 실패 응답이 B의 정상 화면에 오류를 띄우지 않는다", async () => {
+  it("완료 순서 역전: 먼저 보낸 요청의 늦은 실패 응답이 나중의 정상 화면에 오류를 띄우지 않는다", async () => {
     const api = await mount();
     await waitFor(() => expect(selectorVaults()).toEqual(["alpha"]));
-    const slowA = deferred();
-    outcome[""] = { pending: slowA };
+    const slow = deferred();
+    outcome[""] = { pending: slow };
     api.invalidateCache();
     refresh();
     await waitFor(() => expect(vaultCalls[""]).toBe(2));
-    switchActiveHost("b");
+    outcome[""] = { vaults: ["beta"] };
+    api.invalidateCache();
     refresh();
     await waitFor(() => expect(selectorVaults()).toEqual(["beta"]));
     await act(async () => {
-      slowA.resolve(json(503, { detail: "x" }));
-      await slowA.promise;
+      slow.resolve(json(503, { detail: "x" }));
+      await slow.promise;
     });
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(selectorVaults()).toEqual(["beta"]);
   });
 
-  it("B 실패 후 B 복구 시 재시도: B의 목록으로 정상 복귀", async () => {
-    await mount();
-    await waitFor(() => expect(selectorVaults()).toEqual(["alpha"]));
+  it("B로 로드한 탭: B 실패 후 B 복구 시 재시도로 B의 목록에 정상 복귀", async () => {
     outcome[B] = { status: 503 };
     switchActiveHost("b");
-    refresh();
+    await mount();
     await screen.findByRole("alert");
     outcome[B] = { vaults: ["beta"] };
     fireEvent.click(screen.getByRole("button", { name: "다시 시도" }));

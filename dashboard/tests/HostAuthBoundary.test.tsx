@@ -140,15 +140,23 @@ describe("fetch wrapper boundary", () => {
   });
 
   it("uses the new host's token on the very first request after a switch", async () => {
+    // Issue #32: a switch applies on the reload that always follows it (HostPicker, or
+    // tab-host-sync for another tab's switch); until then the tab stays on its host.
+    const baseFetch = window.fetch;
+    activate(A);
     const { setHostToken } = await setup();
     setHostToken(A, "rvn_tok_a");
     setHostToken(B, "rvn_tok_b");
-    activate(A);
     await window.fetch("/api/vaults");
     activate(B);
+    await window.fetch("/api/vaults"); // not reloaded yet → still A, with A's token
+    vi.resetModules(); // reload: a fresh document picks up B
+    window.fetch = baseFetch;
+    await setup();
     await window.fetch("/api/vaults");
     expect([urlOf(0), auth(0)]).toEqual([`${A}/api/vaults`, "Bearer rvn_tok_a"]);
-    expect([urlOf(1), auth(1)]).toEqual([`${B}/api/vaults`, "Bearer rvn_tok_b"]);
+    expect([urlOf(1), auth(1)]).toEqual([`${A}/api/vaults`, "Bearer rvn_tok_a"]);
+    expect([urlOf(2), auth(2)]).toEqual([`${B}/api/vaults`, "Bearer rvn_tok_b"]);
   });
 
   it("matches a host whatever the case or default port it was entered with", async () => {

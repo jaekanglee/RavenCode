@@ -11,9 +11,16 @@
  * host-auth.ts; a gate 401 raises `raven:auth-required` (AuthTokenDialog).
  *
  * Multi-host mode (v0.8.0+): if an active remote host is selected,
- * the fetch/sendBeacon wrappers below dynamically prepend the active host's
- * endpoint to every /api/... request so the whole dashboard smoothly
- * switches target server context.
+ * the fetch/sendBeacon wrappers below prepend that host's endpoint to every
+ * /api/... request.
+ *
+ * Issue #32: the host is fixed per tab when the document loads. The active host
+ * lives in localStorage, which every tab shares — reading it on each request
+ * sent this tab's saves and deletes to whatever host another tab had just
+ * picked, while this tab still showed the old host's data. A host switch is
+ * always a full reload (HostPicker), and another tab's switch is picked up by
+ * watchTabHostChange → reload (tab-host-sync.ts), so the tab's requests,
+ * tokens and screen always refer to one host.
  */
 
 import { authHeaderFor, canonicalBase, clearHostToken, requestAuth } from "./host-auth";
@@ -28,20 +35,111 @@ export function getApiBase(): string {
   return apiBase;
 }
 
-export function getActiveTargetBaseUrl(): string {
-  if (typeof window === "undefined") return apiBase;
+const ACTIVE_HOST_KEY = "raven:active_host";
+const HOSTS_KEY = "raven:hosts";
+
+/**
+ * Host the stored selection points at: its id and remote endpoint ("" = this dashboard's own Core).
+ * `error` is set when a remote host is selected but its settings can't be used (list missing or
+ * corrupt, id not listed, a remote id marked isLocal, endpoint missing or not http(s)), or when
+ * storage can't be read at all so the selection is unknown. Such a tab sends no /api request at
+ * all — falling back to the local Core would silently write to a host the user didn't pick
+ * (PR #35 review). HostConfigGate shows the error instead of the app.
+ */
+interface TabHost {
+  id: string;
+  endpoint: string;
+  error: string | null;
+}
+
+function remoteEndpoint(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
   try {
-    const activeId = localStorage.getItem("raven:active_host") || "local";
-    if (activeId === "local") return apiBase;
-    const raw = localStorage.getItem("raven:hosts");
-    if (!raw) return apiBase;
-    const hosts = JSON.parse(raw);
-    const found = hosts.find((h: any) => h.id === activeId);
-    if (found && found.endpoint && !found.isLocal) {
-      return found.endpoint.replace(/\/+$/, "");
-    }
-  } catch {}
-  return apiBase;
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    // Same string as before validation (token keys and cache keys are derived from it).
+    return raw.trim().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function readStoredHost(): TabHost {
+  const local: TabHost = { id: "local", endpoint: "", error: null };
+  if (typeof window === "undefined") return local;
+  let activeId: string;
+  let raw: string | null;
+  try {
+    activeId = localStorage.getItem(ACTIVE_HOST_KEY) || "local";
+    raw = localStorage.getItem(HOSTS_KEY);
+  } catch {
+    // Storage unreadable (SecurityError, blocked site data): the selection may well be a remote
+    // host, so this tab can't tell where its requests belong — refuse rather than assume local.
+    return { id: "unknown", endpoint: "", error: "저장소를 읽을 수 없어 선택한 호스트를 확인할 수 없습니다." };
+  }
+  if (activeId === "local") return local;
+  const broken = (why: string): TabHost => ({ id: activeId, endpoint: "", error: why });
+  if (!raw) return broken("저장된 호스트 목록이 없습니다.");
+  let hosts: unknown;
+  try {
+    hosts = JSON.parse(raw);
+  } catch {
+    return broken("저장된 호스트 목록이 손상되었습니다.");
+  }
+  if (!Array.isArray(hosts)) return broken("저장된 호스트 목록이 손상되었습니다.");
+  const found = hosts.find((h: any) => h && h.id === activeId);
+  if (!found) return broken("선택한 호스트가 목록에 없습니다.");
+  // Only the built-in "local" entry is the local Core. A remote id marked isLocal contradicts itself.
+  if (found.isLocal) return broken("선택한 호스트 설정이 서로 맞지 않습니다 (원격 ID가 로컬로 표시됨).");
+  const endpoint = remoteEndpoint(found.endpoint);
+  if (!endpoint) return broken("선택한 호스트의 주소가 비어 있거나 올바르지 않습니다.");
+  return { id: activeId, endpoint, error: null };
+}
+
+// Fixed once per document. Never re-read per request (see header).
+const tabHost: TabHost = readStoredHost();
+
+/** Id of the host this tab shows and talks to (fixed at load). */
+export function getTabHostId(): string {
+  return tabHost.id;
+}
+
+/** Remote endpoint of this tab's host, or "" for the dashboard's own Core. */
+export function getTabHostEndpoint(): string {
+  return tabHost.endpoint;
+}
+
+/** Why this tab's selected remote host can't be used, or null. When set, /api requests are refused. */
+export function getTabHostError(): string | null {
+  return tabHost.error;
+}
+
+export class HostConfigError extends Error {
+  constructor(reason: string) {
+    super(`원격 호스트 설정 오류로 요청을 보내지 않았습니다: ${reason}`);
+    this.name = "HostConfigError";
+  }
+}
+
+export function getActiveTargetBaseUrl(): string {
+  return tabHost.endpoint || apiBase;
+}
+
+/**
+ * Calls onChange when another tab changes the stored host selection so that it
+ * no longer matches this tab's host (active id switched, this host's endpoint
+ * edited or removed, storage cleared). Same-tab writes fire no storage event.
+ */
+export function watchTabHostChange(onChange: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onStorage = (e: StorageEvent) => {
+    if (e.key !== null && e.key !== ACTIVE_HOST_KEY && e.key !== HOSTS_KEY) return;
+    const stored = readStoredHost();
+    if (stored.id === tabHost.id && stored.endpoint === tabHost.endpoint && stored.error === tabHost.error) return;
+    onChange();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
 }
 
 // ─── install wrappers (module-load time, before any component mounts) ───
@@ -98,6 +196,7 @@ if (typeof window !== "undefined") {
   const isActive = (base: string) => base === canonicalBase(getActiveTargetBaseUrl());
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     if (isApiPath(input)) {
+      if (tabHost.error) return Promise.reject(new HostConfigError(tabHost.error));
       const targetBase = getActiveTargetBaseUrl();
       const { init: authed, auto } = withAuth(init, targetBase);
       return origFetch(targetBase + input, authed).then((res) => {
@@ -143,6 +242,7 @@ if (typeof window !== "undefined") {
   if (origBeacon) {
     navigator.sendBeacon = (url: string | URL, data?: BodyInit | null) => {
       if (!isApiPath(url)) return origBeacon(url, data);
+      if (tabHost.error) return false;
       const targetBase = getActiveTargetBaseUrl();
       const auth = authHeaderFor(targetBase);
       if (auth) {
