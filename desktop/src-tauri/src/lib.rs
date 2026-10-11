@@ -52,15 +52,44 @@ impl CoreState {
 
 /// Exposes the managed Python Core endpoint to the webview (waits until ready).
 #[command]
-async fn core_endpoint(state: State<'_, CoreState>) -> Result<String, String> {
-    core_endpoint_within(&state, CORE_READY_TIMEOUT, CORE_READY_POLL)
+async fn core_endpoint(app: tauri::AppHandle) -> Result<String, String> {
+    off_runtime(move || {
+        core_endpoint_within(
+            &app.state::<CoreState>(),
+            CORE_READY_TIMEOUT,
+            CORE_READY_POLL,
+        )
+    })
+    .await
 }
 
 /// Exposes the MCP HTTP endpoint to the webview (waits until core is ready; empty string if MCP
 /// is off, an error if the Core isn't ready in time).
 #[command]
-async fn mcp_endpoint(state: State<'_, CoreState>) -> Result<String, String> {
-    mcp_endpoint_within(&state, CORE_READY_TIMEOUT, CORE_READY_POLL)
+async fn mcp_endpoint(app: tauri::AppHandle) -> Result<String, String> {
+    off_runtime(move || {
+        mcp_endpoint_within(
+            &app.state::<CoreState>(),
+            CORE_READY_TIMEOUT,
+            CORE_READY_POLL,
+        )
+    })
+    .await
+}
+
+/// Runs a Core wait from an async command without occupying an async runtime worker.
+///
+/// Issue #1 A-2: the wait used to run inline in the async command, so `std::thread::sleep`
+/// pinned a runtime worker for up to `CORE_READY_TIMEOUT` per call, and concurrent calls
+/// beyond the worker count stalled every other async task. The wait itself (timeout, poll,
+/// return contract) is unchanged — it only moves to the blocking pool. It reads the state and
+/// never holds the lock across a sleep, so a cancelled caller leaves nothing behind.
+async fn off_runtime<T: Send + 'static>(
+    wait: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(wait)
+        .await
+        .map_err(|e| format!("Python Core wait failed: {e}"))?
 }
 
 const CORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -347,7 +376,10 @@ pub fn run() {
 mod tests {
     // Issue #1 A-4: mcp_endpoint는 Core가 준비되지 않은 채 타임아웃되면 Ok("")를 돌려줬다 —
     // "MCP 꺼짐"(정상 빈 값)과 구분되지 않는 실패 위장. 타임아웃은 Err로 전파한다.
-    use super::{core::ManagedCore, core_endpoint_within, mcp_endpoint_within, CoreState};
+    use super::{
+        core::ManagedCore, core_endpoint_within, mcp_endpoint_within, off_runtime, CoreState,
+        CORE_READY_POLL, CORE_READY_TIMEOUT,
+    };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -428,6 +460,167 @@ mod tests {
             Err("Python Core startup timed out".to_string())
         );
     }
+
+    // Issue #1 A-2: core_endpoint/mcp_endpoint는 async 커맨드인데 대기 루프가 std::thread::sleep으로
+    // 런타임 워커 스레드를 붙잡았다 — Core가 늦으면 호출 하나가 워커 하나를 최대 15초 점유하고,
+    // 동시 호출이 워커 수(코어 수)를 넘으면 다른 async 작업까지 밀린다. 실제 Tauri async 런타임
+    // (tauri::async_runtime)에서 커맨드와 같은 경로(off_runtime)를 돌려 확인한다.
+    fn on_runtime<F: std::future::Future + Send + 'static>(
+        f: F,
+    ) -> tauri::async_runtime::JoinHandle<F::Output>
+    where
+        F::Output: Send + 'static,
+    {
+        tauri::async_runtime::spawn(f)
+    }
+
+    #[test]
+    fn core_wait_does_not_hold_runtime_workers() {
+        // 워커 수(기본 = CPU 수)보다 훨씬 많은 대기를 걸어 둔다. 대기가 워커를 붙잡으면 뒤에 온
+        // 작업은 타임아웃 몇 배 동안 실행되지 못한다.
+        const N: usize = 64;
+        const WAIT: Duration = Duration::from_millis(600);
+        let state = Arc::new(CoreState::default());
+        let t0 = Instant::now();
+        let waits: Vec<_> = (0..N)
+            .map(|_| {
+                let s = state.clone();
+                on_runtime(off_runtime(move || mcp_endpoint_within(&s, WAIT, P)))
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(50));
+        let spawned = Instant::now();
+        let probe =
+            tauri::async_runtime::block_on(on_runtime(async move { spawned.elapsed() })).unwrap();
+        assert!(
+            probe < Duration::from_millis(200),
+            "Core 대기 중 다른 async 작업이 {probe:?} 동안 실행되지 못했다"
+        );
+        let results: Vec<_> = tauri::async_runtime::block_on(async move {
+            let mut out = Vec::new();
+            for w in waits {
+                out.push(w.await.unwrap());
+            }
+            out
+        });
+        let total = t0.elapsed();
+        // 동시 호출 결과는 모두 같은 계약(타임아웃 오류)이고, 전체가 타임아웃 한 번 남짓에 끝난다.
+        assert!(results
+            .iter()
+            .all(|r| r == &Err("Python Core startup timed out".to_string())));
+        assert!(
+            total < WAIT * 2,
+            "{N}개 동시 대기가 {total:?} 걸렸다 (워커 순차 처리)"
+        );
+    }
+
+    #[test]
+    fn core_wait_off_runtime_keeps_ready_and_mcp_contract() {
+        // 실제 정책 상수(15초/100ms)로: 이미 준비된 Core는 폴링 간격을 기다리지 않고 바로 답한다.
+        for (mcp, want) in [
+            (
+                Some("http://127.0.0.1:8766/mcp"),
+                "http://127.0.0.1:8766/mcp",
+            ),
+            (None, ""),
+        ] {
+            let s = Arc::new(ready(mcp));
+            let s2 = s.clone();
+            let t = Instant::now();
+            let core = tauri::async_runtime::block_on(on_runtime(off_runtime(move || {
+                core_endpoint_within(&s2, CORE_READY_TIMEOUT, CORE_READY_POLL)
+            })))
+            .unwrap();
+            let mcp_got = tauri::async_runtime::block_on(on_runtime(off_runtime(move || {
+                mcp_endpoint_within(&s, CORE_READY_TIMEOUT, CORE_READY_POLL)
+            })))
+            .unwrap();
+            assert!(
+                t.elapsed() < CORE_READY_POLL,
+                "준비된 Core 응답이 {:?} 지연됐다",
+                t.elapsed()
+            );
+            assert_eq!(core, Ok("http://127.0.0.1:5555".to_string()));
+            assert_eq!(mcp_got, Ok(want.to_string()));
+        }
+    }
+
+    #[test]
+    fn core_wait_off_runtime_timeout_keeps_error_string() {
+        let state = Arc::new(CoreState::default());
+        let t = Instant::now();
+        let got = tauri::async_runtime::block_on(on_runtime(off_runtime(move || {
+            core_endpoint_within(&state, T, P)
+        })))
+        .unwrap();
+        assert!(t.elapsed() >= T, "타임아웃 전에 돌아오면 안 된다");
+        assert_eq!(got, Err("Python Core startup timed out".to_string()));
+    }
+
+    #[test]
+    fn core_wait_concurrent_callers_all_see_core_once_ready() {
+        const N: usize = 32;
+        let state = Arc::new(CoreState::default());
+        let waits: Vec<_> = (0..N)
+            .map(|i| {
+                let s = state.clone();
+                on_runtime(off_runtime(move || {
+                    let got = if i % 2 == 0 {
+                        mcp_endpoint_within(&s, Duration::from_secs(5), P)
+                    } else {
+                        core_endpoint_within(&s, Duration::from_secs(5), P)
+                            .map(|_| "core".to_string())
+                    };
+                    got.map(|v| (v, Instant::now()))
+                }))
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(100));
+        let ready_at = Instant::now();
+        *state.0.lock().unwrap() = Some(ManagedCore::for_test(
+            "http://127.0.0.1:5555",
+            Some("http://127.0.0.1:8766/mcp"),
+        ));
+        tauri::async_runtime::block_on(async move {
+            for (i, w) in waits.into_iter().enumerate() {
+                let (v, at) = w.await.unwrap().unwrap();
+                let want = if i % 2 == 0 {
+                    "http://127.0.0.1:8766/mcp"
+                } else {
+                    "core"
+                };
+                assert_eq!(v, want);
+                assert!(
+                    at.duration_since(ready_at) < Duration::from_millis(200),
+                    "준비 후 {:?} 늦게 답했다",
+                    at.duration_since(ready_at)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn core_wait_cancelled_caller_leaves_state_usable() {
+        // 웹뷰가 사라져 invoke 작업이 취소돼도 대기는 상태를 읽기만 한다 — lock이 오염되거나
+        // 값이 바뀌지 않고, 다음 호출은 정상으로 답한다.
+        let state = Arc::new(CoreState::default());
+        let s = state.clone();
+        let w = on_runtime(off_runtime(move || {
+            mcp_endpoint_within(&s, Duration::from_secs(2), P)
+        }));
+        std::thread::sleep(Duration::from_millis(30));
+        w.abort();
+        *state.0.lock().unwrap() = Some(ManagedCore::for_test("http://127.0.0.1:5555", None));
+        assert!(!state.0.is_poisoned());
+        let s = state.clone();
+        let got = tauri::async_runtime::block_on(on_runtime(off_runtime(move || {
+            mcp_endpoint_within(&s, T, P)
+        })))
+        .unwrap();
+        assert_eq!(got, Ok(String::new()));
+        assert!(state.0.lock().unwrap().is_some());
+    }
+
     // Issue #1 A-1: 셸이 eval하는 복구 스크립트가 예산 가드 진입점을 실제로 호출한다.
     // 동작 자체는 dashboard/tests/desktop.blank-recovery.test.ts가 같은 파일로 검증한다.
     #[test]
