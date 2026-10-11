@@ -75,6 +75,44 @@ DEFAULT_MCP_PORT = int(os.environ.get("PORT_MCP", "8766"))
 
 DEFAULT_API_PORT = int(os.environ.get("PORT_API", "8765"))
 
+# Issue #23: the Tauri shell sets this to its own PID. If the shell dies without
+# running its exit hook (SIGTERM/SIGHUP, crash, SIGKILL) the Core is reparented
+# and notices, instead of living on as an orphan holding the API/MCP ports.
+PARENT_PID_ENV = "RAVEN_DESKTOP_PARENT_PID"
+
+
+def _watched_parent_pid() -> int | None:
+    """The shell PID to watch, or None when not launched by the shell.
+
+    A value that names a live process other than our parent (inherited by a
+    process the shell did not spawn directly), or is malformed, disables the
+    watch rather than shutting down a Core whose parent is alive. A value naming
+    a process that no longer exists means the shell died before we got here
+    (during interpreter start-up), so it is still watched and the Core exits.
+    """
+    raw = os.environ.get(PARENT_PID_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        pid = None
+    if pid is not None and pid != os.getppid():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid  # parent already gone — the wait loop shuts us down
+        except OSError:
+            pass  # exists but not ours to signal: alive, not our parent
+    if pid is None or pid != os.getppid():
+        print(
+            f"⚠️  [Desktop Core] {PARENT_PID_ENV}={raw!r} is not this process's parent — "
+            "not watching for parent exit",
+            file=sys.stderr,
+        )
+        return None
+    return pid
+
 
 class _PipeSafeStream:
     """Wrap stdout/stderr so a closed pipe never becomes a request failure.
@@ -305,6 +343,11 @@ def main() -> int:
     # turn into BrokenPipeError inside request handlers (see _PipeSafeStream).
     _harden_std_streams()
 
+    # Issue #23: decide what to watch now, while the shell is almost certainly
+    # still our parent; the check itself runs in the wait loop after readiness,
+    # which also catches a shell that died during API/MCP start-up.
+    parent_pid = _watched_parent_pid()
+
     import uvicorn
 
     # 우선순위: --host > RAVEN_HOST > loopback (standalone `raven.api.main`과 동일).
@@ -492,6 +535,12 @@ def main() -> int:
 
     try:
         while not api_server.should_exit:
+            if parent_pid is not None and os.getppid() != parent_pid:
+                print(
+                    f"[Desktop Core] parent shell (pid {parent_pid}) is gone — shutting down",
+                    file=sys.stderr,
+                )
+                break
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
