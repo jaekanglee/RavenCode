@@ -1080,3 +1080,104 @@ def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path:
             if proc is not None and proc.poll() is None:
                 proc.terminate()
                 proc.wait(timeout=10)
+
+
+# ─── Issue #50: the advertised MCP endpoint must be served by this Core ──────
+
+
+def _local_non_loopback_ip() -> str | None:
+    """A non-loopback address of this host (stands in for the Tailscale IP)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))  # TEST-NET-1; UDP connect sends nothing
+            ip = s.getsockname()[0]
+    except OSError:
+        return None
+    return None if ip in ("0.0.0.0", "127.0.0.1") else ip
+
+
+def _mcp_conflicts():
+    cases = [("127.0.0.1", "0.0.0.0", "loopback-taken/wildcard-mcp"), ("0.0.0.0", "127.0.0.1", "wildcard-taken/loopback-mcp")]
+    ip = _local_non_loopback_ip()
+    if ip:
+        cases.append((ip, "0.0.0.0", "advertised-ip-taken/wildcard-mcp"))
+    return cases
+
+
+@pytest.mark.parametrize("other_host, mcp_host, _id", _mcp_conflicts(), ids=[c[2] for c in _mcp_conflicts()])
+def test_mcp_yields_when_another_server_owns_an_overlapping_address(other_host, mcp_host, _id) -> None:
+    """The old trial bind said "free" for all three on macOS (#50)."""
+    from raven.desktop import runtime
+
+    other = _listener(other_host)
+    port = other.getsockname()[1]
+    advertised = other_host if mcp_host == "0.0.0.0" and other_host != "127.0.0.1" else "127.0.0.1"
+    try:
+        assert runtime._bind_mcp_socket(mcp_host, port, advertised) is None
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("mcp_host", ["127.0.0.1", "0.0.0.0"])
+def test_mcp_keeps_its_port_when_nothing_else_answers(mcp_host) -> None:
+    from raven.desktop import runtime
+
+    port = _free_port()
+    sock = runtime._bind_mcp_socket(mcp_host, port, "127.0.0.1")
+    try:
+        assert sock is not None and sock.getsockname()[1] == port
+        assert _accepts_loopback(sock)
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def test_runtime_runs_api_only_when_the_mcp_port_is_answered_by_another_server(tmp_path: Path) -> None:
+    """Conflict → API only: readiness carries no mcp_port (existing yield policy)."""
+    other = _listener("127.0.0.1")
+    mcp_port = other.getsockname()[1]
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    core = subprocess.Popen(
+        [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", str(mcp_port)],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        assert "mcp_port" not in ready
+        with urlopen(f"http://127.0.0.1:{ready['port']}/api/vaults", timeout=5) as response:
+            assert response.status == 200
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+        other.close()
+
+
+_MCP_SERVED_ELSEWHERE = r"""
+import sys
+import raven.desktop.runtime as r
+# Simulate losing the race after the ownership check: serve MCP on some other
+# port while the advertised one is held by another process.
+r._bind_mcp_socket = lambda host, port, adv: r._claim_port(host, 0, {"127.0.0.1"})
+sys.argv = ["runtime", "--host", "127.0.0.1", "--mcp", "--mcp-port", sys.argv[1]]
+r.main()
+"""
+
+
+def test_runtime_does_not_advertise_an_mcp_endpoint_it_does_not_answer(tmp_path: Path) -> None:
+    other = _listener("127.0.0.1")
+    mcp_port = other.getsockname()[1]
+    env = _isolated_env(tmp_path, "desktop")
+    env["PORT_API"] = str(_free_port())
+    core = subprocess.Popen(
+        [sys.executable, "-c", _MCP_SERVED_ELSEWHERE, str(mcp_port)],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        assert "mcp_port" not in ready
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+        other.close()
+    assert "answered by another process" in core.stderr.read()

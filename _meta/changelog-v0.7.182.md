@@ -1169,3 +1169,28 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
 - **한계**:
   - Linux는 Docker linuxkit 커널, root 사용자로만 확인했다. 데스크톱 Linux 배포판과 다른 사용자 조합(`SO_REUSEPORT`는 같은 UID 조건)은 **UNKNOWN**. Windows는 **UNKNOWN**.
   - macOS에서 다른 UID의 프로세스로는 시험하지 않았다.
+
+## 53. Desktop Core — 광고한 MCP endpoint를 다른 서버가 받지 않게 (Issue #50)
+
+Desktop MCP 포트 검사 `_port_is_free(host, port)`는 #22 이전 API 검사와 같은 구조였다. bind 주소에서만, `SO_REUSEADDR`를 켠 채 시험 bind했다. macOS는 주소가 겹치는 다른 리스너가 있어도 이 bind를 허용한다. 그래서 standalone MCP가 떠 있어도 Desktop MCP가 같은 포트에 함께 떴다(격리 재현, master `3ec889b`):
+
+- 다른 서버 `127.0.0.1:P` + Desktop MCP `0.0.0.0:P` → `127.0.0.1:P`로 접속하는 로컬 에이전트가 다른 서버에 연결됨.
+- 다른 서버 `0.0.0.0:P` + Desktop MCP `127.0.0.1:P` → Desktop이 양보하지 않고 다른 서버의 loopback 트래픽을 가림.
+- 다른 서버 `100.x:P`(Tailscale IP) + Desktop MCP `0.0.0.0:P` → **readiness가 광고한 `100.x:P`를 다른 서버가 받음**. 지금 운영 구성(standalone MCP `100.x:8766`)과 같은 형태다.
+
+- **수정** (`raven/desktop/runtime.py`):
+  - #22의 후보 포트 검사를 `_claim_port(host, port, dial_hosts)`로 분리해 API와 MCP가 함께 쓴다. API 동작은 같다.
+  - `_port_is_free` → `_bind_mcp_socket(host, port, advertised)`. 접속 주소(광고할 host, `0.0.0.0`/loopback bind면 `127.0.0.1`, 특정 주소 bind면 그 주소)마다 bind 전 connect와 bind+listen 후 자기 accept 큐 확인을 거친다. 하나라도 다른 프로세스가 받으면 None을 돌려주고, 기존 정책대로 MCP를 양보해 API만 띄운다. 포트는 고정(기본 8766)이고 대체 포트는 쓰지 않는다.
+  - 확인한 소켓을 그대로 MCP uvicorn에 넘긴다(`Server.run(sockets=[...])`). 검사와 bind 사이의 TOCTOU가 없다.
+  - readiness에 `mcp_port`를 넣기 전에, MCP 앱을 감싼 `_ProbeResponder`(기동마다 새 nonce, 인증 아닌 정체성 확인)로 광고 host와 loopback(wildcard/loopback bind일 때)을 probe한다. 이 프로세스가 받지 못하면 MCP를 내리고 API만 알린다.
+  - MCP 인증(`LanTokenAuth`), API 인증, 포트 번호 정책은 바뀌지 않았다.
+- **검증**:
+  - 위 세 충돌: 수정 후 모두 readiness에 `mcp_port`가 없다(API only, 경고 출력). 다른 서버의 리스너는 그대로이고 Desktop은 그 포트를 잡지 않는다.
+  - 충돌 없음(`0.0.0.0`): `mcp_port` 유지. 광고한 `100.x:P`는 Desktop MCP가 받는다(토큰 없음 → 401). loopback `127.0.0.1:P`도 Desktop MCP가 받는다(406).
+  - `tests/test_desktop_runtime.py` 7건 추가: 세 겹침 경우 양보(광고 IP 경우는 이 호스트의 비-loopback 주소로 대신하며, 없으면 생략) / 충돌 없으면 포트 유지(2) / 충돌 시 readiness에 `mcp_port` 없음 / 다른 포트로 서빙되는 등 광고 endpoint를 받지 못하면 `mcp_port`를 알리지 않음. master에서는 종단 간 테스트가 `mcp_port`가 있어서 실패한다.
+  - macOS 전체 pytest 1997 passed. 실패 2건은 기존과 같다. Linux(Docker `python:3.12-slim`, linuxkit 6.10, root)는 `test_desktop_runtime.py`·`test_mcp_lan_token_auth.py` 60 passed, 1 failed(같은 기존 실패)이고, 신규 MCP 테스트 7건은 광고 IP 경우까지 모두 통과했다.
+- **잔여 위험**:
+  - readiness **이후** 다른 프로세스가 더 구체적인 주소(`127.0.0.1:P`, `100.x:P`)로 bind해 MCP를 가로채는 경로는 남아 있다(#49의 MCP 판). macOS에서만 가능하며 이번 범위 밖이다.
+  - 광고 host는 기동 시점의 Tailscale IP다. 실행 중 IP가 바뀌는 경우는 다루지 않는다.
+  - 충돌로 양보할 때도 그 앞에 "MCP bound to 0.0.0.0" 안내가 먼저 찍힌다(기존 출력 순서).
+  - Linux는 Docker linuxkit + root만 확인했고, 그 밖의 Linux 배포판과 Windows는 **UNKNOWN**.

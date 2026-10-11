@@ -210,25 +210,36 @@ def _bind_api_socket(host: str = LOOPBACK_HOST) -> socket.socket:
     if host not in ("0.0.0.0", LOOPBACK_HOST):
         dial_hosts.add(host)
     for port in [DEFAULT_API_PORT] + [0] * _OS_PORT_ATTEMPTS:
-        # Before we bind: a server on 0.0.0.0:P still answers loopback here, but
-        # once our more specific 127.0.0.1:P bind exists we would shadow it and
-        # the check below would only ever see ourselves.
-        if port and any(_answered_by_other(None, h, port) for h in dial_hosts):
-            continue
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-            sock.listen(2048)
-        except OSError:
-            sock.close()
-            continue
-        actual = sock.getsockname()[1]
-        if any(_answered_by_other(sock, h, actual) for h in dial_hosts):
-            sock.close()
-            continue
-        return sock
+        sock = _claim_port(host, port, dial_hosts)
+        if sock is not None:
+            return sock
     raise OSError(f"no API port on {host} that is free on {', '.join(sorted(dial_hosts))}")
+
+
+def _claim_port(host: str, port: int, dial_hosts: set[str]) -> socket.socket | None:
+    """Bind+listen ``host:port`` only if every address clients dial reaches us.
+
+    ``port`` 0 means OS-assigned. Returns the listening socket, or None when
+    the bind fails or another process answers on any of ``dial_hosts``.
+    """
+    # Before we bind: a server on 0.0.0.0:P still answers loopback here, but
+    # once our more specific 127.0.0.1:P bind exists we would shadow it and
+    # the check below would only ever see ourselves.
+    if port and any(_answered_by_other(None, h, port) for h in dial_hosts):
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+        sock.listen(2048)
+    except OSError:
+        sock.close()
+        return None
+    actual = sock.getsockname()[1]
+    if any(_answered_by_other(sock, h, actual) for h in dial_hosts):
+        sock.close()
+        return None
+    return sock
 
 
 def _bind_loopback_guard(port: int) -> socket.socket | None:
@@ -285,12 +296,15 @@ class _ProbeResponder:
         await self.app(scope, receive, send)
 
 
-def _endpoint_is_self(responder: _ProbeResponder, nonce: str, port: int) -> bool:
-    """Probe the readiness endpoint and check that this process received it."""
+def _endpoint_is_self(
+    responder: _ProbeResponder, nonce: str, port: int, host: str = LOOPBACK_HOST
+) -> bool:
+    """Probe ``host:port`` and check that this process received it."""
     import http.client
 
+    responder.seen.clear()
     try:
-        conn = http.client.HTTPConnection(LOOPBACK_HOST, port, timeout=3)
+        conn = http.client.HTTPConnection(host, port, timeout=3)
         conn.request("GET", "/", headers={_PROBE_HEADER: nonce})
         conn.getresponse().read()
         conn.close()
@@ -299,19 +313,22 @@ def _endpoint_is_self(responder: _ProbeResponder, nonce: str, port: int) -> bool
     return responder.seen.wait(timeout=1)
 
 
-def _port_is_free(host: str, port: int) -> bool:
-    """True if `port` can be bound on `host` right now.
+def _bind_mcp_socket(host: str, port: int, advertised: str) -> socket.socket | None:
+    """Claim the MCP port only if this process would own every address agents dial.
 
-    Used to detect a standalone `./raven.sh start` MCP already serving 8766 so
-    the desktop app cedes the port instead of racing it.
+    Issue #50: the old trial bind (SO_REUSEADDR, bind host only) let macOS put
+    us next to a standalone `./raven.sh start` MCP on an overlapping address, so
+    the advertised endpoint or 127.0.0.1 reached that server instead. Same check
+    as the API port (#22), but the port is fixed: None means "yield, API only".
+    Dialled: the advertised host, plus loopback for a loopback/wildcard bind
+    and the bind host itself for a specific address.
     """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((host, port))
-        return True
-    except OSError:
-        return False
+    dial_hosts = {advertised}
+    if host in ("0.0.0.0", LOOPBACK_HOST):
+        dial_hosts.add(LOOPBACK_HOST)
+    else:
+        dial_hosts.add(host)
+    return _claim_port(host, port, dial_hosts)
 
 
 def _resolve_mcp_host(explicit: str | None, api_host: str) -> str:
@@ -475,17 +492,20 @@ def main() -> int:
                 "tailnet/LAN need a Bearer token (raven mcp token add <name>)",
                 file=sys.stderr,
             )
-        if not _port_is_free(mcp_host, args.mcp_port):
+        mcp_advertised = _advertised_mcp_host(mcp_host)
+        mcp_sock = _bind_mcp_socket(mcp_host, args.mcp_port, mcp_advertised)
+        if mcp_sock is None:
             print(
-                f"⚠️  [Desktop Core] MCP port {args.mcp_port} already in use "
-                f"(standalone ./raven.sh start?) — skipping desktop MCP, API only.",
+                f"⚠️  [Desktop Core] MCP port {args.mcp_port} already in use or answered by "
+                f"another server (standalone ./raven.sh start?) — skipping desktop MCP, API only.",
                 file=sys.stderr,
             )
         else:
             try:
-                mcp_app = _build_mcp_app(args.mcp_mode, mcp_host)
+                mcp_probe_nonce = secrets.token_hex(16)
+                mcp_target = _ProbeResponder(_build_mcp_app(args.mcp_mode, mcp_host), mcp_probe_nonce)
                 mcp_config = uvicorn.Config(
-                    mcp_app,
+                    mcp_target,
                     host=mcp_host,
                     port=args.mcp_port,
                     log_level="warning",
@@ -493,6 +513,7 @@ def main() -> int:
                 )
                 mcp_server = uvicorn.Server(mcp_config)
             except Exception as exc:  # noqa: BLE001 — degrade, don't take the app down
+                mcp_sock.close()
                 print(
                     f"⚠️  [Desktop Core] MCP disabled — failed to build server: "
                     f"{type(exc).__name__}: {exc}",
@@ -512,7 +533,7 @@ def main() -> int:
 
     mcp_thread: threading.Thread | None = None
     if mcp_server is not None:
-        mcp_thread = threading.Thread(target=mcp_server.run, daemon=True)
+        mcp_thread = threading.Thread(target=mcp_server.run, kwargs={"sockets": [mcp_sock]}, daemon=True)
         mcp_thread.start()
 
     # Wait for API readiness — this one IS fatal; without the API there is no app.
@@ -547,6 +568,19 @@ def main() -> int:
                 break
             time.sleep(0.05)
 
+    # Issue #50: only advertise an MCP endpoint this process actually answers.
+    if mcp_ready:
+        mcp_dialled = {mcp_advertised} | ({LOOPBACK_HOST} if mcp_host in ("0.0.0.0", LOOPBACK_HOST) else set())
+        stolen = [h for h in sorted(mcp_dialled) if not _endpoint_is_self(mcp_target, mcp_probe_nonce, args.mcp_port, h)]
+        if stolen:
+            print(
+                f"⚠️  [Desktop Core] MCP {', '.join(stolen)}:{args.mcp_port} is answered by another "
+                "process — continuing API only.",
+                file=sys.stderr,
+            )
+            mcp_server.should_exit = True
+            mcp_ready = False
+
     # Issue #22: never hand the webview an endpoint some other server answers.
     # A specific non-loopback bind (e.g. the Tailscale IP) is not on loopback at
     # all, so the readiness address cannot be ours there — that is #16.
@@ -574,7 +608,7 @@ def main() -> int:
     ready = {"host": LOOPBACK_HOST, "port": api_port}
     if mcp_ready:
         ready["mcp_port"] = args.mcp_port
-        ready["mcp_host"] = _advertised_mcp_host(mcp_host)
+        ready["mcp_host"] = mcp_advertised
     print(json.dumps(ready), flush=True)
 
     try:
