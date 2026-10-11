@@ -1041,3 +1041,27 @@ A-5의 원래 질문은 Tauri 프로덕션 번들에서 `/page/vault/slug` 같�
   - 본문의 외부 링크가 웹뷰 자체를 다른 사이트로 이동시키는 문제
   - Tauri에서 debug-log beacon이 `tauri://localhost/api/debug-log`로 가는 문제
   - Core가 시작에 실패하면 "Raven 시작 중…"이 끝나지 않는 문제
+
+## 47. 데스크톱 셸 — Core 준비 대기가 async 런타임 워커를 붙잡지 않게 (Issue #1 A-2)
+
+`core_endpoint`/`mcp_endpoint`는 async Tauri 명령인데, 대기 루프(`wait_for_core`)가 명령 안에서 바로 돌며 `std::thread::sleep(100ms)`로 폴링했다. Tauri async 런타임의 워커 스레드는 CPU 수만큼(이 기기 8개)이다. Core가 늦으면 호출 하나가 워커 하나를 최대 15초 붙잡는다. 동시 호출이 워커 수를 넘으면 뒤의 호출과 다른 async 작업(플러그인 명령 등)이 앞의 대기가 끝날 때까지 시작조차 못 한다.
+
+- **수정**:
+  - 대기 자체(`wait_for_core`, 15초 타임아웃, 100ms 폴링, 반환 계약)는 그대로 두었다.
+  - 새 `off_runtime`이 그 대기를 `tauri::async_runtime::spawn_blocking`으로 blocking 풀에서 돌린다. 두 명령은 `AppHandle`을 받아 클로저 안에서 `CoreState`를 읽는다. webview 쪽 invoke 인자는 바뀌지 않는다.
+  - 새 의존성은 없다. `tokio::time::sleep`은 tokio를 직접 의존성으로 추가해야 해서 택하지 않았다. readiness 알림(Condvar/Notify)은 `CoreState` 구조와 재시작 경로까지 바꾸게 되어 택하지 않았다.
+  - lock은 매 폴링마다 잡았다 놓으므로 sleep이나 await 너머로 guard를 들고 있지 않다. 대기는 상태를 읽기만 하므로, 호출이 취소돼도 공유 상태는 바뀌지 않는다.
+  - 새 오류 경로는 대기 작업 자체가 panic한 경우의 `Python Core wait failed: …` 하나뿐이다. 정상 경로의 값과 오류 문자열은 그대로다.
+- **검증**:
+  - `lib.rs` 테스트에 5건을 추가했다. 모두 실제 `tauri::async_runtime` 위에서 명령과 같은 경로(`off_runtime`)로 돈다.
+    - 워커 비점유: 준비 안 된 Core에 64개를 동시에 대기시키는 동안 다른 작업이 200ms 안에 실행되는지, 그리고 64개가 타임아웃 한 번 남짓에 같은 오류로 끝나는지
+    - 준비된 Core는 실제 정책 상수(15초/100ms)로도 폴링 간격 없이 바로 응답하는지, MCP 켜짐/꺼짐(`""`) 계약
+    - 타임아웃 오류 문자열 유지
+    - 동시 호출 32개가 Core 준비 후 모두 같은 값을 200ms 안에 받는지
+    - 취소된 호출이 lock을 오염시키거나 상태를 바꾸지 않는지
+  - RED는 같은 경계 함수에 지금 동작(명령 안에서 바로 대기)을 넣고 돌렸다. 워커 비점유 테스트가 "다른 async 작업이 4.78초 동안 실행되지 못했다"로 실패했다. 나머지 4건은 단독으로는 통과했다(계약 테스트). 함께 돌리면 남은 대기가 워커를 붙잡아, 준비된 Core의 응답까지 0.56~3.6초 밀렸다.
+  - 수정 후 `cargo test` 25건이 모두 통과했다(새 5건은 연속 6회 반복해도 통과). `cargo build` 성공. `cargo clippy --all-targets`의 신규 경고는 없다(기존 1건은 Reopen 처리부로 master와 같다). 새 코드는 rustfmt 형식에 맞췄다.
+  - Tauri 런타임 결과는 PR 본문에 둔다.
+- **범위 밖 (수정하지 않음)**:
+  - Core 기동(`CoreState::start`)도 `async_runtime::spawn` 안에서 readiness 줄을 blocking `read_line`으로 기다린다. 그래서 기동 중에는 워커 하나를 쓴다. 이번 범위는 대기 명령이고, Core 기동 방식은 바꾸지 않는다.
+  - lock이 손상돼도 15초를 다 기다린 뒤에 오류를 내는 문제, MCP 기동 실패와 MCP 꺼짐을 구분하지 못하는 문제(§45의 범위 밖 항목)는 그대로다.
