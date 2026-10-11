@@ -121,6 +121,9 @@ impl ManagedCore {
         let mcp_mode = mcp_mode_from_env(env::var("RAVEN_DESKTOP_MCP_MODE").ok());
         let spec = runtime_launch_spec(python, mcp, python_path, Some(host), Some(mcp_mode));
         let mut cmd = Command::new(&spec.program);
+        // Issue #23: lets the Core shut itself down if this shell dies without
+        // reaching RunEvent::Exit (SIGTERM/SIGHUP, crash) — see runtime.py PARENT_PID_ENV.
+        cmd.env("RAVEN_DESKTOP_PARENT_PID", std::process::id().to_string());
         cmd.args(&spec.args)
             .current_dir(safe_workspace(spec.env.iter().any(|(k, _)| k == "PYTHONPATH")))
             .stdout(Stdio::piped())

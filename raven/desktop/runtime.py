@@ -75,6 +75,35 @@ DEFAULT_MCP_PORT = int(os.environ.get("PORT_MCP", "8766"))
 
 DEFAULT_API_PORT = int(os.environ.get("PORT_API", "8765"))
 
+# Issue #23: the Tauri shell sets this to its own PID. If the shell dies without
+# running its exit hook (SIGTERM/SIGHUP, crash, SIGKILL) the Core is reparented
+# and notices, instead of living on as an orphan holding the API/MCP ports.
+PARENT_PID_ENV = "RAVEN_DESKTOP_PARENT_PID"
+
+
+def _watched_parent_pid() -> int | None:
+    """The shell PID to watch, or None when not launched by the shell.
+
+    A value that is not our actual parent (malformed, or inherited by a process
+    the shell did not spawn directly) disables the watch rather than shutting
+    down a Core whose parent is alive.
+    """
+    raw = os.environ.get(PARENT_PID_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        pid = None
+    if pid is None or pid != os.getppid():
+        print(
+            f"⚠️  [Desktop Core] {PARENT_PID_ENV}={raw!r} is not this process's parent — "
+            "not watching for parent exit",
+            file=sys.stderr,
+        )
+        return None
+    return pid
+
 
 class _PipeSafeStream:
     """Wrap stdout/stderr so a closed pipe never becomes a request failure.
@@ -490,8 +519,15 @@ def main() -> int:
         ready["mcp_host"] = _advertised_mcp_host(mcp_host)
     print(json.dumps(ready), flush=True)
 
+    parent_pid = _watched_parent_pid()
     try:
         while not api_server.should_exit:
+            if parent_pid is not None and os.getppid() != parent_pid:
+                print(
+                    f"[Desktop Core] parent shell (pid {parent_pid}) is gone — shutting down",
+                    file=sys.stderr,
+                )
+                break
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
