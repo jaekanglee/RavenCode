@@ -48,6 +48,8 @@ import argparse
 import asyncio
 import json
 import os
+import select
+import secrets
 import signal
 import socket
 import sys
@@ -120,17 +122,111 @@ def _harden_std_streams() -> None:
     sys.stderr = _PipeSafeStream(sys.stderr)
 
 
-def _free_port(host: str = LOOPBACK_HOST) -> int:
-    """Try preferred 8765 port first, fallback to OS assigned free port if occupied."""
+_OS_PORT_ATTEMPTS = 20
+_PROBE_HEADER = "x-raven-core-probe"
+
+
+def _answered_by_other(listener: socket.socket | None, host: str, port: int) -> bool:
+    """Connect to ``host:port`` and report whether someone other than ``listener`` answered.
+
+    ``listener`` (when given) is already listening, so a connection that lands
+    in its accept queue reached us. A refusal means nobody listens there. A
+    connection we did not receive, a timeout or any other error counts as
+    another owner — an unclear answer never claims the port.
+    """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((host, DEFAULT_API_PORT))
-            return DEFAULT_API_PORT
-    except Exception:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-            return s.getsockname()[1]
+        probe = socket.create_connection((host, port), timeout=0.5)
+    except ConnectionRefusedError:
+        return False
+    except OSError:
+        return True
+    with probe:
+        if listener is None:
+            return True
+        readable, _, _ = select.select([listener], [], [], 0.2)
+        if not readable:
+            return True
+        conn, _ = listener.accept()
+        conn.close()
+        return False
+
+
+def _bind_api_socket(host: str = LOOPBACK_HOST) -> socket.socket:
+    """Bind and listen on the API socket — preferred port first, else OS-assigned.
+
+    Issue #22: macOS/BSD let ``0.0.0.0:P`` bind under SO_REUSEADDR while another
+    process listens on ``127.0.0.1:P`` (and vice versa), and the more specific
+    bind keeps the loopback traffic — so the webview, which dials 127.0.0.1,
+    reached the other server. A bind that succeeds is therefore not enough:
+    the port counts as taken if anything else answers on loopback (where the
+    webview dials) or on the bind host itself. SO_REUSEADDR stays so a port
+    left in TIME_WAIT by our own previous run is still reused.
+
+    The check runs on the socket we keep: it is already listening when probed
+    and is handed to uvicorn as is, so there is no gap between the check and
+    the real bind for another process to take. (Probing before listening does
+    not work — macOS drops a SYN to a bound, non-listening socket.)
+    """
+    dial_hosts = {LOOPBACK_HOST}
+    if host not in ("0.0.0.0", LOOPBACK_HOST):
+        dial_hosts.add(host)
+    for port in [DEFAULT_API_PORT] + [0] * _OS_PORT_ATTEMPTS:
+        # Before we bind: a server on 0.0.0.0:P still answers loopback here, but
+        # once our more specific 127.0.0.1:P bind exists we would shadow it and
+        # the check below would only ever see ourselves.
+        if port and any(_answered_by_other(None, h, port) for h in dial_hosts):
+            continue
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            sock.listen(2048)
+        except OSError:
+            sock.close()
+            continue
+        actual = sock.getsockname()[1]
+        if any(_answered_by_other(sock, h, actual) for h in dial_hosts):
+            sock.close()
+            continue
+        return sock
+    raise OSError(f"no API port on {host} that is free on {', '.join(sorted(dial_hosts))}")
+
+
+class _ProbeResponder:
+    """ASGI wrapper that answers this process's own identity probe.
+
+    A request carrying the per-start nonce in ``x-raven-core-probe`` is answered
+    here (204) and recorded; every other request goes to the app untouched. The
+    nonce lives only in memory and is never sent back, so seeing the event set
+    proves the probe reached *this* process — whatever the response looked like.
+    """
+
+    def __init__(self, app, nonce: str) -> None:
+        self.app = app
+        self._nonce = nonce.encode()
+        self.seen = threading.Event()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and (_PROBE_HEADER.encode(), self._nonce) in scope.get("headers", []):
+            self.seen.set()
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await self.app(scope, receive, send)
+
+
+def _endpoint_is_self(responder: _ProbeResponder, nonce: str, port: int) -> bool:
+    """Probe the readiness endpoint and check that this process received it."""
+    import http.client
+
+    try:
+        conn = http.client.HTTPConnection(LOOPBACK_HOST, port, timeout=3)
+        conn.request("GET", "/", headers={_PROBE_HEADER: nonce})
+        conn.getresponse().read()
+        conn.close()
+    except OSError:
+        pass
+    return responder.seen.wait(timeout=1)
 
 
 def _port_is_free(host: str, port: int) -> bool:
@@ -228,7 +324,8 @@ def main() -> int:
             # No tailnet is not an excuse to fall back to every interface.
             bind_host = LOOPBACK_HOST
 
-    api_port = _free_port(bind_host)
+    api_sock = _bind_api_socket(bind_host)
+    api_port = api_sock.getsockname()[1]
 
     # Issue #14: RAVEN_ALLOW_ALL_CORS is NOT set here. `raven.api.main` imports
     # `raven.api.server` (which snapshots the CORS config) before this module
@@ -259,7 +356,12 @@ def main() -> int:
             "(raven mcp token add <name>)",
             file=sys.stderr,
         )
-    api_target = "raven.api:app"
+    # Issue #22: a per-start nonce lets the readiness check confirm that the
+    # endpoint handed to the webview is served by this process (see below).
+    from raven.api import app as api_app
+
+    probe_nonce = secrets.token_hex(16)
+    api_target = _ProbeResponder(api_app, probe_nonce)
 
     api_config = uvicorn.Config(
         api_target,
@@ -314,7 +416,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    api_thread = threading.Thread(target=api_server.run, daemon=True)
+    api_thread = threading.Thread(target=api_server.run, kwargs={"sockets": [api_sock]}, daemon=True)
     api_thread.start()
 
     mcp_thread: threading.Thread | None = None
@@ -353,6 +455,30 @@ def main() -> int:
                 mcp_server.should_exit = True
                 break
             time.sleep(0.05)
+
+    # Issue #22: never hand the webview an endpoint some other server answers.
+    # A specific non-loopback bind (e.g. the Tailscale IP) is not on loopback at
+    # all, so the readiness address cannot be ours there — that is #16.
+    if bind_host in ("0.0.0.0", LOOPBACK_HOST):
+        if not _endpoint_is_self(api_target, probe_nonce, api_port):
+            print(
+                f"Python Core: {LOOPBACK_HOST}:{api_port} is answered by another process — "
+                "refusing to report it as ready",
+                file=sys.stderr,
+            )
+            api_server.should_exit = True
+            if mcp_server is not None:
+                mcp_server.should_exit = True
+            api_thread.join(timeout=5)
+            if mcp_thread is not None:
+                mcp_thread.join(timeout=5)
+            return 1
+    else:
+        print(
+            f"⚠️  [Desktop Core] API bound to {bind_host} only — the loopback readiness "
+            f"endpoint {LOOPBACK_HOST}:{api_port} is not served by this process (#16)",
+            file=sys.stderr,
+        )
 
     ready = {"host": LOOPBACK_HOST, "port": api_port}
     if mcp_ready:

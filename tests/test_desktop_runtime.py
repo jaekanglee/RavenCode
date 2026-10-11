@@ -558,3 +558,205 @@ def test_tailscale_host_without_tailnet_does_not_fall_open(monkeypatch) -> None:
     monkeypatch.delenv("RAVEN_HOST", raising=False)
     assert api_main(["--host", "tailscale"]) == 0
     assert captured["host"] == "127.0.0.1", captured
+
+
+# ─── Issue #22: the readiness endpoint must be served by this Core ───────────
+
+
+def _listener(host: str, port: int = 0) -> socket.socket:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, port))
+    s.listen(8)
+    return s
+
+
+def _accepts_loopback(sock: socket.socket) -> bool:
+    """A loopback connect to ``sock``'s port lands in ``sock``'s own accept queue."""
+    port = sock.getsockname()[1]
+    with socket.create_connection(("127.0.0.1", port), timeout=1):
+        readable, _, _ = select.select([sock], [], [], 1)
+        if not readable:
+            return False
+        conn, _ = sock.accept()
+        conn.close()
+        return True
+
+
+def test_api_socket_takes_default_port_when_free(monkeypatch) -> None:
+    from raven.desktop import runtime
+
+    port = _free_port()
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", port)
+    sock = runtime._bind_api_socket("127.0.0.1")
+    try:
+        assert sock.getsockname()[1] == port
+        assert _accepts_loopback(sock)
+    finally:
+        sock.close()
+
+
+def test_api_socket_skips_port_held_on_loopback_for_wildcard_bind(monkeypatch) -> None:
+    """Another server on 127.0.0.1:P — a 0.0.0.0:P bind succeeds on macOS but loses loopback."""
+    from raven.desktop import runtime
+
+    other = _listener("127.0.0.1")
+    port = other.getsockname()[1]
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", port)
+    try:
+        sock = runtime._bind_api_socket("0.0.0.0")
+        try:
+            assert sock.getsockname()[1] != port
+            assert _accepts_loopback(sock)
+        finally:
+            sock.close()
+    finally:
+        other.close()
+
+
+def test_api_socket_skips_port_held_on_wildcard_for_loopback_bind(monkeypatch) -> None:
+    """Another server on 0.0.0.0:P — a 127.0.0.1:P bind succeeds on macOS and would shadow it."""
+    from raven.desktop import runtime
+
+    other = _listener("0.0.0.0")
+    port = other.getsockname()[1]
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", port)
+    try:
+        sock = runtime._bind_api_socket("127.0.0.1")
+        try:
+            assert sock.getsockname()[1] != port
+            assert _accepts_loopback(sock)
+        finally:
+            sock.close()
+    finally:
+        other.close()
+
+
+def test_api_socket_reuses_a_just_closed_port(monkeypatch) -> None:
+    """A port our previous run left in TIME_WAIT is still the one we take."""
+    from raven.desktop import runtime
+
+    previous = _listener("127.0.0.1")
+    port = previous.getsockname()[1]
+    client = socket.create_connection(("127.0.0.1", port), timeout=1)
+    conn, _ = previous.accept()
+    conn.close()  # server side closes first → TIME_WAIT on port
+    client.close()
+    previous.close()
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", port)
+    sock = runtime._bind_api_socket("127.0.0.1")
+    try:
+        assert sock.getsockname()[1] == port
+    finally:
+        sock.close()
+
+
+def test_identity_probe_rejects_an_endpoint_served_by_another_process() -> None:
+    """Answering the probe is not enough — this process must be the one that received it."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from raven.desktop.runtime import _ProbeResponder, _endpoint_is_self
+
+    class Other(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server API
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    other = HTTPServer(("127.0.0.1", 0), Other)
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    try:
+        responder = _ProbeResponder(app=None, nonce="n")
+        assert _endpoint_is_self(responder, "n", other.server_address[1]) is False
+    finally:
+        other.shutdown()
+        other.server_close()
+
+
+def test_identity_probe_is_answered_in_process_and_not_forwarded() -> None:
+    import asyncio
+
+    from raven.desktop.runtime import _ProbeResponder
+
+    forwarded = []
+
+    async def app(scope, receive, send):
+        forwarded.append(scope["path"])
+
+    responder = _ProbeResponder(app, nonce="abc")
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def run(headers):
+        await responder({"type": "http", "path": "/", "headers": headers}, None, send)
+
+    asyncio.run(run([(b"x-raven-core-probe", b"wrong")]))
+    assert forwarded == ["/"] and not responder.seen.is_set()
+    asyncio.run(run([(b"x-raven-core-probe", b"abc")]))
+    assert forwarded == ["/"] and responder.seen.is_set()
+    assert sent[0]["status"] == 204
+
+
+def _isolated_env(root: Path, name: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "WIKI_", "PORT_"))}
+    env.update(HOME=str(root / name / "home"), WIKI_VAULTS_DIR=str(root / name / "reg"))
+    Path(env["HOME"]).mkdir(parents=True)
+    subprocess.run(
+        [sys.executable, "-c", f"from raven.core.vault import Vault; Vault.create('shared', {str(root / name / 'vault')!r})"],
+        cwd=REPO_ROOT, env=env, check=True, capture_output=True,
+    )
+    return env
+
+
+def test_remote_core_never_hands_the_webview_another_servers_vault(tmp_path: Path) -> None:
+    """Issue #22 end to end: another Raven API on 127.0.0.1:P, Desktop Core asked for 0.0.0.0.
+
+    Before the fix the Core also bound *:P, reported 127.0.0.1:P, and a page
+    written through that endpoint landed in the other server's vault.
+    """
+    port = _free_port()
+    other_env = _isolated_env(tmp_path, "other")
+    other = subprocess.Popen(
+        [sys.executable, "-m", "raven.api", "--port", str(port)],
+        cwd=REPO_ROOT, env=other_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    core = None
+    try:
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.3).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "other server did not start"
+                time.sleep(0.1)
+
+        core_env = _isolated_env(tmp_path, "desktop")
+        core_env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(port))
+        core = subprocess.Popen(
+            [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0"],
+            cwd=REPO_ROOT, env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        ready = _wait_for_ready(core)
+        assert ready["host"] == "127.0.0.1"
+        assert ready["port"] != port
+
+        body = json.dumps({"slug": "content/i22", "title": "i22", "content": "x"}).encode()
+        req = Request(
+            f"http://127.0.0.1:{ready['port']}/api/vaults/shared/pages",
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            assert response.status == 200
+        assert (tmp_path / "desktop" / "vault" / "content" / "i22.md").exists()
+        assert not (tmp_path / "other" / "vault" / "content" / "i22.md").exists()
+    finally:
+        for proc in (core, other):
+            if proc is not None:
+                proc.terminate()
+                proc.wait(timeout=10)
