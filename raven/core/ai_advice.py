@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 import json
-import httpx
 from typing import Any, List, Dict
+from .gemini_client import generate_content
 from .vault import Vault
 from .advice import get_advice
 
@@ -35,14 +35,12 @@ def generate_ai_advice(vault: Vault) -> List[Dict[str, Any]]:
             )
             
             # Gemini API 호출 (Direct HTTP Call)
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseMimeType": "application/json"}
             }
             
-            resp = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+            resp = generate_content(api_key, payload)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 text = resp_json["candidates"][0]["content"]["parts"][0]["text"]

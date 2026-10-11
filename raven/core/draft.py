@@ -9,6 +9,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, List, Optional
 
+from .gemini_client import generate_content
 from .vault import Vault
 from .db import build_db
 
@@ -52,7 +53,6 @@ def generate_draft(
 
     if api_key:
         try:
-            import httpx
             prompt = (
                 "너는 지식 보관소(Vault)의 문서를 작성하는 AI 작가이다.\n"
                 "사용자가 제공한 주제(Topic), 예상 아웃라인(Outline), 그리고 연관 페이지 목록을 바탕으로 고품질 마크다운 초안 문서를 작성해라.\n\n"
@@ -77,13 +77,11 @@ def generate_draft(
                 "마크다운 초안 문서:"
             )
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]
             }
 
-            resp = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+            resp = generate_content(api_key, payload)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 answer = resp_json["candidates"][0]["content"]["parts"][0]["text"].strip()

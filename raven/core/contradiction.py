@@ -5,6 +5,7 @@ import os
 import json
 import sqlite3
 from typing import Any, List, Dict, Optional
+from .gemini_client import generate_content
 from .vault import Vault
 
 def get_contradiction_pairs(vault: Vault) -> list[dict[str, Any]]:
@@ -112,7 +113,6 @@ def check_contradictions(vault: Vault) -> dict[str, Any]:
     
     if api_key:
         try:
-            import httpx
             prompt = (
                 "너는 지식 네트워크의 문서 간 논리적 모순이나 충돌(Contradiction)을 찾아내고 정합성을 강화하는 AI 조언자이다.\n"
                 "제공된 각 문서 쌍(Source & Target)의 본문을 읽고, 내용 간에 서로 모순되거나 충돌하는 기술 사양(예: 서로 다른 포트, 충돌하는 데이터 포맷), "
@@ -140,13 +140,11 @@ def check_contradictions(vault: Vault) -> dict[str, Any]:
                 "분석 결과 JSON:"
             )
             
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]
             }
             
-            resp = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+            resp = generate_content(api_key, payload)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 answer = resp_json["candidates"][0]["content"]["parts"][0]["text"].strip()
