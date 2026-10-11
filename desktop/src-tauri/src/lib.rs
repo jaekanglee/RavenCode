@@ -234,6 +234,31 @@ fn save_download_file(filename: String, contents: String) -> Result<String, Stri
     Ok(target.display().to_string())
 }
 
+fn startup_failure_message(error: &dyn std::fmt::Display) -> String {
+    format!("Raven failed to start:\n{error}")
+}
+
+/// Tells the user the Python Core didn't start, then exits with code 1 once they acknowledge it.
+///
+/// Issue #1 A-3: this used to shell out to macOS-only `osascript` and wait on its `.status()`,
+/// pinning the async runtime worker until OK was clicked. `show` returns at once — the plugin
+/// presents the dialog on the main thread (macOS/Windows/Linux alike) and runs the callback on
+/// its own thread after the user responds, so the exit still happens only after the notice
+/// has been seen, without blocking a worker or the event loop.
+fn report_startup_failure_and_exit(app: &tauri::AppHandle, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let msg = startup_failure_message(&error);
+    eprintln!("{msg}");
+    let exit_handle = app.clone();
+    app.dialog()
+        .message(msg)
+        .title("Raven")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| exit_handle.exit(1));
+}
+
 pub fn run() {
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
@@ -265,18 +290,7 @@ pub fn run() {
             let resource_dir = app.path().resource_dir().ok();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = handle.state::<CoreState>().start(mcp_enabled, resource_dir) {
-                    let msg = format!("Raven failed to start:\n{e}");
-                    eprintln!("{msg}");
-                    let _ = std::process::Command::new("osascript")
-                        .args([
-                            "-e",
-                            &format!(
-                                "display dialog \"{}\" with title \"Raven\" buttons {{\"OK\"}} default button \"OK\" with icon stop",
-                                msg.replace('"', "\\\"").replace('\n', "\\n")
-                            ),
-                        ])
-                        .status();
-                    handle.exit(1);
+                    report_startup_failure_and_exit(&handle, &e);
                 }
             });
 
@@ -355,18 +369,9 @@ pub fn run() {
             }
         }),
         Err(e) => {
-            let msg = format!("Raven failed to start:\n{e}");
-            eprintln!("{msg}");
-            // Native macOS dialog instead of panic → abort
-            let _ = std::process::Command::new("osascript")
-                .args([
-                    "-e",
-                    &format!(
-                        "display dialog \"{}\" with title \"Raven\" buttons {{\"OK\"}} default button \"OK\" with icon stop",
-                        msg.replace('"', "\\\"").replace('\n', "\\n")
-                    ),
-                ])
-                .status();
+            // No event loop or AppHandle exists yet, so tauri_plugin_dialog can't show anything
+            // here (Issue #1 A-3) — report on stderr and keep the exit code.
+            eprintln!("{}", startup_failure_message(&e));
             std::process::exit(1);
         }
     }
@@ -789,5 +794,30 @@ mod tests {
         for p in ["dialog:allow-open", "dialog:allow-save"] {
             assert!(perms.contains(&p), "{p} 권한 누락");
         }
+    }
+
+    // Issue #1 A-3: 시작 실패 안내는 osascript(macOS 전용) 대신 tauri_plugin_dialog로 띄운다.
+    // osascript 시절에는 따옴표·줄바꿈을 AppleScript용으로 이스케이프했다 — 이제 원문 그대로 전달.
+    #[test]
+    fn startup_failure_message_keeps_error_text_verbatim() {
+        let err = "Python Core 시작 실패 (\"/x/python\"): No such file\nline2";
+        assert_eq!(
+            super::startup_failure_message(&err),
+            format!("Raven failed to start:\n{err}")
+        );
+    }
+
+    #[test]
+    fn startup_failure_has_no_platform_specific_dialog() {
+        let src = include_str!("lib.rs");
+        let shell_out = concat!("Command::new(\"", "osascript");
+        assert!(
+            !src.contains(shell_out),
+            "시작 실패 안내가 다시 osascript를 호출한다"
+        );
+        assert!(
+            src.contains(".dialog()"),
+            "tauri_plugin_dialog 경로가 사라졌다"
+        );
     }
 }
