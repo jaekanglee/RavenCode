@@ -897,3 +897,100 @@ def test_core_exits_when_the_shell_dies_before_readiness(tmp_path: Path) -> None
                 os.kill(core_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# ─── Issue #49: nobody may take 127.0.0.1:P after a 0.0.0.0 Core is ready ────
+
+_BIND_ATTEMPT = r"""
+import socket, sys
+port, reuseport = int(sys.argv[1]), sys.argv[2] == "1"
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if reuseport:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+try:
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+    print("BOUND")
+except OSError:
+    print("REFUSED")
+"""
+
+
+@pytest.mark.parametrize("reuseport", [False, True], ids=["reuseaddr", "reuseaddr+reuseport"])
+def test_wildcard_core_keeps_loopback_from_other_processes(monkeypatch, reuseport) -> None:
+    """macOS let a later 127.0.0.1:P bind shadow our 0.0.0.0:P; the guard socket stops it.
+
+    Linux refuses that bind on its own (and refuses the guard too, which is fine).
+    """
+    from raven.desktop import runtime
+
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", _free_port())
+    wild = runtime._bind_api_socket("0.0.0.0")
+    port = wild.getsockname()[1]
+    guard = runtime._bind_loopback_guard(port)
+    ours = [wild] + ([guard] if guard is not None else [])
+    try:
+        if sys.platform == "darwin":
+            assert guard is not None
+        attempt = subprocess.run(
+            [sys.executable, "-c", _BIND_ATTEMPT, str(port), "1" if reuseport else "0"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert attempt.stdout.strip() == "REFUSED"
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            readable, _, _ = select.select(ours, [], [], 1)
+            assert readable, "loopback did not reach our sockets"
+            readable[0].accept()[0].close()
+    finally:
+        for s in ours:
+            s.close()
+
+
+def test_loopback_core_takes_no_guard_socket() -> None:
+    """The guard is only for a wildcard bind; the default loopback Core is unchanged."""
+    from raven.desktop import runtime
+
+    sock = runtime._bind_api_socket("127.0.0.1")
+    try:
+        # A second socket on the very same address must be refused — nothing to guard.
+        assert runtime._bind_loopback_guard(sock.getsockname()[1]) is None
+    finally:
+        sock.close()
+
+
+def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path: Path) -> None:
+    """Issue #49 end to end: Core on 0.0.0.0 reports ready, then another Raven API tries 127.0.0.1:P."""
+    core_env = _isolated_env(tmp_path, "desktop")
+    core_env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    core = subprocess.Popen(
+        [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0"],
+        cwd=REPO_ROOT, env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    other = None
+    try:
+        port = _wait_for_ready(core)["port"]
+        other = subprocess.Popen(
+            [sys.executable, "-m", "raven.api", "--port", str(port)],
+            cwd=REPO_ROOT, env=_isolated_env(tmp_path, "other"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            other.wait(timeout=15)  # cannot bind → exits
+        except subprocess.TimeoutExpired:
+            pass
+
+        body = json.dumps({"slug": "content/i49", "title": "i49", "content": "x"}).encode()
+        req = Request(
+            f"http://127.0.0.1:{port}/api/vaults/shared/pages",
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            assert response.status == 200
+        assert (tmp_path / "desktop" / "vault" / "content" / "i49.md").exists()
+        assert not (tmp_path / "other" / "vault" / "content" / "i49.md").exists()
+    finally:
+        for proc in (other, core):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)

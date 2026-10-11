@@ -230,6 +230,29 @@ def _bind_api_socket(host: str = LOOPBACK_HOST) -> socket.socket:
     raise OSError(f"no API port on {host} that is free on {', '.join(sorted(dial_hosts))}")
 
 
+def _bind_loopback_guard(port: int) -> socket.socket | None:
+    """Also hold ``127.0.0.1:port`` next to a ``0.0.0.0:port`` API socket.
+
+    Issue #49: on macOS another process could bind the more specific
+    ``127.0.0.1:port`` after readiness (SO_REUSEADDR or SO_REUSEPORT) and take
+    every webview request. Holding that exact address ourselves makes such a
+    bind fail with EADDRINUSE; uvicorn serves both sockets. Linux already
+    refuses that bind while the wildcard listens — and refuses ours too — so a
+    failed guard bind is expected there and the wildcard socket alone is safe.
+    If another process raced us to the address, the readiness identity probe
+    catches it.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((LOOPBACK_HOST, port))
+        sock.listen(2048)
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
 class _ProbeResponder:
     """ASGI wrapper that answers this process's own identity probe.
 
@@ -373,6 +396,11 @@ def main() -> int:
 
     api_sock = _bind_api_socket(bind_host)
     api_port = api_sock.getsockname()[1]
+    api_socks = [api_sock]
+    if bind_host == "0.0.0.0":
+        guard = _bind_loopback_guard(api_port)
+        if guard is not None:
+            api_socks.append(guard)
 
     # Issue #14: RAVEN_ALLOW_ALL_CORS is NOT set here. `raven.api.main` imports
     # `raven.api.server` (which snapshots the CORS config) before this module
@@ -463,7 +491,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    api_thread = threading.Thread(target=api_server.run, kwargs={"sockets": [api_sock]}, daemon=True)
+    api_thread = threading.Thread(target=api_server.run, kwargs={"sockets": api_socks}, daemon=True)
     api_thread.start()
 
     mcp_thread: threading.Thread | None = None
