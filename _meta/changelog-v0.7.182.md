@@ -1065,3 +1065,23 @@ A-5의 원래 질문은 Tauri 프로덕션 번들에서 `/page/vault/slug` 같�
 - **범위 밖 (수정하지 않음)**:
   - Core 기동(`CoreState::start`)도 `async_runtime::spawn` 안에서 readiness 줄을 blocking `read_line`으로 기다린다. 그래서 기동 중에는 워커 하나를 쓴다. 이번 범위는 대기 명령이고, Core 기동 방식은 바꾸지 않는다.
   - lock이 손상돼도 15초를 다 기다린 뒤에 오류를 내는 문제, MCP 기동 실패와 MCP 꺼짐을 구분하지 못하는 문제(§45의 범위 밖 항목)는 그대로다.
+
+## 48. 데스크톱 셸 — 시작 실패 안내를 osascript 대신 tauri_plugin_dialog로 (Issue #1 A-3)
+
+Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용 `osascript`로 "Raven failed to start" 대화상자를 띄운 뒤 `exit(1)`했다. Linux/Windows에서는 `osascript`가 없어 안내 없이 바로 종료됐다. 또 `osascript`의 `.status()`가 사용자가 OK를 누를 때까지 async 런타임 워커 하나를 붙잡았다.
+
+- **수정**:
+  - 실패 감지 조건과 문구(`Raven failed to start:\n{오류}`)는 그대로 두었다. `osascript` 호출과 AppleScript용 이스케이프를 지웠다.
+  - 새 `report_startup_failure_and_exit`가 이미 등록된 `tauri_plugin_dialog`(2.7.3)의 `MessageDialogBuilder::show(콜백)`으로 오류 아이콘·OK 버튼 대화상자를 띄운다. `show`는 바로 반환한다. 플러그인이 메인 스레드에서 대화상자를 띄우고, 사용자가 응답하면 별도 스레드에서 콜백을 부른다. 콜백에서 `exit(1)`하므로 "확인 후 종료"는 그대로이고, 워커도 이벤트 루프도 막지 않는다. `blocking_show`는 호출 스레드를 막기 때문에 쓰지 않았다.
+  - `Builder::build()`가 실패하는 경로에는 아직 이벤트 루프도 `AppHandle`도 없어서 플러그인을 쓸 수 없다. 이 경로는 사용자 결정에 따라 stderr 출력 후 `exit(1)`만 한다(새 의존성 ❌). macOS에서 이 드문 경로의 GUI 안내는 사라진다.
+  - 플랫폼별 분기는 없다. 새 의존성도 없다.
+- **검증**:
+  - `lib.rs` 테스트 2건 추가: 오류 문구가 이스케이프 없이 그대로 전달되는지, 소스에 `osascript` 호출이 다시 들어오지 않고 플러그인 경로가 남아 있는지.
+  - macOS 격리 런타임(릴리스 빌드, 임시 HOME, API 포트 18765/18775, MCP 꺼짐): 정상 기동이면 대화상자 없음. 기동 실패면 stderr에 문구가 찍히고 앱은 종료되지 않은 채 대화상자 하나를 띄운다. 이때 메인 스레드는 `NSApplication run`에서 이벤트를 받고 tokio 워커 8개는 모두 대기(park) 상태다.
+  - 대화상자를 확인하면 프로세스가 끝난다. 관측된 종료 코드는 0이다. master도 같다: `osascript`를 즉시 끝나는 가짜로 바꿔 master를 돌려도 0이다. Tauri wry 런타임이 `App::run`에서 `RequestExit(code)`를 코드 없는 `ControlFlow::Exit`로 처리하기 때문이다. 종료 정책(`handle.exit(1)` 호출)은 바꾸지 않았다.
+  - Linux 컨테이너(`rust:1-bookworm`, aarch64)의 `cargo check`는 기존 `RunEvent::Reopen`(macOS 전용 variant) 한 곳에서 실패한다. 이번 변경과 무관한 master의 상태이고, 이번 변경에서 나온 추가 오류는 없다. Windows는 이 기기에서 확인하지 못했다.
+  - Tauri 런타임 결과와 플랫폼별 범위는 PR 본문에 둔다.
+- **범위 밖 (수정하지 않음)**:
+  - Core 기동 자체는 여전히 `async_runtime::spawn` 안에서 blocking `read_line`으로 readiness를 기다린다(§47 범위 밖 항목과 같다).
+  - 재시작 실패(트레이 "Restart Backend", `restart_core`)는 원래 대화상자가 없었고 그대로다.
+  - `handle.exit(1)`의 종료 코드가 0으로 나가는 문제(`run_return` 필요), Linux에서 `RunEvent::Reopen` 때문에 빌드가 안 되는 문제는 별도 후속으로 둔다.
