@@ -897,3 +897,186 @@ def test_core_exits_when_the_shell_dies_before_readiness(tmp_path: Path) -> None
                 os.kill(core_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# ─── Issue #49: nobody may take 127.0.0.1:P after a 0.0.0.0 Core is ready ────
+
+_BIND_ATTEMPT = r"""
+import socket, sys
+port, reuseport = int(sys.argv[1]), sys.argv[2] == "1"
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if reuseport:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+try:
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+    print("BOUND")
+except OSError:
+    print("REFUSED")
+"""
+
+
+@pytest.mark.parametrize("reuseport", [False, True], ids=["reuseaddr", "reuseaddr+reuseport"])
+def test_wildcard_core_keeps_loopback_from_other_processes(monkeypatch, reuseport) -> None:
+    """macOS let a later 127.0.0.1:P bind shadow our 0.0.0.0:P; the guard socket stops it.
+
+    Linux refuses that bind on its own (and refuses the guard too, which is fine).
+    """
+    from raven.desktop import runtime
+
+    monkeypatch.setattr(runtime, "DEFAULT_API_PORT", _free_port())
+    wild = runtime._bind_api_socket("0.0.0.0")
+    port = wild.getsockname()[1]
+    guard = runtime._bind_loopback_guard(port)
+    ours = [wild] + ([guard] if guard is not None else [])
+    try:
+        if sys.platform == "darwin":
+            assert guard is not None
+        attempt = subprocess.run(
+            [sys.executable, "-c", _BIND_ATTEMPT, str(port), "1" if reuseport else "0"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert attempt.stdout.strip() == "REFUSED"
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            readable, _, _ = select.select(ours, [], [], 1)
+            assert readable, "loopback did not reach our sockets"
+            readable[0].accept()[0].close()
+    finally:
+        for s in ours:
+            s.close()
+
+
+@pytest.mark.parametrize(
+    "platform, err, falls_back",
+    [("linux", "EADDRINUSE", True), ("linux", "EACCES", False), ("darwin", "EADDRINUSE", False)],
+)
+def test_loopback_guard_falls_back_only_on_linux_eaddrinuse(monkeypatch, platform, err, falls_back) -> None:
+    """Only Linux's expected refusal means "wildcard alone is safe"; anything else is raised."""
+    import errno
+
+    from raven.desktop import runtime
+
+    made = []
+
+    class FailingSocket:
+        def __init__(self, *_a):
+            self.closed = False
+            made.append(self)
+
+        def setsockopt(self, *_a):
+            pass
+
+        def bind(self, _addr):
+            raise OSError(getattr(errno, err), "simulated")
+
+        def listen(self, _n):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(runtime.socket, "socket", FailingSocket)
+    monkeypatch.setattr(runtime.sys, "platform", platform)
+    if falls_back:
+        assert runtime._bind_loopback_guard(12345) is None
+    else:
+        with pytest.raises(OSError):
+            runtime._bind_loopback_guard(12345)
+    assert made and made[0].closed
+
+
+_GUARD_FAILS = r"""
+import errno, json, os, sys
+import raven.desktop.runtime as r
+held = []
+real_bind = r._bind_api_socket
+def bind_api(host):
+    s = real_bind(host); held.append(s); return s
+def no_guard(port):
+    raise OSError(errno.EADDRINUSE, "simulated: someone else holds 127.0.0.1")
+r._bind_api_socket, r._bind_loopback_guard = bind_api, no_guard
+sys.argv = ["runtime", "--host", "0.0.0.0"]
+rc = r.main()
+sys.__stdout__.write(json.dumps({"rc": rc, "api_socket_closed": held[0].fileno() == -1}) + "\n")
+"""
+
+
+def test_wildcard_core_fails_closed_when_the_guard_cannot_be_held() -> None:
+    """No guard (outside Linux's expected case) → no readiness, exit 1, API socket closed."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "PORT_"))}
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    out = subprocess.run(
+        [sys.executable, "-c", _GUARD_FAILS], cwd=REPO_ROOT, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    lines = [line for line in out.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"readiness must not be printed: {out.stdout!r}"
+    assert json.loads(lines[0]) == {"rc": 1, "api_socket_closed": True}
+    assert "refusing to report ready" in out.stderr
+
+
+_GUARD_RECORDED = r"""
+import sys
+import raven.desktop.runtime as r
+def recorded(port):
+    print("GUARD REQUESTED", flush=True)
+    return None
+r._bind_loopback_guard = recorded
+sys.argv = ["runtime", "--host", "127.0.0.1"]
+r.main()
+"""
+
+
+def test_loopback_core_takes_no_guard_socket() -> None:
+    """The guard is only for a wildcard bind; the default loopback Core is unchanged."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "PORT_"))}
+    env["PORT_API"] = str(_free_port())
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _GUARD_RECORDED], cwd=REPO_ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        first = proc.stdout.readline()
+        assert "GUARD REQUESTED" not in first
+        assert json.loads(first)["host"] == "127.0.0.1"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path: Path) -> None:
+    """Issue #49 end to end: Core on 0.0.0.0 reports ready, then another Raven API tries 127.0.0.1:P."""
+    core_env = _isolated_env(tmp_path, "desktop")
+    core_env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    core = subprocess.Popen(
+        [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0"],
+        cwd=REPO_ROOT, env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    other = None
+    try:
+        port = _wait_for_ready(core)["port"]
+        other = subprocess.Popen(
+            [sys.executable, "-m", "raven.api", "--port", str(port)],
+            cwd=REPO_ROOT, env=_isolated_env(tmp_path, "other"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            other.wait(timeout=15)  # cannot bind → exits
+        except subprocess.TimeoutExpired:
+            pass
+
+        body = json.dumps({"slug": "content/i49", "title": "i49", "content": "x"}).encode()
+        req = Request(
+            f"http://127.0.0.1:{port}/api/vaults/shared/pages",
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            assert response.status == 200
+        assert (tmp_path / "desktop" / "vault" / "content" / "i49.md").exists()
+        assert not (tmp_path / "other" / "vault" / "content" / "i49.md").exists()
+    finally:
+        for proc in (other, core):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
