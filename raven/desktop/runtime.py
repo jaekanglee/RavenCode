@@ -199,6 +199,10 @@ class _ProbeResponder:
     here (204) and recorded; every other request goes to the app untouched. The
     nonce lives only in memory and is never sent back, so seeing the event set
     proves the probe reached *this* process — whatever the response looked like.
+
+    This is identity, not authentication: the nonce grants nothing and is not
+    checked anywhere else. A client that sends it only gets an empty 204 instead
+    of reaching the app; access control stays with the app's TokenGate.
     """
 
     def __init__(self, app, nonce: str) -> None:

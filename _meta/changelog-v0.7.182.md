@@ -1114,11 +1114,13 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
   - 확인한 그 소켓을 `uvicorn.Server.run(sockets=[...])`로 넘긴다. 사전 검사와 실제 bind 사이에 다른 프로세스가 끼어들 틈(TOCTOU)이 없다.
   - `SO_REUSEADDR`는 유지한다. 직전 실행이 TIME_WAIT로 남긴 포트도 그대로 다시 쓴다.
   - readiness를 출력하기 전에 정체성을 확인한다. 기동마다 메모리에만 있는 nonce를 만들고, API 앱을 감싼 `_ProbeResponder`가 그 nonce 헤더(`x-raven-core-probe`)가 실린 요청을 받으면 이벤트를 세운다. readiness 주소로 probe를 보내 **이 프로세스가 받았을 때만** ready를 알린다. 응답 내용은 근거로 쓰지 않으므로 다른 서버가 204를 돌려줘도 통과하지 않는다. 실패하면 서버를 내리고 1로 종료한다. 영구 토큰이나 새 엔드포인트는 없다.
+  - 이 nonce는 **인증이 아니라 정체성 확인**이다. 아무 권한도 주지 않고 다른 곳에서 검사하지도 않는다. 값을 보낸 클라이언트는 앱 대신 빈 204를 받을 뿐이며, 접근 제어는 그대로 앱의 `TokenGate`가 맡는다.
 - **검증**:
   - `tests/test_desktop_runtime.py` 7건 추가. 기본 포트 선택 / `127.0.0.1:P` 점유 + `0.0.0.0` 요청 / `0.0.0.0:P` 점유 + loopback 요청 / 직전에 닫힌(TIME_WAIT) 포트 재사용 / 다른 서버가 probe에 응답해도 거부 / probe는 앱으로 전달되지 않음 / 종단 간: 다른 Raven API가 `127.0.0.1:P`에 있을 때 쓰기가 Desktop vault에만 생김. 수정 전 코드에서는 7건 모두 실패한다(종단 간 테스트는 `assert P != P`).
   - 전체 suite 1978 passed. 실패 2건(`test_desktop_core_survives_closed_stderr_pipe`, `test_no_candidates_is_not_an_error`)은 master에서도 같다.
   - 격리 포트 재현 5종: 충돌 없음 / 원격+loopback 충돌 / loopback+loopback 충돌 / `0.0.0.0` 점유+loopback / Tailscale IP. 앞의 4종은 readiness가 자기 Core를 가리키고 쓰기가 Desktop vault에만 생긴다.
 - **범위 밖 (#16)**:
   - Tailscale IP처럼 loopback이 아닌 특정 주소로 bind하면 Core는 loopback에 없다. 그래서 readiness(`127.0.0.1`)는 원래부터 자기 Core가 아니다. 이 경우 정체성 확인은 건너뛰고 stderr에 경고만 남긴다. 충돌이 없으면 동작은 이전과 같다(같은 포트, 원격 접근 그대로). 다만 `127.0.0.1:8765`에 다른 서버가 있으면 이제 그 포트를 피한다. 그래서 webview는 다른 서버 대신 연결 거부를 받고, 원격 클라이언트용 포트는 OS 할당 값으로 바뀐다.
-  - readiness 이후 다른 프로세스가 더 구체적인 주소(`127.0.0.1:P`)로 bind해 가로채는 경우는 막지 못한다. macOS `SO_REUSEADDR` 의미상 그렇다.
+  - readiness 이후 다른 프로세스가 더 구체적인 주소(`127.0.0.1:P`)로 bind해 가로채는 경우는 막지 못한다. macOS `SO_REUSEADDR` 의미상 그렇다. 격리 포트 실측: 원격 모드(`*:P`)에서 Core가 ready를 알린 뒤 다른 `raven.api`가 `127.0.0.1:P`로 뜨면 loopback 요청이 그쪽으로 간다(**CONFIRMED**, master도 동일해 이번 변경으로 악화되지 않음). 기본 loopback 모드에서는 같은 주소 bind가 `EADDRINUSE`로 실패하고, `0.0.0.0:P` bind는 성공하지만 loopback은 Core에 남는다(재현 안 됨).
+  - Linux 실행 결과는 없다(**UNKNOWN**). Linux는 이 충돌을 bind 단계에서 거부하므로 동작이 같을 것으로 보지만 확인하지 않았다.
   - MCP 포트 검사(`_port_is_free`)는 같은 구조의 문제가 남아 있다. IPv6 wildcard(`--host ::`)는 IPv4 소켓만 쓰는 탓에 여전히 기동에 실패한다.
