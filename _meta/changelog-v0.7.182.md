@@ -1131,16 +1131,18 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
 
 - **수정**:
   - 셸이 Core를 띄울 때 자기 PID를 `RAVEN_DESKTOP_PARENT_PID`로 넘긴다(`core.rs`).
-  - Core는 readiness 이후 대기 루프(0.1초 주기)에서 `os.getppid()`가 그 값과 달라지면(부모가 죽어 재부모화됨) 기존 종료 경로로 서버를 내린다. 소켓이 닫혀 포트가 풀린다.
-  - 기동 시 값이 실제 부모 PID와 다르거나 형식이 틀리면 감시하지 않는다(경고만). 살아 있는 부모를 두고 잘못 종료하는 일이 없다. 변수가 없으면(standalone 실행, 테스트) 동작이 이전과 같다.
+  - 감시 대상은 `main()` 맨 앞에서 정한다. Core는 readiness 이후 대기 루프(0.1초 주기)에서 `os.getppid()`가 그 값과 달라지면(부모가 죽어 재부모화됨) 기존 종료 경로로 서버를 내린다. 소켓이 닫혀 포트가 풀린다. 셸이 API/MCP 기동 중에 죽어도 기동이 끝나는 즉시 같은 경로로 종료한다.
+  - 그 시점에 값이 실제 부모 PID와 다르면, 그 PID의 프로세스가 **이미 없을 때**(셸이 인터프리터 기동 중에 죽음)는 계속 감시해 종료한다. 살아 있는 다른 프로세스이거나 형식이 틀리면 감시하지 않는다(경고만). 살아 있는 부모를 두고 잘못 종료하는 일이 없다. 변수가 없으면(standalone 실행, 테스트) 동작이 이전과 같다.
   - Rust 신호 핸들러를 넣지 않아 새 의존성이 없다. 상주 데몬도 없다. updater 종료 계약도 바뀌지 않는다.
 - **검증 (macOS, 실제 셸 debug 바이너리, 격리 HOME + 포트 28790/28791)**:
   - 수정 전: SIGTERM / SIGHUP / SIGKILL 모두 Core 생존, 두 포트 LISTEN 유지.
   - 수정 후: 세 경우 모두 3초 안에 Core 종료, 포트 해제. SIGTERM 직후 재실행하면 같은 포트(28790/28791)로 MCP까지 정상 기동한다.
   - 정상 Quit(`NSRunningApplication.terminate` → `RunEvent::Exit`)은 수정 전후 모두 정상 정리된다.
-  - `tests/test_desktop_runtime.py` 3건 추가: 부모 PID 판정 / SIGTERM으로 대리 셸을 죽이면 Core가 종료되고 포트가 풀림 / Rust와 Python의 env 이름 일치. 수정 전 코드에서는 앞의 2건이 실패한다(`Core outlived its shell`).
+  - 기동 중 셸 SIGTERM(Core 생성 직후 0초·0.05초 = 모듈 import 중, 0.15~0.5초 = API bind 후 MCP 준비 전, 0.8초·readiness 직후): 모두 기동 시작 후 약 1초 안에 Core 종료, 포트 해제. 첫 PR HEAD(`1a89ff8`, 감시를 readiness 뒤에 설정)에서는 readiness 전 종료(0초, 0.3초)에서 고아가 남았다.
+  - `tests/test_desktop_runtime.py` 4건 추가: 부모 PID 판정(이미 죽은 부모 포함) / SIGTERM으로 대리 셸을 죽이면 Core가 종료되고 포트가 풀림 / 대리 셸이 Core 기동 중에 끝나도 Core가 종료됨 / Rust와 Python의 env 이름 일치. master 코드에서는 4건 모두 실패한다(종료 테스트는 `Core outlived its shell`). 감시를 readiness 뒤에 정하던 첫 PR HEAD `1a89ff8`에서는 이미 죽은 부모 판정과 기동 중 종료 테스트가 실패한다.
   - 전체 pytest 1980 passed. 실패 2건은 master와 같다. `cargo test` 28/28.
 - **범위 밖 / UNKNOWN**:
   - Core 재시작(트레이 / `restart_core`)과 updater relaunch(`request_restart` → `RunEvent::Exit`)는 코드가 바뀌지 않았다. 새 Core도 같은 셸 PID를 받으므로 감시 조건은 같다. UI로 실행해 확인하지는 않았다(**UNKNOWN**).
-  - Linux/Windows 실행은 확인하지 않았다(**UNKNOWN**). Windows는 부모가 죽어도 `os.getppid()` 값이 바뀌지 않으므로 이 감시가 동작하지 않을 것으로 본다.
+  - 플랫폼: macOS는 위에서 실제로 검증한 종료 경로만 PASS. Linux는 **UNKNOWN**(부모가 죽으면 init 또는 subreaper로 재부모화되므로 같은 감시가 동작할 것으로 보지만 실행하지 않았다). Windows는 **UNKNOWN**이며 이 방식에 제약이 있다: 부모가 죽어도 `os.getppid()` 값이 바뀌지 않아 감시가 동작하지 않을 것으로 본다.
+  - 셸이 죽은 뒤 그 부모가 셸을 회수(reap)하지 않아 좀비로 남아 있는 동안 Core가 `main()`에 들어가면, 셸 PID가 아직 존재해 감시가 꺼질 수 있다. launchd나 일반 실행기는 곧바로 회수하므로 실측에서는 나타나지 않았다.
   - SIGINT는 백그라운드 실행 셸이 무시해 재현 조건을 만들지 못했다. 셸이 SIGINT로 종료되는 경우는 같은 경로로 정리된다.

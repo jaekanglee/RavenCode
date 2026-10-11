@@ -84,9 +84,11 @@ PARENT_PID_ENV = "RAVEN_DESKTOP_PARENT_PID"
 def _watched_parent_pid() -> int | None:
     """The shell PID to watch, or None when not launched by the shell.
 
-    A value that is not our actual parent (malformed, or inherited by a process
-    the shell did not spawn directly) disables the watch rather than shutting
-    down a Core whose parent is alive.
+    A value that names a live process other than our parent (inherited by a
+    process the shell did not spawn directly), or is malformed, disables the
+    watch rather than shutting down a Core whose parent is alive. A value naming
+    a process that no longer exists means the shell died before we got here
+    (during interpreter start-up), so it is still watched and the Core exits.
     """
     raw = os.environ.get(PARENT_PID_ENV, "").strip()
     if not raw:
@@ -95,6 +97,13 @@ def _watched_parent_pid() -> int | None:
         pid = int(raw)
     except ValueError:
         pid = None
+    if pid is not None and pid != os.getppid():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid  # parent already gone — the wait loop shuts us down
+        except OSError:
+            pass  # exists but not ours to signal: alive, not our parent
     if pid is None or pid != os.getppid():
         print(
             f"⚠️  [Desktop Core] {PARENT_PID_ENV}={raw!r} is not this process's parent — "
@@ -334,6 +343,11 @@ def main() -> int:
     # turn into BrokenPipeError inside request handlers (see _PipeSafeStream).
     _harden_std_streams()
 
+    # Issue #23: decide what to watch now, while the shell is almost certainly
+    # still our parent; the check itself runs in the wait loop after readiness,
+    # which also catches a shell that died during API/MCP start-up.
+    parent_pid = _watched_parent_pid()
+
     import uvicorn
 
     # 우선순위: --host > RAVEN_HOST > loopback (standalone `raven.api.main`과 동일).
@@ -519,7 +533,6 @@ def main() -> int:
         ready["mcp_host"] = _advertised_mcp_host(mcp_host)
     print(json.dumps(ready), flush=True)
 
-    parent_pid = _watched_parent_pid()
     try:
         while not api_server.should_exit:
             if parent_pid is not None and os.getppid() != parent_pid:

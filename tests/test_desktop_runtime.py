@@ -773,11 +773,17 @@ def test_watched_parent_pid_requires_the_actual_parent(monkeypatch) -> None:
     assert runtime._watched_parent_pid() is None
     monkeypatch.setenv(runtime.PARENT_PID_ENV, "4242")
     assert runtime._watched_parent_pid() == 4242
-    # Not our parent (e.g. inherited) or malformed → no watch, never a false shutdown.
-    monkeypatch.setenv(runtime.PARENT_PID_ENV, "1111")
+    # A live process that is not our parent (e.g. inherited) or a malformed value
+    # → no watch, never a false shutdown.
+    monkeypatch.setenv(runtime.PARENT_PID_ENV, str(os.getpid()))
     assert runtime._watched_parent_pid() is None
     monkeypatch.setenv(runtime.PARENT_PID_ENV, "abc")
     assert runtime._watched_parent_pid() is None
+    # The named shell no longer exists → it died before main() ran: still watched.
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    monkeypatch.setenv(runtime.PARENT_PID_ENV, str(gone.pid))
+    assert runtime._watched_parent_pid() == gone.pid
 
 
 _SHELL_STANDIN = r"""
@@ -788,6 +794,14 @@ core = subprocess.Popen([sys.executable, "-m", "raven.desktop.runtime"], env=env
 print(core.pid, core.stdout.readline().strip(), flush=True)
 time.sleep(120)
 """
+
+_SHELL_DIES_DURING_STARTUP = r"""
+import os, subprocess, sys
+env = dict(os.environ, RAVEN_DESKTOP_PARENT_PID=str(os.getpid()))
+core = subprocess.Popen([sys.executable, "-m", "raven.desktop.runtime"], env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(core.pid, flush=True)
+"""  # exits right away — before the Core has even imported its modules
 
 
 def test_core_exits_and_frees_its_port_when_the_shell_is_terminated(tmp_path: Path) -> None:
@@ -846,3 +860,40 @@ def test_shell_passes_the_parent_pid_env_the_runtime_watches() -> None:
 
     core_rs = (REPO_ROOT / "desktop" / "src-tauri" / "src" / "core.rs").read_text(encoding="utf-8")
     assert f'cmd.env("{PARENT_PID_ENV}", std::process::id()' in core_rs
+
+
+def test_core_exits_when_the_shell_dies_before_readiness(tmp_path: Path) -> None:
+    """The shell can die while the Core is still starting (#23 PR #51 review).
+
+    The watch is decided at the top of main(); a shell that is already gone by
+    then must still bring the Core down once start-up finishes.
+    """
+    import signal
+
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "WIKI_", "PORT_"))}
+    env.update(HOME=str(tmp_path / "home"), WIKI_VAULTS_DIR=str(tmp_path / "reg"), PORT_API=str(port))
+    (tmp_path / "home").mkdir()
+    shell = subprocess.run(
+        [sys.executable, "-c", _SHELL_DIES_DURING_STARTUP], cwd=REPO_ROOT, env=env,
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    core_pid = int(shell.stdout.strip())
+    try:
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                os.kill(core_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "Core outlived a shell that died during start-up"
+            time.sleep(0.1)
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        core_pid = None
+    finally:
+        if core_pid is not None:
+            try:
+                os.kill(core_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
