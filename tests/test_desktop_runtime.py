@@ -947,16 +947,102 @@ def test_wildcard_core_keeps_loopback_from_other_processes(monkeypatch, reusepor
             s.close()
 
 
-def test_loopback_core_takes_no_guard_socket() -> None:
-    """The guard is only for a wildcard bind; the default loopback Core is unchanged."""
+@pytest.mark.parametrize(
+    "platform, err, falls_back",
+    [("linux", "EADDRINUSE", True), ("linux", "EACCES", False), ("darwin", "EADDRINUSE", False)],
+)
+def test_loopback_guard_falls_back_only_on_linux_eaddrinuse(monkeypatch, platform, err, falls_back) -> None:
+    """Only Linux's expected refusal means "wildcard alone is safe"; anything else is raised."""
+    import errno
+
     from raven.desktop import runtime
 
-    sock = runtime._bind_api_socket("127.0.0.1")
+    made = []
+
+    class FailingSocket:
+        def __init__(self, *_a):
+            self.closed = False
+            made.append(self)
+
+        def setsockopt(self, *_a):
+            pass
+
+        def bind(self, _addr):
+            raise OSError(getattr(errno, err), "simulated")
+
+        def listen(self, _n):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(runtime.socket, "socket", FailingSocket)
+    monkeypatch.setattr(runtime.sys, "platform", platform)
+    if falls_back:
+        assert runtime._bind_loopback_guard(12345) is None
+    else:
+        with pytest.raises(OSError):
+            runtime._bind_loopback_guard(12345)
+    assert made and made[0].closed
+
+
+_GUARD_FAILS = r"""
+import errno, json, os, sys
+import raven.desktop.runtime as r
+held = []
+real_bind = r._bind_api_socket
+def bind_api(host):
+    s = real_bind(host); held.append(s); return s
+def no_guard(port):
+    raise OSError(errno.EADDRINUSE, "simulated: someone else holds 127.0.0.1")
+r._bind_api_socket, r._bind_loopback_guard = bind_api, no_guard
+sys.argv = ["runtime", "--host", "0.0.0.0"]
+rc = r.main()
+sys.__stdout__.write(json.dumps({"rc": rc, "api_socket_closed": held[0].fileno() == -1}) + "\n")
+"""
+
+
+def test_wildcard_core_fails_closed_when_the_guard_cannot_be_held() -> None:
+    """No guard (outside Linux's expected case) → no readiness, exit 1, API socket closed."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "PORT_"))}
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    out = subprocess.run(
+        [sys.executable, "-c", _GUARD_FAILS], cwd=REPO_ROOT, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    lines = [line for line in out.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"readiness must not be printed: {out.stdout!r}"
+    assert json.loads(lines[0]) == {"rc": 1, "api_socket_closed": True}
+    assert "refusing to report ready" in out.stderr
+
+
+_GUARD_RECORDED = r"""
+import sys
+import raven.desktop.runtime as r
+def recorded(port):
+    print("GUARD REQUESTED", flush=True)
+    return None
+r._bind_loopback_guard = recorded
+sys.argv = ["runtime", "--host", "127.0.0.1"]
+r.main()
+"""
+
+
+def test_loopback_core_takes_no_guard_socket() -> None:
+    """The guard is only for a wildcard bind; the default loopback Core is unchanged."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "PORT_"))}
+    env["PORT_API"] = str(_free_port())
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _GUARD_RECORDED], cwd=REPO_ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
     try:
-        # A second socket on the very same address must be refused — nothing to guard.
-        assert runtime._bind_loopback_guard(sock.getsockname()[1]) is None
+        first = proc.stdout.readline()
+        assert "GUARD REQUESTED" not in first
+        assert json.loads(first)["host"] == "127.0.0.1"
     finally:
-        sock.close()
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path: Path) -> None:

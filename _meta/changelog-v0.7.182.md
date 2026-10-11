@@ -1153,7 +1153,8 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
 
 - **수정** (`raven/desktop/runtime.py`):
   - bind 주소가 `0.0.0.0`이면 같은 포트의 `127.0.0.1:P`도 함께 bind한다(`_bind_loopback_guard`). 두 소켓을 uvicorn에 함께 넘긴다(`Server.run(sockets=[wildcard, loopback])`). 같은 주소를 이미 우리가 잡고 있으므로, 다른 프로세스의 bind는 `SO_REUSEADDR`·`SO_REUSEPORT` 어느 조합이든 `EADDRINUSE`로 실패한다.
-  - Linux는 wildcard가 listen 중이면 `127.0.0.1:P` bind를 아예 거부한다. 다른 프로세스뿐 아니라 우리 guard도 거부된다. 그래서 guard bind가 실패하면 wildcard 소켓만으로 진행한다(Linux에서는 이것으로 이미 안전). macOS에서 guard 직전에 다른 프로세스가 끼어든 경우는 기존 readiness 정체성 확인(#22)이 잡는다.
+  - Linux는 wildcard가 listen 중이면 `127.0.0.1:P` bind를 아예 거부한다. 다른 프로세스뿐 아니라 우리 guard도 거부된다. 그래서 **Linux에서 `EADDRINUSE`일 때만** wildcard 소켓만으로 진행한다(Linux에서는 이것으로 이미 안전).
+  - 그 밖의 실패(Linux의 다른 errno, macOS 등 다른 플랫폼의 모든 실패 — macOS에서는 다른 프로세스가 그 주소를 잡았다는 뜻)는 fail-closed다. 이미 잡은 API 소켓을 닫고 readiness를 알리지 않은 채 1로 종료한다.
   - loopback 기본 모드, Tailscale IP 등 특정 주소 bind, API 인증, MCP 정책은 바뀌지 않는다.
 - **검증**:
   - 소켓 실측(별도 프로세스가 `127.0.0.1:P` bind 시도, `reuseaddr`/`reuseport` 4조합):
@@ -1162,9 +1163,9 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
     - Linux(Docker `python:3.12-slim`, linuxkit 6.10, root): guard 유무와 무관하게 4조합 모두 `EADDRINUSE(98)`. guard bind 자체도 98로 실패.
   - 격리 포트 재현(macOS): Core `0.0.0.0` ready 후 다른 `raven.api`를 `127.0.0.1:P`로 기동하면 master는 가로채짐. 수정 후에는 다른 서버가 `EADDRINUSE(48)`로 기동에 실패하고 loopback은 Core가 응답한다. loopback 모드 두 경우는 수정 전후 같다(가로채지 않음).
   - 두 소켓 처리(macOS): loopback 순차 GET 200회와 동시 GET 300회(32 스레드) 모두 200. tailnet IP 경유 GET 20회(wildcard 소켓, 토큰 없음) 모두 401. 페이지 POST 1회는 파일 1개를 만들고, `log.md` 기록 수는 master 단일 소켓과 같다. SIGTERM 시 exit 0이고 두 리스너 모두 해제, stderr 오류 없음.
-  - `tests/test_desktop_runtime.py` 4건 추가: guard가 `reuseaddr`/`reuseaddr+reuseport` 후발 bind를 막고 loopback이 우리 소켓으로 옴 / loopback 모드에는 guard가 없음 / 종단 간(ready 후 다른 API 기동 → 쓰기는 Desktop vault에만). master 코드에서는 macOS에서 4건 모두 실패한다(종단 간은 Desktop vault에 파일이 없음).
-  - Linux(Docker): `tests/test_desktop_runtime.py` 33 passed, 1 failed(`test_desktop_core_survives_closed_stderr_pipe`, macOS와 같은 기존 실패). master에서는 종단 간 테스트가 통과한다(Linux는 원래 취약하지 않음). 나머지 3건은 함수가 없어 실패한다.
-  - macOS 전체 pytest 1986 passed. 실패 2건은 기존과 같다. Rust 코드는 바뀌지 않았다.
+  - `tests/test_desktop_runtime.py` 8건 추가: guard가 `reuseaddr`/`reuseaddr+reuseport` 후발 bind를 막고 loopback이 우리 소켓으로 옴(2) / fallback은 Linux+`EADDRINUSE`만, Linux 다른 errno·macOS `EADDRINUSE`는 예외이고 실패한 소켓은 닫힘(3) / guard를 못 잡으면 readiness 없이 exit 1, API 소켓 닫힘 / loopback 모드는 guard를 요청하지 않음 / 종단 간(ready 후 다른 API 기동 → 쓰기는 Desktop vault에만). master 코드에서는 종단 간 테스트가 macOS에서 실패한다(Desktop vault에 파일이 없음).
+  - Linux(Docker): `tests/test_desktop_runtime.py` 37 passed, 1 failed(`test_desktop_core_survives_closed_stderr_pipe`, macOS와 같은 기존 실패). 실제 Linux 커널에서 `0.0.0.0` Core 옆 guard가 `EADDRINUSE` → `None`으로 fallback하는 것을 확인했다. master에서는 종단 간 테스트가 통과한다(Linux는 원래 취약하지 않음).
+  - macOS 전체 pytest 1990 passed. 실패 2건은 기존과 같다. Rust 코드는 바뀌지 않았다.
 - **한계**:
   - Linux는 Docker linuxkit 커널, root 사용자로만 확인했다. 데스크톱 Linux 배포판과 다른 사용자 조합(`SO_REUSEPORT`는 같은 UID 조건)은 **UNKNOWN**. Windows는 **UNKNOWN**.
   - macOS에서 다른 UID의 프로세스로는 시험하지 않았다.
