@@ -30,7 +30,6 @@ def suggest_tags(vault: Vault, content: str, title: Optional[str] = None) -> dic
 
     if api_key:
         try:
-            import httpx
             prompt = (
                 "너는 지식 보관소(Vault)의 문서를 분석하여 적절한 태그를 추천하는 AI 조언자이다.\n"
                 "다음 문서의 제목(Title)과 본문(Content)을 분석하여, 문서의 핵심 주제를 가장 잘 나타내는 태그를 최대 5개 추천해줘.\n\n"
@@ -46,7 +45,6 @@ def suggest_tags(vault: Vault, content: str, title: Optional[str] = None) -> dic
                 "추천 태그 JSON:"
             )
 
-            
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]
             }

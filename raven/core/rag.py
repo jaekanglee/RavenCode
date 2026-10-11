@@ -76,7 +76,6 @@ def query_rag(vault: Vault, query_text: str) -> dict[str, Any]:
 
     if api_key and context:
         try:
-            import httpx
             prompt = (
                 "너는 사용자의 질문에 답하는 지식 탐색 AI 조언자이다. 아래 제공된 Context를 바탕으로 질문에 친절하고 상세하게 한글로 답변해줘.\n"
                 "답변은 반드시 제공된 Context만을 근거로 삼아야 하며, Context에서 답을 찾을 수 없거나 관련 내용이 전혀 없는 경우 사실에 기반하여 솔직하게 모른다고 답변해야 해.\n"
@@ -87,7 +86,6 @@ def query_rag(vault: Vault, query_text: str) -> dict[str, Any]:
                 "답변:"
             )
 
-            
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]
             }

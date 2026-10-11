@@ -113,7 +113,6 @@ def check_contradictions(vault: Vault) -> dict[str, Any]:
     
     if api_key:
         try:
-            import httpx
             prompt = (
                 "너는 지식 네트워크의 문서 간 논리적 모순이나 충돌(Contradiction)을 찾아내고 정합성을 강화하는 AI 조언자이다.\n"
                 "제공된 각 문서 쌍(Source & Target)의 본문을 읽고, 내용 간에 서로 모순되거나 충돌하는 기술 사양(예: 서로 다른 포트, 충돌하는 데이터 포맷), "
@@ -140,7 +139,6 @@ def check_contradictions(vault: Vault) -> dict[str, Any]:
                 f"문서 쌍 목록:\n{context}\n\n"
                 "분석 결과 JSON:"
             )
-            
             
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import json
-import httpx
 from typing import Any, List, Dict
 from .gemini_client import generate_content
 from .vault import Vault
@@ -36,7 +35,6 @@ def generate_ai_advice(vault: Vault) -> List[Dict[str, Any]]:
             )
             
             # Gemini API 호출 (Direct HTTP Call)
-            
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseMimeType": "application/json"}
