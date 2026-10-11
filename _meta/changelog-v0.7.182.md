@@ -1085,3 +1085,21 @@ Core가 처음 뜨지 못하면(`CoreState::start`가 `Err`) 셸은 macOS 전용
   - Core 기동 자체는 여전히 `async_runtime::spawn` 안에서 blocking `read_line`으로 readiness를 기다린다(§47 범위 밖 항목과 같다).
   - 재시작 실패(트레이 "Restart Backend", `restart_core`)는 원래 대화상자가 없었고 그대로다.
   - `handle.exit(1)`의 종료 코드가 0으로 나가는 문제(`run_return` 필요), Linux에서 `RunEvent::Reopen` 때문에 빌드가 안 되는 문제는 별도 후속으로 둔다.
+
+## 49. 데스크톱 셸 — Linux 빌드 실패 수정: `RunEvent::Reopen`을 macOS에서만 매칭 (Issue #40)
+
+`app.run` 콜백이 `RunEvent::Reopen`(Dock 아이콘을 다시 눌렀을 때 숨긴 창 복구)을 조건 없이 매칭했다. Tauri 2.11.5는 이 variant를 `#[cfg(target_os = "macos")]`로만 정의한다. 그래서 Linux에서는 `error[E0599]: no variant named Reopen`으로 셸 빌드가 깨졌다(#1 A-3 검증 중 발견). CI(`desktop-release.yml`)는 `macos-14`만 돌아서 잡지 못했다.
+
+- **수정**:
+  - 해당 match arm에 `#[cfg(target_os = "macos")]`를 붙였다. Tauri의 정의와 같은 조건이다.
+  - macOS에서는 cfg가 참이므로 컴파일되는 코드가 이전과 같다. Dock 재오픈 동작은 그대로다.
+  - 다른 플랫폼에서는 이 이벤트 자체가 없으므로 잃는 동작이 없다. 새 의존성은 없다.
+- **검증**:
+  - `lib.rs` 테스트 1건 추가: `Reopen` 처리부 바로 앞에 `#[cfg(target_os = "macos")]`가 있는지 소스로 확인한다(macOS CI만으로는 회귀를 잡을 수 없어서).
+  - macOS(aarch64): `cargo test` 28/28, `cargo build` 성공. `cargo clippy --all-targets` 경고 1건은 master와 같다(이 `Reopen` arm 안의 collapsible-if).
+  - Linux(Docker `rust:1-bookworm`, rustc 1.99.0, aarch64): `cargo check --locked --all-targets` 성공, `cargo test --locked` 28/28, `cargo clippy --locked --all-targets` 경고 0건, `cargo build --locked` 성공.
+  - Windows: 같은 컨테이너에서 `x86_64-pc-windows-msvc` 대상 `cargo check`를 시도했다. 의존성 `ring`의 C 빌드 스크립트가 MSVC 툴체인 없이 실패해, 우리 crate까지 가지 못했다. **UNKNOWN**.
+  - macOS Dock 재오픈의 런타임 재검증은 하지 않았다. 컴파일되는 코드가 같아서다(`.app` 번들이 있어야 Reopen 이벤트가 온다).
+- **범위 밖**:
+  - Linux/Windows 런타임 동작(창, 트레이, 대화상자)은 확인하지 않았다(**UNKNOWN**).
+  - Linux `cargo check`를 CI에 추가하는 일은 별도로 결정한다.

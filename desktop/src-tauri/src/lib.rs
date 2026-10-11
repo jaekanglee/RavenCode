@@ -358,6 +358,9 @@ pub fn run() {
                 RunEvent::Exit | RunEvent::ExitRequested { .. } => {
                     app.state::<CoreState>().stop();
                 }
+                // Tauri only defines `Reopen` on macOS (Dock icon click); matching it
+                // unconditionally broke the Linux/Windows build (Issue #40).
+                #[cfg(target_os = "macos")]
                 RunEvent::Reopen { has_visible_windows, .. } => {
                     if !has_visible_windows {
                         if let Some(window) = app.get_webview_window("main") {
@@ -819,5 +822,16 @@ mod tests {
             src.contains(".dialog()"),
             "tauri_plugin_dialog 경로가 사라졌다"
         );
+    }
+
+    // Issue #40: `RunEvent::Reopen`은 Tauri에서 macOS 전용 variant다. cfg 없이 매칭하면
+    // Linux/Windows 빌드가 E0599로 깨진다. macOS CI만으로는 잡히지 않으므로 소스로 지킨다.
+    #[test]
+    fn reopen_arm_is_macos_only() {
+        let src = include_str!("lib.rs");
+        let arm = concat!("RunEvent::", "Reopen {");
+        let at = src.find(arm).expect("Reopen 처리부가 사라졌다");
+        let before = src[..at].trim_end().lines().last().unwrap_or("").trim();
+        assert_eq!(before, "#[cfg(target_os = \"macos\")]");
     }
 }
