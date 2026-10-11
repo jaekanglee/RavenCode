@@ -1199,3 +1199,28 @@ Desktop MCP 포트 검사 `_port_is_free(host, port)`는 #22 이전 API 검사�
   - `_stop_mcp(server, thread, sock, port)`: 종료를 요청한다. 기동하지 못한 서버면 소켓을 먼저 닫는다(asyncio가 아직 넘겨받지 않았다). 그다음 스레드를 2초 기다린 뒤 소켓을 닫는다. 스레드가 끝나지 않으면 양보한 것으로 치지 않고 `❌ … did not stop within 2s (socket released|STILL LISTENING) — MCP was not cleanly yielded.`를 남긴다. 기동 실패, 기동 시간 초과, 정체성 확인 실패의 세 경로가 모두 이것을 거친 뒤 readiness를 출력한다. join을 2초로 둔 것은 기동 시간 초과(10초) 경로가 shell의 readiness 한도(15초)를 넘지 않게 하기 위해서다.
   - 수정 후 재현: 기동 실패 시 readiness 1.5초, `127.0.0.1:P` 접속은 `ConnectionRefused`. 기동 지연 시 readiness 13.4초, 소켓 해제, ❌ 오류 출력. 정체성 확인 실패 시 Core 리스너 없음, 다른 서버는 loopback을 계속 받음.
   - 테스트 5건 추가: `_stop_mcp` 단위 3건(기동 못 한 서버 소켓 해제 / 멈춘 기동은 소켓 해제 후 오류 보고 / 멈춘 started 리스너 오류 보고), 종단 간 2건(기동 실패 시 포트 해제 / claim 뒤 다른 프로세스가 `127.0.0.1:P`를 잡으면 API only, 우리 wildcard 해제, 다른 서버 영향 없음). `2e0bacd` 코드에서는 5건 모두 실패한다. 마지막 건은 Linux에서 후발 bind 자체가 거부되므로 skip된다.
+
+## 54. Desktop Core — readiness 이후 다른 프로세스가 MCP 주소를 가로채지 못하게 (Issue #54)
+
+#50 이후에도 남은 경로이며, #49의 MCP 판이다. wildcard 모드에서 Desktop MCP는 `0.0.0.0:P`에만 bind한다. readiness 이후 다른 프로세스가 더 구체적인 `127.0.0.1:P`나 광고한 Tailscale `IP:P`에 bind하면 macOS는 이를 허용한다. 그러면 그 주소로 접속하는 에이전트 요청이 Bearer 토큰째 그 프로세스로 간다. 격리 재현(master `914ca10`, `--host 0.0.0.0`)에서 `SO_REUSEADDR`·`SO_REUSEPORT` × loopback·광고 주소 4조합이 모두 가로채졌다. loopback 모드(`--host 127.0.0.1`)는 같은 주소를 이미 Core가 잡고 있어 후발 bind가 `EADDRINUSE`로 거부됐다.
+
+- **수정** (`raven/desktop/runtime.py`):
+  - #49의 guard 본문을 `_bind_guard(host, port)`로 일반화했다. `_bind_loopback_guard(port)`는 이를 부르는 API용 이름으로 남아 동작이 같다.
+  - `_bind_mcp_guards(port, advertised)`: MCP가 `0.0.0.0`이면 `127.0.0.1:P`와 광고 주소 `IP:P`(loopback과 같으면 한 번)를 같은 포트로 bind+listen한다. MCP 소켓 전부를 uvicorn에 함께 넘긴다(`sockets=[wildcard, loopback, advertised]`). 정확히 같은 주소를 우리가 잡고 있으므로 다른 프로세스의 bind는 옵션 조합과 무관하게 `EADDRINUSE`로 실패한다.
+  - guard 하나라도 못 잡으면 이미 잡은 guard와 MCP 소켓을 닫고, 기존 MCP 양보 정책대로 API만 띄운다(`could not hold every MCP address … API only`). MCP는 best-effort라 Core 전체를 fail-closed하지 않는다. readiness에 `mcp_port`가 없으므로 다른 서버로 가는 endpoint를 광고하지 않는다.
+  - Linux는 wildcard listen 중 특정 주소 bind를 다른 프로세스와 우리 모두에게 거부한다. 그래서 **Linux에서 `EADDRINUSE`일 때만** guard 없이 wildcard 소켓만으로 진행한다(#49와 같은 규칙).
+  - `_stop_mcp`는 MCP 소켓 목록을 받아 전부 해제한다(#50의 정리 경로를 그대로 따른다).
+  - 특정 주소 bind 모드(loopback, Tailscale IP)와 MCP 인증(`LanTokenAuth`), 포트 정책, readiness 형식은 바뀌지 않는다.
+- **Tailscale IP 변경 시점**:
+  - 보장: 기동 시점에 광고한 주소와 loopback은 readiness부터 종료까지 Core가 잡고 있다.
+  - 보장하지 않음(#16 범위): 기동 때 tailnet이 없어 loopback만 광고했다가 나중에 tailnet이 올라온 경우, 실행 중 Tailscale IP가 바뀐 경우. 둘 다 새 `IP:P`에는 guard가 없고 readiness의 `mcp_host`도 실측값이 아니다.
+  - 확인 못 함: tailnet이 내려갔다 같은 IP로 다시 올라올 때 기존 guard 소켓이 그 주소를 계속 막는지는 운영 tailnet을 건드리지 않고는 확인할 수 없어 **UNKNOWN**.
+- **검증**:
+  - 격리 재현(macOS): 수정 후 4조합 모두 후발 bind가 `EADDRINUSE(48)`. loopback 접속은 Desktop MCP가 받고(406), 광고 주소는 토큰 없이 401로 인증 응답이 그대로다.
+  - `tests/test_desktop_runtime.py` 8건 추가: readiness 이후 loopback과 광고 주소 bind가 `SO_REUSEADDR`/`SO_REUSEPORT`/둘 다 3조합에서 실패하고 인증 응답이 유지됨(3) / guard가 두 주소를 잡음(Linux는 빈 목록) / 한 주소를 못 잡으면 먼저 잡은 guard를 닫음(macOS) / claim과 guard 사이에 loopback·광고 주소를 다른 프로세스가 잡으면 API only, MCP 소켓 해제, 다른 서버 영향 없음(2). master 코드에서는 7건이 실패한다. 광고 주소는 이 호스트의 비-loopback 주소로 대신한다.
+  - Linux(Docker `python:3.12-slim`, linuxkit 6.10, root): `test_desktop_runtime.py`·`test_mcp_lan_token_auth.py` 68 passed, 1 failed(기존 `closed_stderr_pipe`), 4 skipped(Linux가 겹치는 bind를 거부해 해당 경로가 없음). readiness 이후 bind 3조합도 통과한다.
+- **잔여 위험**:
+  - 광고하지 않은 다른 로컬 주소(예: LAN IP)는 guard가 없다. macOS에서 그 주소로 직접 접속하는 에이전트는 여전히 가로채일 수 있다.
+  - 위 Tailscale IP 변경 경우는 #16으로 넘긴다.
+  - IPv6는 다루지 않는다(MCP 소켓은 IPv4 전용).
+  - Linux는 Docker linuxkit + root만 확인했다. 다른 배포판·다른 UID 조합과 Windows는 **UNKNOWN**.

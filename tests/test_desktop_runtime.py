@@ -1198,7 +1198,7 @@ def test_stop_mcp_releases_the_socket_of_a_server_that_never_started() -> None:
     port = sock.getsockname()[1]
     thread = threading.Thread(target=lambda: None)
     thread.start()
-    assert runtime._stop_mcp(_FakeServer(started=False), thread, sock, port) is True
+    assert runtime._stop_mcp(_FakeServer(started=False), thread, [sock], port) is True
     assert sock.fileno() == -1
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", port), timeout=1).close()
@@ -1214,7 +1214,7 @@ def test_stop_mcp_closes_a_stuck_startup_and_reports_it(capsys) -> None:
     thread.start()
     server = _FakeServer(started=False)
     try:
-        assert runtime._stop_mcp(server, thread, sock, 1234) is False
+        assert runtime._stop_mcp(server, thread, [sock], 1234) is False
         assert server.should_exit and sock.fileno() == -1
         assert "did not stop within 2s (socket released)" in capsys.readouterr().err
     finally:
@@ -1231,7 +1231,7 @@ def test_stop_mcp_reports_a_started_listener_that_does_not_stop(capsys) -> None:
     thread = threading.Thread(target=release.wait, daemon=True)
     thread.start()
     try:
-        assert runtime._stop_mcp(_FakeServer(started=True), thread, sock, 1234) is False
+        assert runtime._stop_mcp(_FakeServer(started=True), thread, [sock], 1234) is False
         assert "MCP was not cleanly yielded" in capsys.readouterr().err
     finally:
         release.set()
@@ -1327,3 +1327,160 @@ def test_runtime_releases_the_mcp_port_after_losing_the_identity_check(tmp_path:
         core.wait(timeout=10)
         if other is not None:
             other.close()
+
+
+# Issue #54: the MCP side of #49 — hold loopback and the advertised address.
+
+_MCP_ADVERTISES = r"""
+import sys
+import raven.desktop.runtime as r
+ip = sys.argv[2]
+r._advertised_mcp_host = lambda host: ip
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def _mcp_status(host: str, port: int) -> int:
+    try:
+        with urlopen(Request(f"http://{host}:{port}/mcp"), timeout=5) as response:
+            return response.status
+    except HTTPError as exc:
+        return exc.code
+
+
+@pytest.mark.parametrize("opts", [("SO_REUSEADDR",), ("SO_REUSEPORT",), ("SO_REUSEADDR", "SO_REUSEPORT")])
+def test_no_process_can_take_an_mcp_address_after_readiness(tmp_path: Path, opts) -> None:
+    """Before: macOS let a later bind of 127.0.0.1:P or the advertised IP:P win every agent request."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address to stand in for the Tailscale IP")
+    mcp_port = _free_port()
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    core = subprocess.Popen(
+        [sys.executable, "-c", _MCP_ADVERTISES, str(mcp_port), ip],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["mcp_port"], ready["mcp_host"]) == (mcp_port, ip)
+        for host in ("127.0.0.1", ip):
+            intruder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                for opt in opts:
+                    intruder.setsockopt(socket.SOL_SOCKET, getattr(socket, opt), 1)
+                with pytest.raises(OSError):
+                    intruder.bind((host, mcp_port))
+            finally:
+                intruder.close()
+        # Still our gated MCP: loopback passes the gate, the advertised IP needs a token.
+        assert _mcp_status("127.0.0.1", mcp_port) != 401
+        assert _mcp_status(ip, mcp_port) == 401
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+@pytest.mark.skipif(not sys.platform == "darwin", reason="macOS lets a specific bind overlap a listening wildcard")
+def test_mcp_guards_release_what_they_took_when_one_address_is_held(capsys) -> None:
+    from raven.desktop import runtime
+
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    wildcard = _listener("0.0.0.0")
+    port = wildcard.getsockname()[1]
+    other = _listener(ip, port)
+    try:
+        with pytest.raises(OSError):
+            runtime._bind_mcp_guards(port, ip)
+        # The loopback guard taken first was closed, so the address is free again.
+        _listener("127.0.0.1", port).close()
+    finally:
+        other.close()
+        wildcard.close()
+
+
+def test_mcp_guards_hold_loopback_and_the_advertised_address() -> None:
+    from raven.desktop import runtime
+
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    wildcard = _listener("0.0.0.0")
+    port = wildcard.getsockname()[1]
+    guards = runtime._bind_mcp_guards(port, ip)
+    try:
+        if sys.platform.startswith("linux"):
+            assert guards == []  # Linux refuses the overlap outright; the wildcard alone is safe
+        else:
+            assert sorted(g.getsockname() for g in guards) == sorted([("127.0.0.1", port), (ip, port)])
+    finally:
+        for guard in guards:
+            guard.close()
+        wildcard.close()
+
+
+_MCP_ADDRESS_TAKEN_AFTER_CLAIM = r"""
+import sys, time
+from pathlib import Path
+import raven.desktop.runtime as r
+signal_dir, ip = Path(sys.argv[2]), sys.argv[3]
+r._advertised_mcp_host = lambda host: ip
+claim = r._bind_mcp_socket
+def claim_then_wait(host, port, adv):
+    sock = claim(host, port, adv)
+    (signal_dir / "claimed").touch()
+    while not (signal_dir / "go").exists():
+        time.sleep(0.02)
+    return sock
+r._bind_mcp_socket = claim_then_wait
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+@pytest.mark.parametrize("taken", ["loopback", "advertised"])
+def test_runtime_goes_api_only_when_an_mcp_guard_cannot_be_held(tmp_path: Path, taken) -> None:
+    """Another process takes 127.0.0.1:P or IP:P between our claim and the guards."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address to stand in for the Tailscale IP")
+    mcp_port = _free_port()
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    signal_dir = tmp_path / "signal"
+    signal_dir.mkdir()
+    core = subprocess.Popen(
+        [sys.executable, "-c", _MCP_ADDRESS_TAKEN_AFTER_CLAIM, str(mcp_port), str(signal_dir), ip],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    other = None
+    try:
+        deadline = time.monotonic() + 15
+        while not (signal_dir / "claimed").exists():
+            assert time.monotonic() < deadline and core.poll() is None
+            time.sleep(0.02)
+        try:
+            other = _listener("127.0.0.1" if taken == "loopback" else ip, mcp_port)
+        except OSError:
+            pytest.skip("this kernel refuses a specific bind next to a listening 0.0.0.0:P")
+        finally:
+            (signal_dir / "go").touch()
+        ready = _wait_for_ready(core)
+        assert "mcp_port" not in ready
+        # None of our MCP sockets is left: the address nobody else holds refuses.
+        free_host = ip if taken == "loopback" else "127.0.0.1"
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection((free_host, mcp_port), timeout=1).close()
+        with socket.create_connection((other.getsockname()[0], mcp_port), timeout=1):
+            readable, _, _ = select.select([other], [], [], 1)
+            assert readable  # the other server is untouched
+            other.accept()[0].close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+        if other is not None:
+            other.close()
+    assert "could not hold every MCP address" in core.stderr.read()

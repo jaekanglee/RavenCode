@@ -248,7 +248,13 @@ def _bind_loopback_guard(port: int) -> socket.socket | None:
     Issue #49: on macOS another process could bind the more specific
     ``127.0.0.1:port`` after readiness (SO_REUSEADDR or SO_REUSEPORT) and take
     every webview request. Holding that exact address ourselves makes such a
-    bind fail with EADDRINUSE; uvicorn serves both sockets.
+    bind fail with EADDRINUSE; uvicorn serves both sockets. See ``_bind_guard``.
+    """
+    return _bind_guard(LOOPBACK_HOST, port)
+
+
+def _bind_guard(host: str, port: int) -> socket.socket | None:
+    """Bind+listen the specific ``host:port`` next to our ``0.0.0.0:port`` socket.
 
     Linux already refuses that bind while the wildcard listens — and refuses
     ours too, with EADDRINUSE — so on Linux that one error means the wildcard
@@ -259,7 +265,7 @@ def _bind_loopback_guard(port: int) -> socket.socket | None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((LOOPBACK_HOST, port))
+        sock.bind((host, port))
         sock.listen(2048)
     except OSError as exc:
         sock.close()
@@ -267,6 +273,28 @@ def _bind_loopback_guard(port: int) -> socket.socket | None:
             return None
         raise
     return sock
+
+
+def _bind_mcp_guards(port: int, advertised: str) -> list[socket.socket]:
+    """Hold every address agents dial next to a ``0.0.0.0:port`` MCP socket.
+
+    Issue #54, the MCP side of #49: after readiness another process could bind
+    ``127.0.0.1:port`` or the advertised (Tailscale) ``address:port`` on macOS
+    and take every agent request, Bearer token included. Raises OSError (with
+    any guard already taken closed) when one cannot be held — the caller then
+    yields MCP rather than advertise an endpoint someone else can take over.
+    """
+    guards: list[socket.socket] = []
+    try:
+        for host in dict.fromkeys([LOOPBACK_HOST, advertised]):
+            guard = _bind_guard(host, port)
+            if guard is not None:
+                guards.append(guard)
+    except OSError:
+        for guard in guards:
+            guard.close()
+        raise
+    return guards
 
 
 class _ProbeResponder:
@@ -331,7 +359,7 @@ def _bind_mcp_socket(host: str, port: int, advertised: str) -> socket.socket | N
     return _claim_port(host, port, dial_hosts)
 
 
-def _stop_mcp(server, thread: threading.Thread, sock: socket.socket, port: int) -> bool:
+def _stop_mcp(server, thread: threading.Thread, socks: list[socket.socket], port: int) -> bool:
     """Stop a desktop MCP listener we are yielding and release its socket.
 
     The socket is claimed before uvicorn runs (#50), and uvicorn only closes a
@@ -344,17 +372,19 @@ def _stop_mcp(server, thread: threading.Thread, sock: socket.socket, port: int) 
     """
     server.should_exit = True
     if not server.started:
-        sock.close()
+        for sock in socks:
+            sock.close()
     thread.join(timeout=2)
     if thread.is_alive():
-        state = "released" if sock.fileno() == -1 else "STILL LISTENING"
+        state = "released" if all(sock.fileno() == -1 for sock in socks) else "STILL LISTENING"
         print(
             f"❌ [Desktop Core] MCP listener on port {port} did not stop within 2s "
             f"(socket {state}) — MCP was not cleanly yielded.",
             file=sys.stderr,
         )
         return False
-    sock.close()
+    for sock in socks:
+        sock.close()
     return True
 
 
@@ -521,13 +551,28 @@ def main() -> int:
             )
         mcp_advertised = _advertised_mcp_host(mcp_host)
         mcp_sock = _bind_mcp_socket(mcp_host, args.mcp_port, mcp_advertised)
+        mcp_socks: list[socket.socket] = []
         if mcp_sock is None:
             print(
                 f"⚠️  [Desktop Core] MCP port {args.mcp_port} already in use or answered by "
                 f"another server (standalone ./raven.sh start?) — skipping desktop MCP, API only.",
                 file=sys.stderr,
             )
+        elif mcp_host == "0.0.0.0":
+            # Issue #54: hold loopback and the advertised address ourselves so
+            # nobody can bind them after readiness (MCP stays best-effort).
+            try:
+                mcp_socks = [mcp_sock, *_bind_mcp_guards(args.mcp_port, mcp_advertised)]
+            except OSError as exc:
+                mcp_sock.close()
+                print(
+                    f"⚠️  [Desktop Core] could not hold every MCP address on port {args.mcp_port} "
+                    f"next to 0.0.0.0 ({exc}) — skipping desktop MCP, API only.",
+                    file=sys.stderr,
+                )
         else:
+            mcp_socks = [mcp_sock]
+        if mcp_socks:
             try:
                 mcp_probe_nonce = secrets.token_hex(16)
                 mcp_target = _ProbeResponder(_build_mcp_app(args.mcp_mode, mcp_host), mcp_probe_nonce)
@@ -540,7 +585,8 @@ def main() -> int:
                 )
                 mcp_server = uvicorn.Server(mcp_config)
             except Exception as exc:  # noqa: BLE001 — degrade, don't take the app down
-                mcp_sock.close()
+                for sock in mcp_socks:
+                    sock.close()
                 print(
                     f"⚠️  [Desktop Core] MCP disabled — failed to build server: "
                     f"{type(exc).__name__}: {exc}",
@@ -560,7 +606,7 @@ def main() -> int:
 
     mcp_thread: threading.Thread | None = None
     if mcp_server is not None:
-        mcp_thread = threading.Thread(target=mcp_server.run, kwargs={"sockets": [mcp_sock]}, daemon=True)
+        mcp_thread = threading.Thread(target=mcp_server.run, kwargs={"sockets": mcp_socks}, daemon=True)
         mcp_thread.start()
 
     # Wait for API readiness — this one IS fatal; without the API there is no app.
@@ -585,14 +631,14 @@ def main() -> int:
                     "(port conflict?) — continuing API only.",
                     file=sys.stderr,
                 )
-                _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
+                _stop_mcp(mcp_server, mcp_thread, mcp_socks, args.mcp_port)
                 break
             if time.monotonic() > mcp_deadline:
                 print(
                     "⚠️  [Desktop Core] MCP startup timeout — continuing API only.",
                     file=sys.stderr,
                 )
-                _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
+                _stop_mcp(mcp_server, mcp_thread, mcp_socks, args.mcp_port)
                 break
             time.sleep(0.05)
 
@@ -606,7 +652,7 @@ def main() -> int:
                 "process — continuing API only.",
                 file=sys.stderr,
             )
-            _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
+            _stop_mcp(mcp_server, mcp_thread, mcp_socks, args.mcp_port)
             mcp_ready = False
 
     # Issue #22: never hand the webview an endpoint some other server answers.
