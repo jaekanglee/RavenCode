@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
+from .gemini_client import generate_content
 from .vault import Vault
 from .hybrid_search import hybrid_search
 
@@ -86,13 +87,12 @@ def query_rag(vault: Vault, query_text: str) -> dict[str, Any]:
                 "답변:"
             )
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
+            
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}]
             }
 
-            resp = httpx.post(url, headers=headers, json=payload, timeout=15.0)
+            resp = generate_content(api_key, payload)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 answer = resp_json["candidates"][0]["content"]["parts"][0]["text"].strip()
