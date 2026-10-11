@@ -1484,3 +1484,224 @@ def test_runtime_goes_api_only_when_an_mcp_guard_cannot_be_held(tmp_path: Path, 
         if other is not None:
             other.close()
     assert "could not hold every MCP address" in core.stderr.read()
+
+
+@pytest.mark.parametrize("ts_ip, expected", [(None, "127.0.0.1"), ("100.101.102.103", "100.101.102.103")])
+def test_mcp_advertises_the_tailnet_address_only_when_one_is_up(monkeypatch, ts_ip, expected) -> None:
+    from raven.desktop import runtime
+
+    monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: ts_ip)
+    assert runtime._advertised_mcp_host("0.0.0.0") == expected
+    assert runtime._advertised_mcp_host("127.0.0.1") == "127.0.0.1"
+
+
+def test_mcp_guards_hold_loopback_once_without_a_tailnet() -> None:
+    """No tailnet → advertised is loopback → exactly one guard (none on Linux)."""
+    from raven.desktop import runtime
+
+    wildcard = _listener("0.0.0.0")
+    port = wildcard.getsockname()[1]
+    guards = runtime._bind_mcp_guards(port, "127.0.0.1")
+    try:
+        expected = [] if sys.platform.startswith("linux") else [("127.0.0.1", port)]
+        assert [g.getsockname() for g in guards] == expected
+    finally:
+        for guard in guards:
+            guard.close()
+        wildcard.close()
+
+
+def test_mcp_guards_close_what_they_took_on_any_error(monkeypatch) -> None:
+    """A guard taken before a later one fails must not stay bound (any errno)."""
+    import errno as errno_mod
+    from raven.desktop import runtime
+
+    taken: list[socket.socket] = []
+
+    def guard(host, port):
+        if host != "127.0.0.1":
+            raise OSError(errno_mod.EADDRNOTAVAIL, "simulated: address not on this host")
+        sock = _listener(host)
+        taken.append(sock)
+        return sock
+
+    monkeypatch.setattr(runtime, "_bind_guard", guard)
+    with pytest.raises(OSError):
+        runtime._bind_mcp_guards(1, "100.101.102.103")
+    assert taken and all(s.fileno() == -1 for s in taken)
+
+
+def test_mcp_guards_accept_the_linux_fallback(monkeypatch) -> None:
+    """Linux EADDRINUSE → _bind_guard returns None → wildcard alone, no error."""
+    from raven.desktop import runtime
+
+    monkeypatch.setattr(runtime, "_bind_guard", lambda host, port: None)
+    assert runtime._bind_mcp_guards(1, "100.101.102.103") == []
+
+
+def test_stop_mcp_releases_every_socket_of_a_stuck_startup() -> None:
+    import threading
+    from raven.desktop import runtime
+
+    socks = [_listener("127.0.0.1"), _listener("127.0.0.1")]
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+    try:
+        assert runtime._stop_mcp(_FakeServer(started=False), thread, socks, 1) is False
+        assert all(s.fileno() == -1 for s in socks)
+    finally:
+        release.set()
+
+
+_MCP_RECORDS_GUARDS = r"""
+import sys
+import raven.desktop.runtime as r
+real = r._bind_mcp_guards
+def recorded(port, advertised):
+    print(f"MCP-GUARDS {advertised}", file=sys.stderr, flush=True)
+    return real(port, advertised)
+r._bind_mcp_guards = recorded
+argv = sys.argv[1:]
+sys.argv = ["runtime", *argv]
+raise SystemExit(r.main())
+"""
+
+
+def _run_core(tmp_path: Path, script: str, *args: str) -> subprocess.Popen[str]:
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    return subprocess.Popen(
+        [sys.executable, "-c", script, *args],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+@pytest.mark.parametrize("mode", ["loopback", "specific"])
+def test_specific_mcp_binds_keep_their_endpoint_and_take_no_guards(tmp_path: Path, mode) -> None:
+    """Loopback / specific-address MCP already holds the exact address it advertises."""
+    if mode == "loopback":
+        host, args = "127.0.0.1", ["--host", "127.0.0.1"]
+    else:
+        host = _local_non_loopback_ip()
+        if host is None:
+            pytest.skip("needs a non-loopback address")
+        args = ["--host", "0.0.0.0", "--mcp-host", host]
+    mcp_port = _free_port()
+    core = _run_core(tmp_path, _MCP_RECORDS_GUARDS, *args, "--mcp", "--mcp-port", str(mcp_port))
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["mcp_port"], ready["mcp_host"]) == (mcp_port, host)
+        intruder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            intruder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            intruder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            with pytest.raises(OSError):
+                intruder.bind((host, mcp_port))
+        finally:
+            intruder.close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+    assert "MCP-GUARDS" not in core.stderr.read()
+
+
+_MCP_GUARD_ERRNO = r"""
+import errno, sys
+import raven.desktop.runtime as r
+ip = sys.argv[2]
+r._advertised_mcp_host = lambda host: ip
+real = r._bind_guard
+def guard(host, port):
+    if host == ip:
+        raise OSError(errno.EACCES, "simulated: not allowed")
+    return real(host, port)
+r._bind_guard = guard
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def test_runtime_goes_api_only_and_releases_everything_on_another_guard_errno(tmp_path: Path) -> None:
+    """Not Linux EADDRINUSE → no fallback: MCP yields, wildcard and loopback guard are released."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    mcp_port = _free_port()
+    core = _run_core(tmp_path, _MCP_GUARD_ERRNO, str(mcp_port), ip)
+    try:
+        ready = _wait_for_ready(core)
+        assert set(ready) == {"host", "port"}
+        for host in ("127.0.0.1", ip):
+            with pytest.raises(ConnectionRefusedError):
+                socket.create_connection((host, mcp_port), timeout=1).close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+    assert "could not hold every MCP address" in core.stderr.read()
+
+
+def test_runtime_goes_api_only_when_the_advertised_address_is_not_local(tmp_path: Path) -> None:
+    """A stale/invalid advertised address (TEST-NET-1 here) never yields an advertised MCP."""
+    mcp_port = _free_port()
+    core = _run_core(tmp_path, _MCP_ADVERTISES, str(mcp_port), "192.0.2.1")
+    try:
+        ready = _wait_for_ready(core)
+        assert set(ready) == {"host", "port"}
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", mcp_port), timeout=1).close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+_MCP_STARTUP_FAILS_ADVERTISED = r"""
+import sys
+import raven.desktop.runtime as r
+ip = sys.argv[2]
+r._advertised_mcp_host = lambda host: ip
+async def app(scope, receive, send):
+    if scope["type"] == "lifespan":
+        await receive()
+        await send({"type": "lifespan.startup.failed", "message": "boom"})
+r._build_mcp_app = lambda mode, host: app
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def test_runtime_releases_every_mcp_socket_when_mcp_startup_fails(tmp_path: Path) -> None:
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    mcp_port = _free_port()
+    core = _run_core(tmp_path, _MCP_STARTUP_FAILS_ADVERTISED, str(mcp_port), ip)
+    try:
+        ready = _wait_for_ready(core)
+        assert set(ready) == {"host", "port"}
+        for host in ("127.0.0.1", ip):
+            with pytest.raises(ConnectionRefusedError):
+                socket.create_connection((host, mcp_port), timeout=1).close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_sigterm_releases_every_mcp_socket(tmp_path: Path) -> None:
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    mcp_port = _free_port()
+    core = _run_core(tmp_path, _MCP_ADVERTISES, str(mcp_port), ip)
+    try:
+        ready = _wait_for_ready(core)
+        assert set(ready) == {"host", "port", "mcp_port", "mcp_host"}
+        core.terminate()
+        assert core.wait(timeout=15) == 0
+        for host in ("127.0.0.1", ip):
+            with pytest.raises(ConnectionRefusedError):
+                socket.create_connection((host, mcp_port), timeout=1).close()
+    finally:
+        if core.poll() is None:
+            core.kill()
+            core.wait(timeout=10)

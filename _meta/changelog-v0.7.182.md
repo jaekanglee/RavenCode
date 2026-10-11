@@ -1218,9 +1218,11 @@ Desktop MCP 포트 검사 `_port_is_free(host, port)`는 #22 이전 API 검사�
 - **검증**:
   - 격리 재현(macOS): 수정 후 4조합 모두 후발 bind가 `EADDRINUSE(48)`. loopback 접속은 Desktop MCP가 받고(406), 광고 주소는 토큰 없이 401로 인증 응답이 그대로다.
   - `tests/test_desktop_runtime.py` 8건 추가: readiness 이후 loopback과 광고 주소 bind가 `SO_REUSEADDR`/`SO_REUSEPORT`/둘 다 3조합에서 실패하고 인증 응답이 유지됨(3) / guard가 두 주소를 잡음(Linux는 빈 목록) / 한 주소를 못 잡으면 먼저 잡은 guard를 닫음(macOS) / claim과 guard 사이에 loopback·광고 주소를 다른 프로세스가 잡으면 API only, MCP 소켓 해제, 다른 서버 영향 없음(2). master 코드에서는 7건이 실패한다. 광고 주소는 이 호스트의 비-loopback 주소로 대신한다.
-  - Linux(Docker `python:3.12-slim`, linuxkit 6.10, root): `test_desktop_runtime.py`·`test_mcp_lan_token_auth.py` 68 passed, 1 failed(기존 `closed_stderr_pipe`), 4 skipped(Linux가 겹치는 bind를 거부해 해당 경로가 없음). readiness 이후 bind 3조합도 통과한다.
+  - 병합 전 보강 12건: tailnet 유무에 따른 광고 주소(2) / tailnet이 없으면 loopback guard 하나 / 뒤 guard가 어떤 errno로 실패해도 앞 guard 해제 / Linux fallback(None)은 빈 목록 / 멈춘 기동에서 MCP 소켓 전부 해제 / loopback·특정 주소 MCP 모드는 guard를 요청하지 않고 endpoint 유지, 같은 주소 후발 bind 거부(2) / Linux `EADDRINUSE`가 아닌 errno면 API only, wildcard·loopback guard 모두 해제 / 로컬에 없는 광고 주소(TEST-NET-1)면 API only / MCP 기동 실패 시 loopback·광고 주소 모두 해제 / SIGTERM 후 exit 0, loopback·광고 주소 모두 해제, readiness 키는 기존과 같음(`host`, `port`, `mcp_port`, `mcp_host`).
+  - Linux(Docker `python:3.12-slim`, linuxkit 6.10, root): `test_desktop_runtime.py`·`test_mcp_lan_token_auth.py` 80 passed, 1 failed(기존 `closed_stderr_pipe`), 4 skipped(Linux가 겹치는 bind를 거부해 해당 경로가 없음). 실제 Linux 커널에서 `EADDRINUSE` fallback으로 guard 없이 진행하고, readiness 이후 bind 3조합도 거부된다.
 - **잔여 위험**:
   - 광고하지 않은 다른 로컬 주소(예: LAN IP)는 guard가 없다. macOS에서 그 주소로 직접 접속하는 에이전트는 여전히 가로채일 수 있다.
   - 위 Tailscale IP 변경 경우는 #16으로 넘긴다.
   - IPv6는 다루지 않는다(MCP 소켓은 IPv4 전용).
+  - 로컬에 없는 광고 주소는 claim 단계 사전 probe에서 API only가 되지만, 경고 문구는 "already in use or answered by another server"로 나온다(동작은 안전, 문구만 부정확).
   - Linux는 Docker linuxkit + root만 확인했다. 다른 배포판·다른 UID 조합과 Windows는 **UNKNOWN**.
