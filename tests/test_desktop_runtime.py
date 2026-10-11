@@ -1181,3 +1181,149 @@ def test_runtime_does_not_advertise_an_mcp_endpoint_it_does_not_answer(tmp_path:
         core.wait(timeout=10)
         other.close()
     assert "answered by another process" in core.stderr.read()
+
+
+class _FakeServer:
+    def __init__(self, started: bool) -> None:
+        self.started = started
+        self.should_exit = False
+
+
+def test_stop_mcp_releases_the_socket_of_a_server_that_never_started() -> None:
+    """uvicorn closes a passed socket only after a started server shuts down."""
+    import threading
+    from raven.desktop import runtime
+
+    sock = _listener("127.0.0.1")
+    port = sock.getsockname()[1]
+    thread = threading.Thread(target=lambda: None)
+    thread.start()
+    assert runtime._stop_mcp(_FakeServer(started=False), thread, sock, port) is True
+    assert sock.fileno() == -1
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+
+
+def test_stop_mcp_closes_a_stuck_startup_and_reports_it(capsys) -> None:
+    import threading
+    from raven.desktop import runtime
+
+    sock = _listener("127.0.0.1")
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+    server = _FakeServer(started=False)
+    try:
+        assert runtime._stop_mcp(server, thread, sock, 1234) is False
+        assert server.should_exit and sock.fileno() == -1
+        assert "did not stop within 2s (socket released)" in capsys.readouterr().err
+    finally:
+        release.set()
+
+
+def test_stop_mcp_reports_a_started_listener_that_does_not_stop(capsys) -> None:
+    """Never a silent "yielded": a live thread is reported as an error."""
+    import threading
+    from raven.desktop import runtime
+
+    sock = _listener("127.0.0.1")
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+    try:
+        assert runtime._stop_mcp(_FakeServer(started=True), thread, sock, 1234) is False
+        assert "MCP was not cleanly yielded" in capsys.readouterr().err
+    finally:
+        release.set()
+        sock.close()
+
+
+_MCP_STARTUP_FAILS = r"""
+import sys
+import raven.desktop.runtime as r
+async def app(scope, receive, send):
+    if scope["type"] == "lifespan":
+        await receive()
+        await send({"type": "lifespan.startup.failed", "message": "boom"})
+r._build_mcp_app = lambda mode, host: app
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def test_runtime_releases_the_mcp_port_when_mcp_startup_fails(tmp_path: Path) -> None:
+    """Before: API-only readiness while *:P still listened with nobody accepting."""
+    mcp_port = _free_port()
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    core = subprocess.Popen(
+        [sys.executable, "-c", _MCP_STARTUP_FAILS, str(mcp_port)],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        assert "mcp_port" not in ready
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", mcp_port), timeout=1).close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+_MCP_LOSES_LOOPBACK_AFTER_CLAIM = r"""
+import os, sys, time
+from pathlib import Path
+import raven.desktop.runtime as r
+signal_dir = Path(sys.argv[2])
+claim = r._bind_mcp_socket
+def claim_then_wait(host, port, adv):
+    sock = claim(host, port, adv)
+    (signal_dir / "claimed").touch()
+    while not (signal_dir / "go").exists():
+        time.sleep(0.02)
+    return sock
+r._bind_mcp_socket = claim_then_wait
+sys.argv = ["runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def test_runtime_releases_the_mcp_port_after_losing_the_identity_check(tmp_path: Path) -> None:
+    """Another process takes 127.0.0.1:P between our claim and readiness (macOS allows it).
+
+    The Core must go API only, stop its MCP listener, and leave the other server alone.
+    """
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address to see our wildcard listener")
+    mcp_port = _free_port()
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
+    signal_dir = tmp_path / "signal"
+    signal_dir.mkdir()
+    core = subprocess.Popen(
+        [sys.executable, "-c", _MCP_LOSES_LOOPBACK_AFTER_CLAIM, str(mcp_port), str(signal_dir)],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    other = None
+    try:
+        deadline = time.monotonic() + 15
+        while not (signal_dir / "claimed").exists():
+            assert time.monotonic() < deadline and core.poll() is None
+            time.sleep(0.02)
+        try:
+            other = _listener("127.0.0.1", mcp_port)
+        except OSError:
+            pytest.skip("this kernel refuses 127.0.0.1:P next to a listening 0.0.0.0:P")
+        finally:
+            (signal_dir / "go").touch()
+        ready = _wait_for_ready(core)
+        assert "mcp_port" not in ready
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection((ip, mcp_port), timeout=1).close()
+        assert _accepts_loopback(other)
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+        if other is not None:
+            other.close()

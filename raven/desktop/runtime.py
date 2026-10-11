@@ -331,6 +331,33 @@ def _bind_mcp_socket(host: str, port: int, advertised: str) -> socket.socket | N
     return _claim_port(host, port, dial_hosts)
 
 
+def _stop_mcp(server, thread: threading.Thread, sock: socket.socket, port: int) -> bool:
+    """Stop a desktop MCP listener we are yielding and release its socket.
+
+    The socket is claimed before uvicorn runs (#50), and uvicorn only closes a
+    passed socket when a *started* server shuts down — a failed or stuck
+    startup would leave it listening with nobody accepting. asyncio never took
+    the socket over in that case, so it is closed first — a startup stuck in
+    the app's lifespan never reaches the join below. The join stays short so
+    a stuck MCP cannot push readiness past the shell's 15s limit. Returns
+    False (and says so) if the thread did not stop: that is not a clean yield.
+    """
+    server.should_exit = True
+    if not server.started:
+        sock.close()
+    thread.join(timeout=2)
+    if thread.is_alive():
+        state = "released" if sock.fileno() == -1 else "STILL LISTENING"
+        print(
+            f"❌ [Desktop Core] MCP listener on port {port} did not stop within 2s "
+            f"(socket {state}) — MCP was not cleanly yielded.",
+            file=sys.stderr,
+        )
+        return False
+    sock.close()
+    return True
+
+
 def _resolve_mcp_host(explicit: str | None, api_host: str) -> str:
     """Pick the MCP bind address — follows the API, explicit override wins.
 
@@ -558,13 +585,14 @@ def main() -> int:
                     "(port conflict?) — continuing API only.",
                     file=sys.stderr,
                 )
+                _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
                 break
             if time.monotonic() > mcp_deadline:
                 print(
                     "⚠️  [Desktop Core] MCP startup timeout — continuing API only.",
                     file=sys.stderr,
                 )
-                mcp_server.should_exit = True
+                _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
                 break
             time.sleep(0.05)
 
@@ -578,7 +606,7 @@ def main() -> int:
                 "process — continuing API only.",
                 file=sys.stderr,
             )
-            mcp_server.should_exit = True
+            _stop_mcp(mcp_server, mcp_thread, mcp_sock, args.mcp_port)
             mcp_ready = False
 
     # Issue #22: never hand the webview an endpoint some other server answers.

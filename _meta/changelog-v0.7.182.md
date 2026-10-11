@@ -1190,7 +1190,12 @@ Desktop MCP 포트 검사 `_port_is_free(host, port)`는 #22 이전 API 검사�
   - `tests/test_desktop_runtime.py` 7건 추가: 세 겹침 경우 양보(광고 IP 경우는 이 호스트의 비-loopback 주소로 대신하며, 없으면 생략) / 충돌 없으면 포트 유지(2) / 충돌 시 readiness에 `mcp_port` 없음 / 다른 포트로 서빙되는 등 광고 endpoint를 받지 못하면 `mcp_port`를 알리지 않음. master에서는 종단 간 테스트가 `mcp_port`가 있어서 실패한다.
   - macOS 전체 pytest 1997 passed. 실패 2건은 기존과 같다. Linux(Docker `python:3.12-slim`, linuxkit 6.10, root)는 `test_desktop_runtime.py`·`test_mcp_lan_token_auth.py` 60 passed, 1 failed(같은 기존 실패)이고, 신규 MCP 테스트 7건은 광고 IP 경우까지 모두 통과했다.
 - **잔여 위험**:
-  - readiness **이후** 다른 프로세스가 더 구체적인 주소(`127.0.0.1:P`, `100.x:P`)로 bind해 MCP를 가로채는 경로는 남아 있다(#49의 MCP 판). macOS에서만 가능하며 이번 범위 밖이다.
+  - readiness **이후** 다른 프로세스가 더 구체적인 주소(`127.0.0.1:P`, `100.x:P`)로 bind해 MCP를 가로채는 경로는 남아 있다(#49의 MCP 판). macOS에서 `SO_REUSEADDR`·`SO_REUSEPORT` 모두 재현했고 이번 범위 밖이다 → #54.
   - 광고 host는 기동 시점의 Tailscale IP다. 실행 중 IP가 바뀌는 경우는 다루지 않는다.
   - 충돌로 양보할 때도 그 앞에 "MCP bound to 0.0.0.0" 안내가 먼저 찍힌다(기존 출력 순서).
   - Linux는 Docker linuxkit + root만 확인했고, 그 밖의 Linux 배포판과 Windows는 **UNKNOWN**.
+- **보완 — MCP를 내릴 때 소켓까지 정리** (병합 전 검증에서 발견):
+  - 위 수정은 확인한 소켓을 uvicorn에 넘긴다. 그런데 uvicorn은 **기동에 성공한** 서버를 종료할 때만 넘겨받은 소켓을 닫는다. 그래서 MCP 기동이 실패하거나(lifespan `startup.failed`) 10초 안에 끝나지 않으면, API만 알린 뒤에도 Core가 `*:P`를 계속 listen했다. 접속은 커널이 받지만 아무도 응답하지 않는다(격리 재현, `2e0bacd`). 정체성 확인 실패 경로도 종료 요청만 하고 기다리지 않아, readiness 직후에는 리스너가 아직 남아 있었다.
+  - `_stop_mcp(server, thread, sock, port)`: 종료를 요청한다. 기동하지 못한 서버면 소켓을 먼저 닫는다(asyncio가 아직 넘겨받지 않았다). 그다음 스레드를 2초 기다린 뒤 소켓을 닫는다. 스레드가 끝나지 않으면 양보한 것으로 치지 않고 `❌ … did not stop within 2s (socket released|STILL LISTENING) — MCP was not cleanly yielded.`를 남긴다. 기동 실패, 기동 시간 초과, 정체성 확인 실패의 세 경로가 모두 이것을 거친 뒤 readiness를 출력한다. join을 2초로 둔 것은 기동 시간 초과(10초) 경로가 shell의 readiness 한도(15초)를 넘지 않게 하기 위해서다.
+  - 수정 후 재현: 기동 실패 시 readiness 1.5초, `127.0.0.1:P` 접속은 `ConnectionRefused`. 기동 지연 시 readiness 13.4초, 소켓 해제, ❌ 오류 출력. 정체성 확인 실패 시 Core 리스너 없음, 다른 서버는 loopback을 계속 받음.
+  - 테스트 5건 추가: `_stop_mcp` 단위 3건(기동 못 한 서버 소켓 해제 / 멈춘 기동은 소켓 해제 후 오류 보고 / 멈춘 started 리스너 오류 보고), 종단 간 2건(기동 실패 시 포트 해제 / claim 뒤 다른 프로세스가 `127.0.0.1:P`를 잡으면 API only, 우리 wildcard 해제, 다른 서버 영향 없음). `2e0bacd` 코드에서는 5건 모두 실패한다. 마지막 건은 Linux에서 후발 bind 자체가 거부되므로 skip된다.
