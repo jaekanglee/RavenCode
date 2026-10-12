@@ -1154,7 +1154,7 @@ mod tests {
         let index = include_str!("../../../dashboard/index.html");
         for tag in index.split("<script").skip(1) {
             let open = &tag[..tag.find('>').expect("unterminated <script")];
-            assert!(open.contains("src="), "inline <script{open}> in dashboard/index.html");
+            assert!(open.split_whitespace().any(|attr| attr.starts_with("src=")), "inline <script{open}> in dashboard/index.html");
         }
     }
 

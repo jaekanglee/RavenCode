@@ -1594,7 +1594,7 @@ Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 
 - **검증**:
   - dashboard: `src/lib/markdown-safety.test.tsx` 33건 신규(위험 요소 15종 제거, 위험 속성·URL 14종 제거 — rehype-attr 주석 경로 포함, 일반 Markdown·GFM·위키링크·코드 복사 버튼·이미지·`details` 등 유지, 링크 대상 유지, 모든 `MDEditor.Markdown`에 적용됐는지 소스 검사). vitest 568 passed, `tsc -b` 통과. 마지막 플러그인을 빼면 신규 테스트 4건이 실패한다.
   - Rust: `webview_csp_is_set_and_scripts_stay_self_only`(csp가 null이 아님, script-src `'self'`만, `unsafe-eval`·와일드카드 없음, `unsafe-inline`은 style-src에만, object/frame/base/form 제한, `index.html`에 인라인 스크립트 없음), `ats_allows_local_networking_not_arbitrary_loads`. `cargo test` 80 passed.
-- **독립 리뷰**: BLOCKER 1건(rehype-attr 주석으로 속성 복원)을 마지막 플러그인으로 고쳤다. should-fix 2건(점 있는 사설 이름의 ATS 실패 문서화, changelog 주장 정정)과 nit 4건(`target`·`download`·`autoplay` 제거, Rust 테스트의 인라인 스크립트 검사 강화·plist 공백 무관 비교)을 반영했다. 원본 HTML의 `id`·`class`는 남는다(앱 스타일을 빌릴 수 있으나 스크립트는 아님 — 헤딩 앵커·코드 강조가 같은 속성을 쓴다).
+- **독립 리뷰**: BLOCKER 1건(rehype-attr 주석으로 속성 복원)을 마지막 플러그인으로 고쳤다. should-fix 2건(점 있는 사설 이름의 ATS 실패 문서화, changelog 주장 정정)과 nit 4건(`target`·`download`·`autoplay` 제거, Rust 테스트의 인라인 스크립트 검사 강화·plist 공백 무관 비교)을 반영했고, 재검토에서 blocker·should-fix 없이 확인됐다. 원본 HTML의 `id`·`class`는 남는다(앱 스타일을 빌릴 수 있으나 스크립트는 아님 — 헤딩 앵커·코드 강조가 같은 속성을 쓴다).
 - **잔여 위험·UNKNOWN**:
   - `ts.net` 예외 경로(MagicDNS 이름으로 등록한 호스트)는 실제 tailnet을 쓰지 않고는 확인할 수 없어 **UNKNOWN**. 공개 도메인을 평문 HTTP로 등록해 쓰던 구성은 이제 HTTPS가 필요하다.
   - `style-src 'unsafe-inline'`은 남는다(스크립트 실행은 아니고 스타일 주입). `connect-src http:`는 넓다 — 임의의 사용자 호스트 때문이다.
