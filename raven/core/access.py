@@ -302,7 +302,7 @@ def _is_local_origin(origin: str) -> bool:
     return host is not None and _loopback_name(host)
 
 
-def is_local_browser_context(scope) -> bool:
+def is_local_browser_context(scope, *, page_navigation_ok: bool = False) -> bool:
     """Whether a request's Host and Origin say it was meant for this machine (Issue #28).
 
     Loopback trust (no token) is for programs on this machine and for the dashboard
@@ -318,6 +318,9 @@ def is_local_browser_context(scope) -> bool:
     a link or GET form from another site), which still run. It marks them with
     ``Sec-Fetch-Site: cross-site`` / ``same-site``; without an Origin to judge, those
     are refused too. A URL typed by the user (``none``) and same-origin loads pass.
+    ``page_navigation_ok`` (Core API only) still lets a link from another site open a
+    dashboard page — a top-level GET/HEAD navigation outside ``/api``, which returns the
+    static app and no data. Every ``/api`` call still needs a local context or a token.
     """
     hosts: list[str] = []
     origins: list[str] = []
@@ -332,7 +335,7 @@ def is_local_browser_context(scope) -> bool:
     if len(hosts) > 1 or len(origins) > 1:
         return False
     if not origins and any(site in ("cross-site", "same-site") for site in fetch_sites):
-        return False
+        return page_navigation_ok and _is_page_navigation(scope)
     if hosts:
         host = _host_part(hosts[0])
         if host is None or not _loopback_name(host):
@@ -340,6 +343,18 @@ def is_local_browser_context(scope) -> bool:
     if origins and not _is_local_origin(origins[0]):
         return False
     return True
+
+
+def _is_page_navigation(scope) -> bool:
+    """A browser opening a page (not an API call): top-level GET/HEAD outside /api."""
+    if scope.get("type") != "http" or scope.get("method") not in ("GET", "HEAD"):
+        return False
+    path = scope.get("path", "")
+    if path == "/api" or path.startswith("/api/"):
+        return False
+    modes = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-mode"]
+    dests = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-dest"]
+    return modes == ["navigate"] and dests in ([], ["document"])
 
 
 def has_valid_bearer(scope) -> bool:
@@ -358,6 +373,9 @@ class TokenGate:
     """
 
     realm = "raven"
+    # The Core API also serves the dashboard's static pages (#28 review): a link to them
+    # from another site may open them. MCP serves no pages and turns this off.
+    page_navigation_ok = True
     # Issue #24 (Core API) / #26 (MCP): loopback only — a tailnet source needs a token
     # like any other. The route check behind ``is_tailnet_peer`` is an inference,
     # not proof of the connection's WireGuard authentication. No gate opts back in.
@@ -377,7 +395,7 @@ class TokenGate:
         source = effective_client(scope)
         trusted = is_trusted_client(source, allow_tailnet=self.trust_tailnet)
         # Issue #28: tokenless trust also needs a local Host/Origin (see is_local_browser_context).
-        local = trusted and is_local_browser_context(scope)
+        local = trusted and is_local_browser_context(scope, page_navigation_ok=self.page_navigation_ok)
         if local or has_valid_bearer(scope):
             client = scope.get("client")
             if source is None or not client or client[0] != source:

@@ -26,6 +26,7 @@ tags: [security, access, mcp, api]
   - Host가 없거나 loopback 이름이다: `localhost`(끝 점 허용), `127.0.0.0/8`, `[::1]`, 포트 무관. 형식이 틀리거나 Host가 여러 개면 거부.
   - Origin이 없거나 loopback 페이지(`http(s)://localhost|127.x|[::1][:port]`)이거나 데스크톱 webview(`tauri://localhost`, `http(s)://tauri.localhost`)다. `null`, 경로·userinfo가 붙은 값, Origin 여러 개는 거부.
   - Origin이 없는데 `Sec-Fetch-Site`가 `cross-site`·`same-site`이면 거부한다. 브라우저는 다른 사이트에서 시작된 단순 로드(`<img>`, `<script src>`, 링크·GET 폼)에 Origin을 붙이지 않지만 요청은 실행되고, 이 헤더로 표시한다. 주소창 직접 입력(`none`)과 같은 origin은 통과한다. 데스크톱 webview는 cross-site지만 Origin을 보내므로 Origin 규칙이 판정한다(독립 리뷰).
+  - 예외(Core API만): 다른 사이트의 링크로 Core가 서빙하는 대시보드 페이지를 여는 최상위 탐색(GET/HEAD, `Sec-Fetch-Mode: navigate`, dest `document`, `/api` 밖)은 허용한다. 정적 앱만 돌려주고 데이터는 없다. `/api`와 MCP에는 예외가 없다(재검토).
 - 조건을 못 맞추면 토큰을 요구한다(401, 사유를 적은 detail). 유효한 Bearer가 있으면 Host·Origin을 보지 않는다 — Docker `spa_server`(Host를 `api:8765`로 바꿈), tailnet·LAN 원격 클라이언트가 그대로 동작한다.
 - websocket도 같다(1008로 닫음).
 - MCP SDK 보호는 계속 끈다. 같은 판정을 게이트가 원격 Bearer와 분리해서 한다.

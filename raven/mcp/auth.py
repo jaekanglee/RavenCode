@@ -34,6 +34,8 @@ class LanTokenAuth(TokenGate):
     realm = "raven-mcp"
     # Issue #26: like the Core API (#24), tailnet is not trusted without a token.
     trust_tailnet = False
+    # Issue #28: MCP serves no pages — a cross-site navigation gets no exemption.
+    page_navigation_ok = False
     detail = (
         "원격 MCP 접근(tailnet·내부망 포함)에는 Authorization: Bearer <token>이 필요합니다 "
         "(raven mcp token add <name>)."

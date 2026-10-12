@@ -39,10 +39,12 @@ def _inner():
         await socket.send_text("hi")
         await socket.close()
 
-    return Starlette(routes=[Route("/x", ok, methods=["GET", "POST"]), WebSocketRoute("/ws", ws)])
+    return Starlette(routes=[Route("/x", ok, methods=["GET", "POST", "HEAD"]), Route("/page/v/x", ok, methods=["GET", "HEAD", "POST"]),
+                              Route("/api/vaults", ok, methods=["GET", "POST"]), Route("/mcp", ok, methods=["GET", "POST"]),
+                              WebSocketRoute("/ws", ws)])
 
 
-def _status(gate_cls, headers: list[tuple[str, str]], peer: str = "127.0.0.1") -> int:
+def _status(gate_cls, headers: list[tuple[str, str]], peer: str = "127.0.0.1", method: str = "GET", path: str = "/x") -> int:
     """Raw ASGI call so Host is exactly what the test says (or absent)."""
     sent: list[dict] = []
 
@@ -53,7 +55,7 @@ def _status(gate_cls, headers: list[tuple[str, str]], peer: str = "127.0.0.1") -
         sent.append(message)
 
     scope = {
-        "type": "http", "method": "GET", "path": "/x", "raw_path": b"/x", "query_string": b"",
+        "type": "http", "method": method, "path": path, "raw_path": path.encode(), "query_string": b"",
         "headers": [(k.lower().encode(), v.encode()) for k, v in headers],
         "client": (peer, 40000), "server": ("127.0.0.1", 8765), "scheme": "http",
         "http_version": "1.1", "root_path": "",
@@ -255,3 +257,31 @@ def test_the_real_api_app_serves_the_desktop_webview_origin(vaults_root) -> None
     assert ok.status_code == 200
     assert ok.headers.get("access-control-allow-origin") == "tauri://localhost"
     assert client.get("/api/vaults", headers={"Origin": "tauri://evil"}).status_code == 401
+
+
+NAV = [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")]
+
+
+def test_a_link_from_another_site_can_open_a_dashboard_page_but_not_the_api(vaults_root) -> None:
+    """#28 review: the Core also serves the dashboard; following a link to it shows the app (no data)."""
+    assert _status(TokenGate, NAV, path="/page/v/x") == 200
+    assert _status(TokenGate, NAV, path="/page/v/x", method="HEAD") == 200
+    assert _status(TokenGate, NAV + [], path="/", ) in (200, 404)  # served or not routed — never 401
+    for path in ("/api/vaults", "/api"):
+        assert _status(TokenGate, NAV, path=path) == 401, path
+    # not a navigation: a POST, an <img>/<script> load, or an iframe document
+    assert _status(TokenGate, NAV, path="/page/v/x", method="POST") == 401
+    sub = [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "image")]
+    assert _status(TokenGate, sub, path="/page/v/x") == 401
+    frame = [h for h in NAV if h[0] != "sec-fetch-dest"] + [("sec-fetch-dest", "iframe")]
+    assert _status(TokenGate, frame, path="/page/v/x") == 401
+
+
+def test_mcp_gives_no_navigation_exemption(vaults_root) -> None:
+    assert _status(LanTokenAuth, NAV, path="/mcp") == 401
+    assert _status(LanTokenAuth, NAV, path="/page/v/x") == 401
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+def test_any_cross_site_fetch_metadata_value_counts(vaults_root, gate_cls) -> None:
+    assert _status(gate_cls, [("host", "127.0.0.1"), ("sec-fetch-site", "none"), ("sec-fetch-site", "cross-site")]) == 401
