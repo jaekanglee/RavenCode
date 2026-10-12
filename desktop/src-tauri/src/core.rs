@@ -185,16 +185,20 @@ const STDERR_TAIL_BYTES: usize = 8 * 1024;
 /// Why `ManagedCore::start` returned without a running Core.
 #[derive(Debug)]
 pub(crate) enum StartError {
-    /// The shell aborted the start (app exit, or a newer restart took over).
-    /// Nothing failed, so there is nothing to report to the user.
+    /// The shell aborted the start (app exit). Nothing failed, so there is
+    /// nothing to report to the user.
     Cancelled,
+    /// Another start or restart is still in progress, so this one was not run
+    /// (Issue #44) — running both would put two Cores side by side.
+    Busy,
     Failed(String),
 }
 
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => f.write_str("Python Core 기동이 취소되었습니다 (앱 종료 또는 새 재시작)"),
+            Self::Cancelled => f.write_str("앱 종료로 Python Core 기동이 취소되었습니다"),
+            Self::Busy => f.write_str("Python Core 기동 또는 재시작이 이미 진행 중입니다. 끝난 뒤 다시 시도하세요"),
             Self::Failed(message) => f.write_str(message),
         }
     }
@@ -418,12 +422,16 @@ impl ManagedCore {
             };
             // Exit is checked apart from EOF: a grandchild can hold stdout open
             // after the Core itself is gone.
+            // `abort` waits (kill, reap, stderr drain ≤1 s): release the slot lock
+            // first so an app-exit `cancel` never waits on it (Issue #44 review).
             if let Ok(Some(status)) = running.try_wait() {
                 let child = slot.take().expect("checked above");
+                drop(slot);
                 return Err(abort(child, &stderr, exited_before_ready(status)));
             }
             if Instant::now() >= deadline {
                 let child = slot.take().expect("checked above");
+                drop(slot);
                 return Err(abort(
                     child,
                     &stderr,
@@ -721,6 +729,7 @@ mod tests {
             match result {
                 Err(StartError::Failed(message)) => message,
                 Err(StartError::Cancelled) => panic!("cancelled, expected a failure"),
+                Err(StartError::Busy) => panic!("busy, expected a failure"),
                 Ok(core) => panic!("started at {}, expected a failure", core.endpoint),
             }
         }

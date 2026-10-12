@@ -5,6 +5,8 @@ import { UpdatePanel } from "../components/UpdatePanel";
 import { BackupPanel } from "../components/BackupPanel";
 import { useAppUpdater } from "../lib/useAppUpdater";
 import { describeBindExposure } from "../lib/bind-exposure";
+import { coreEndpointMoved } from "../lib/core-endpoint";
+import { getApiBase } from "../lib/api-base";
 import {
   fetchLinkCheck, runExport, repairVault, cloneVault,
   fetchLocks, releaseLock, apiFetch, formatApiError,
@@ -108,6 +110,13 @@ export function VaultManage() {
     try {
       const internals = (window as any).__TAURI_INTERNALS__;
       await internals.invoke("restart_core");
+      // Issue #44: the restarted Core may listen on another port — reload so every
+      // request goes to it (the shell does not reload under this call).
+      const next = await internals.invoke("core_endpoint").catch(() => null);
+      if (coreEndpointMoved(getApiBase(), next)) {
+        window.location.reload();
+        return;
+      }
       setRestartMsg("✅ 백엔드 재시작 완료");
       await refreshCoreStatus();
     } catch (e) {

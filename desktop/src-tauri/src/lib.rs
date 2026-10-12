@@ -25,31 +25,63 @@ fn show_and_recover(window: &WebviewWindow) {
 }
 
 /// The running Core, plus the start still waiting for readiness (Issue #43) so
-/// `stop` — app exit, restart — can abort it instead of leaving it behind.
+/// `stop` (app exit) can abort it instead of leaving it behind.
+///
+/// Issue #44: the pending slot is also the "a start is running" marker. Only one
+/// start or restart runs at a time; one requested meanwhile is refused with
+/// `StartError::Busy` rather than queued or allowed to cancel the running one —
+/// either of those let an older start's Core (already listening, not yet stored)
+/// live next to the newer one. The readiness wait never holds a lock.
+///
+/// The third field is the API endpoint last handed to the webview. It outlives
+/// the Core (a failed restart leaves none running), so a later restart on another
+/// port is still recognised as a move.
 #[derive(Default)]
-struct CoreState(Mutex<Option<core::ManagedCore>>, Mutex<Option<Arc<core::PendingStart>>>);
+struct CoreState(
+    Mutex<Option<core::ManagedCore>>,
+    Mutex<Option<Arc<core::PendingStart>>>,
+    Mutex<Option<String>>,
+);
+
+/// Frees the "a start is running" slot however `start_with` ends — a panic in a
+/// launch must not leave every later restart refused as `Busy`.
+struct StartSlot<'a>(&'a CoreState);
+
+impl Drop for StartSlot<'_> {
+    fn drop(&mut self) {
+        *self.0.pending() = None;
+    }
+}
 
 impl CoreState {
-    fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<(), core::StartError> {
+    fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<bool, core::StartError> {
         self.start_with(|pending| core::ManagedCore::start(mcp, resource_dir, pending))
     }
 
+    /// Replace the running Core (if any) with a new one; `Ok(true)` when its API
+    /// endpoint changed — the webview still points at the old one then.
     fn start_with(
         &self,
         launch: impl FnOnce(&core::PendingStart) -> Result<core::ManagedCore, core::StartError>,
-    ) -> Result<(), core::StartError> {
-        let pending = Arc::new(core::PendingStart::default());
-        if let Some(previous) = self.pending().replace(Arc::clone(&pending)) {
-            previous.cancel();
-        }
-        // Whatever started before this one goes, so two Cores never run side by side.
+    ) -> Result<bool, core::StartError> {
+        let pending = {
+            let mut slot = self.pending();
+            if slot.is_some() {
+                return Err(core::StartError::Busy);
+            }
+            Arc::clone(slot.insert(Arc::new(core::PendingStart::default())))
+        };
+        // Declared after `pending`, dropped before it: runs once this start is
+        // over — its Core stored or gone — and only then lets another start in.
+        let _slot = StartSlot(self);
+        // The running Core goes first, so two Cores never run side by side.
         if let Some(mut previous) = self.0.lock().ok().and_then(|mut state| state.take()) {
             previous.stop();
         }
         let result = match launch(&pending) {
             // Cancelled after the child left the cancel slot (it was parsing the
             // line, or timing out): the start failed, but nobody is waiting on it
-            // any more — app exit or a newer start took over. Not a failure to report.
+            // any more — the app is exiting. Not a failure to report.
             Err(core::StartError::Failed(error)) if pending.is_cancelled() => {
                 eprintln!("[core] superseded start ended with: {error}");
                 Err(core::StartError::Cancelled)
@@ -70,13 +102,12 @@ impl CoreState {
             if let Some(ref mcp_ep) = core.mcp_endpoint {
                 eprintln!("Raven MCP endpoint at {mcp_ep}");
             }
+            let mut served = self.2.lock().unwrap_or_else(PoisonError::into_inner);
+            let changed = served.as_ref().is_some_and(|before| *before != core.endpoint);
+            *served = Some(core.endpoint.clone());
             *state = Some(core);
-            Ok(())
+            Ok(changed)
         });
-        let mut slot = self.pending();
-        if slot.as_ref().is_some_and(|p| Arc::ptr_eq(p, &pending)) {
-            *slot = None;
-        }
         result
     }
 
@@ -85,7 +116,10 @@ impl CoreState {
     }
 
     fn stop(&self) {
-        if let Some(pending) = self.pending().take() {
+        // Cancel, but leave the slot to the start itself: it clears it once its
+        // child is gone, so nothing new can start next to a Core still winding down.
+        let pending = self.pending().clone();
+        if let Some(pending) = pending {
             pending.cancel();
         }
         if let Ok(mut state) = self.0.lock() {
@@ -212,22 +246,73 @@ fn core_status(state: State<'_, CoreState>) -> CoreStatus {
 }
 
 /// Stops and relaunches the Python Core — shared by the tray "Restart Backend"
-/// item and the dashboard's admin page restart button.
-fn do_restart_core(app: &tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<CoreState>();
-    state.stop();
+/// item and the dashboard's admin page restart button. Refused with
+/// `StartError::Busy` while another start or restart runs (Issue #44).
+///
+/// `Ok(true)` when the API endpoint moved: the port is 8765 when free, otherwise
+/// OS-assigned, so a restart can change it, and the dashboard reads it once at load.
+fn do_restart_core(app: &tauri::AppHandle) -> Result<bool, core::StartError> {
     let resource_dir = app.path().resource_dir().ok();
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
-    state.start(mcp_enabled, resource_dir).map_err(|e| e.to_string())
+    app.state::<CoreState>().start(mcp_enabled, resource_dir)
+}
+
+/// What the tray tells the user after "Restart Backend" (Issue #44): it used to
+/// only reach stderr. `None` when there is nothing to say (success, app exit).
+fn tray_restart_notice(result: &Result<bool, core::StartError>) -> Option<String> {
+    match result {
+        Ok(_) | Err(core::StartError::Cancelled) => None,
+        Err(core::StartError::Busy) => Some(format!("Backend를 재시작하지 않았습니다.\n{}", core::StartError::Busy)),
+        Err(error) => Some(format!("Backend 재시작에 실패했습니다.\n{error}")),
+    }
+}
+
+static TRAY_NOTICE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tray "Restart Backend". The menu callback runs on the main thread, so the
+/// restart itself goes to the blocking pool (Issue #43), and its outcome is shown
+/// in a non-blocking dialog (Issue #44, like the startup failure notice of #1 A-3).
+fn restart_from_tray(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = do_restart_core(&app);
+        if matches!(result, Ok(true)) {
+            // Nothing in the page is waiting on this restart, so reload it here
+            // (the dashboard's own restart reloads itself once the call returns).
+            // Only on a real move: the page's requests would otherwise go to
+            // whatever now holds the old port. A read the page has in flight may
+            // be sent again by the IPC layer; that is harmless for reads.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval("location.reload()");
+            }
+        }
+        if let Some(notice) = tray_restart_notice(&result) {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            eprintln!("{notice}");
+            // One notice at a time: repeated clicks during a long start would
+            // otherwise stack a dialog per click.
+            if !TRAY_NOTICE_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                app.dialog()
+                    .message(notice)
+                    .title("Raven")
+                    .kind(MessageDialogKind::Warning)
+                    .show(|_| TRAY_NOTICE_OPEN.store(false, std::sync::atomic::Ordering::SeqCst));
+            }
+        }
+    });
 }
 
 /// Restarts the Python Core on demand (invoked from the dashboard admin page).
 ///
 /// Issue #43: async + blocking pool, so the readiness wait (up to 60 s) never
 /// freezes the main thread — Quit stays responsive and cancels the restart.
+///
+/// The webview is not reloaded from here even when the endpoint moved: a reload
+/// while this call is in flight can make the IPC layer send it again. The
+/// dashboard compares `core_endpoint` after it returns and reloads itself.
 #[command]
 async fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
-    off_runtime(move || do_restart_core(&app)).await
+    off_runtime(move || do_restart_core(&app).map(|_| ()).map_err(|e| e.to_string())).await
 }
 
 /// Resolves where an exported file should land inside `dir`.
@@ -341,9 +426,11 @@ pub fn run() {
             // so it runs on the blocking pool rather than an async runtime worker.
             tauri::async_runtime::spawn_blocking(move || {
                 match handle.state::<CoreState>().start(mcp_enabled, resource_dir) {
-                    Ok(()) => {}
-                    // App exit or a tray/dashboard restart took over — not a failure.
-                    Err(core::StartError::Cancelled) => eprintln!("Raven Python Core start cancelled"),
+                    Ok(_) => {}
+                    // App exit, or a tray restart got in first and owns the start — not a failure.
+                    Err(e @ (core::StartError::Cancelled | core::StartError::Busy)) => {
+                        eprintln!("Raven Python Core initial start skipped: {e}")
+                    }
                     Err(core::StartError::Failed(e)) => report_startup_failure_and_exit(&handle, &e),
                 }
             });
@@ -369,15 +456,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
-                    "restart" => {
-                        // Off the main thread (Issue #43), like the dashboard's restart.
-                        let app = app.clone();
-                        tauri::async_runtime::spawn_blocking(move || {
-                            if let Err(e) = do_restart_core(&app) {
-                                eprintln!("Failed to restart core: {}", e);
-                            }
-                        });
-                    }
+                    "restart" => restart_from_tray(app),
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             show_and_recover(&window);
@@ -953,7 +1032,7 @@ mod tests {
                 s2.start_with(|p| ManagedCore::launch(cmd, Duration::from_secs(20), p))
             });
             let pid = pid(&pidfile);
-            state.stop(); // app exit / restart
+            state.stop(); // app exit
             assert!(!alive(&pid), "stop must not leave the pending Core running");
             assert!(matches!(waiter.join().unwrap(), Err(StartError::Cancelled)));
             assert!(state.0.lock().unwrap().is_none());
@@ -977,7 +1056,9 @@ mod tests {
         }
 
         #[test]
-        fn a_newer_start_replaces_the_pending_one() {
+        fn a_newer_start_is_refused_while_one_is_pending() {
+            // Issue #44 policy (it used to cancel the pending one): refuse, and
+            // leave the running start alone; app exit still cancels it.
             let state = Arc::new(CoreState::default());
             let (slow, pidfile) = sh("older", "echo $$ > \"$PIDFILE\"; exec sleep 30");
             let s2 = Arc::clone(&state);
@@ -985,21 +1066,25 @@ mod tests {
                 s2.start_with(|p| ManagedCore::launch(slow, Duration::from_secs(20), p))
             });
             let older_pid = pid(&pidfile);
-            let (fast, _) = sh("newer", &format!("echo '{READY}'; exec sleep 30"));
-            state
-                .start_with(|p| ManagedCore::launch(fast, Duration::from_secs(10), p))
-                .unwrap();
-            assert!(matches!(older.join().unwrap(), Err(StartError::Cancelled)));
+            let mut ran = false;
+            let newer = state.start_with(|_| {
+                ran = true;
+                unreachable!()
+            });
+            assert!(matches!(newer, Err(StartError::Busy)), "{newer:?}");
+            assert!(!ran, "a refused start must not spawn anything");
+            assert!(exists(&older_pid), "the pending start must keep running");
+            state.stop(); // app exit
             assert!(!alive(&older_pid));
-            assert!(state.0.lock().unwrap().as_mut().unwrap().is_alive());
-            state.stop();
+            assert!(matches!(older.join().unwrap(), Err(StartError::Cancelled)));
+            assert!(state.1.lock().unwrap().is_none());
         }
 
         #[test]
         fn a_superseded_start_that_then_fails_is_not_reported_as_a_failure() {
-            // Restart cancels the initial start after its child left the cancel
-            // slot; the initial start then fails on its own (here: bad JSON).
-            // Reporting that would show the failure dialog and exit the app.
+            // App exit cancels the start after its child left the cancel slot;
+            // the start then fails on its own (here: bad JSON). Reporting that
+            // would put up a failure dialog while the app is exiting.
             let state = CoreState::default();
             let (cmd, _) = sh("superseded", "echo not-json; exec sleep 30");
             let result = state.start_with(|p| {
@@ -1034,6 +1119,241 @@ mod tests {
             assert_eq!(state.0.lock().unwrap().as_ref().unwrap().endpoint, "http://127.0.0.1:41000");
             assert!(state.1.lock().unwrap().is_none());
             state.stop();
+        }
+    }
+
+    /// Issue #44: overlapping restarts (dashboard + tray, or during the first start).
+    #[cfg(unix)]
+    mod restart_policy {
+        use super::super::{core, CoreState};
+        use core::{ManagedCore, StartError};
+        use std::process::Command;
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::time::{Duration, Instant};
+
+        const READY: &str = r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}"#;
+
+        fn ready_core() -> Command {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!("echo '{READY}'; exec sleep 30"));
+            cmd
+        }
+
+        fn exists(pid: u32) -> bool {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+
+        fn gone_soon(pid: u32) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while exists(pid) {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            true
+        }
+
+        #[test]
+        fn a_restart_during_another_start_never_runs_a_second_core() {
+            // Start A is past readiness (its Core is listening) but not stored yet
+            // when restart B arrives — the window where the old policy let B spawn
+            // a second Core next to A's.
+            let state = Arc::new(CoreState::default());
+            let gate = Arc::new(Barrier::new(2));
+            let a_pid = Arc::new(Mutex::new(0u32));
+            let (s2, g2, p2) = (Arc::clone(&state), Arc::clone(&gate), Arc::clone(&a_pid));
+            let a = std::thread::spawn(move || {
+                s2.start_with(|p| {
+                    let core = ManagedCore::launch(ready_core(), Duration::from_secs(10), p)?;
+                    *p2.lock().unwrap() = core.pid();
+                    g2.wait(); // A is ready…
+                    g2.wait(); // …and stays unstored until B has had its go.
+                    Ok(core)
+                })
+            });
+            gate.wait();
+            let a_pid = *a_pid.lock().unwrap();
+            let mut b_overlapped = false;
+            let b = state.start_with(|p| {
+                let core = ManagedCore::launch(ready_core(), Duration::from_secs(10), p)?;
+                b_overlapped = exists(a_pid);
+                Ok(core)
+            });
+            gate.wait();
+            let a = a.join().unwrap();
+            assert!(!b_overlapped, "restart B ran a Core while start A's Core was still alive");
+            assert!(matches!(b, Err(StartError::Busy)), "{b:?}");
+            assert!(a.is_ok(), "{a:?}");
+            assert!(exists(a_pid), "A's Core is the one kept");
+            state.stop();
+            assert!(gone_soon(a_pid));
+        }
+
+        #[test]
+        fn concurrent_restarts_keep_one_core_and_leak_none() {
+            // 10 restarts fired at once and 10 back to back: at no point two
+            // live Cores, and at the end exactly one — the stored one.
+            let state = Arc::new(CoreState::default());
+            let pids = Arc::new(Mutex::new(Vec::<u32>::new()));
+            let run = |state: &CoreState, pids: &Mutex<Vec<u32>>| {
+                state.start_with(|p| {
+                    let core = ManagedCore::launch(ready_core(), Duration::from_secs(10), p)?;
+                    let mut seen = pids.lock().unwrap();
+                    let live_others = seen.iter().filter(|&&other| exists(other)).count();
+                    assert_eq!(live_others, 0, "another Core was alive next to this one");
+                    seen.push(core.pid());
+                    Ok(core)
+                })
+            };
+            let gate = Arc::new(Barrier::new(10));
+            let burst: Vec<_> = (0..10)
+                .map(|_| {
+                    let (state, pids, gate) = (Arc::clone(&state), Arc::clone(&pids), Arc::clone(&gate));
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        run(&state, &pids)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = burst.into_iter().map(|t| t.join().unwrap()).collect();
+            assert!(results.iter().any(|r| r.is_ok()));
+            assert!(results.iter().all(|r| matches!(r, Ok(_) | Err(StartError::Busy))), "{results:?}");
+            for _ in 0..10 {
+                run(&state, &pids).unwrap();
+            }
+            let stored = state.0.lock().unwrap().as_ref().unwrap().pid();
+            let seen = pids.lock().unwrap().clone();
+            assert!(seen.len() >= 11);
+            for pid in &seen {
+                if *pid != stored {
+                    assert!(gone_soon(*pid), "replaced Core {pid} still running");
+                }
+            }
+            assert!(exists(stored));
+            assert!(state.1.lock().unwrap().is_none(), "no start may stay marked as running");
+            state.stop();
+            assert!(gone_soon(stored));
+        }
+
+        #[test]
+        fn a_failed_restart_frees_the_slot_for_a_retry() {
+            let state = CoreState::default();
+            let mut garbage = Command::new("sh");
+            garbage.arg("-c").arg("echo not-json; exec sleep 30");
+            let failed = state.start_with(|p| ManagedCore::launch(garbage, Duration::from_secs(10), p));
+            assert!(matches!(failed, Err(StartError::Failed(_))), "{failed:?}");
+            assert!(state.start_with(|p| ManagedCore::launch(ready_core(), Duration::from_secs(10), p)).is_ok());
+            state.stop();
+        }
+
+        #[test]
+        fn exit_during_a_restart_cancels_it_and_frees_the_slot() {
+            // stop() cancels the wait; the start itself then frees the slot, so a
+            // later start is not refused forever.
+            let state = Arc::new(CoreState::default());
+            let s2 = Arc::clone(&state);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let restart = std::thread::spawn(move || {
+                s2.start_with(|p| {
+                    let mut silent = Command::new("sh");
+                    silent.arg("-c").arg("exec sleep 30");
+                    let result = ManagedCore::launch(silent, Duration::from_secs(20), p);
+                    let _ = tx.send(());
+                    result
+                })
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            state.stop();
+            rx.recv_timeout(Duration::from_secs(2)).expect("cancel must end the wait");
+            assert!(matches!(restart.join().unwrap(), Err(StartError::Cancelled)));
+            assert!(state.0.lock().unwrap().is_none());
+            assert!(state.1.lock().unwrap().is_none());
+        }
+
+        #[test]
+        fn a_restart_reports_when_the_api_endpoint_moved() {
+            let state = CoreState::default();
+            let at = |port: u16| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(format!(
+                    r#"echo '{{"host":"127.0.0.1","port":{port},"bind_host":"127.0.0.1"}}'; exec sleep 30"#
+                ));
+                cmd
+            };
+            let first = state.start_with(|p| ManagedCore::launch(at(41000), Duration::from_secs(10), p));
+            assert!(!first.unwrap(), "the first start has nothing to compare with");
+            let same = state.start_with(|p| ManagedCore::launch(at(41000), Duration::from_secs(10), p));
+            assert!(!same.unwrap());
+            let moved = state.start_with(|p| ManagedCore::launch(at(41001), Duration::from_secs(10), p));
+            assert!(moved.unwrap());
+            state.stop();
+        }
+
+        #[test]
+        fn a_move_after_a_failed_restart_is_still_reported() {
+            // The failed restart leaves no Core to compare with; the webview
+            // still points at the first endpoint (review S1).
+            let state = CoreState::default();
+            let at = |port: u16| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(format!(
+                    r#"echo '{{"host":"127.0.0.1","port":{port},"bind_host":"127.0.0.1"}}'; exec sleep 30"#
+                ));
+                cmd
+            };
+            assert!(!state.start_with(|p| ManagedCore::launch(at(41000), Duration::from_secs(10), p)).unwrap());
+            let mut garbage = Command::new("sh");
+            garbage.arg("-c").arg("echo not-json; exec sleep 30");
+            assert!(state.start_with(|p| ManagedCore::launch(garbage, Duration::from_secs(10), p)).is_err());
+            assert!(state.0.lock().unwrap().is_none());
+            assert!(state.start_with(|p| ManagedCore::launch(at(41001), Duration::from_secs(10), p)).unwrap());
+            state.stop();
+        }
+
+        #[test]
+        fn a_panicking_start_does_not_leave_restarts_refused() {
+            let state = CoreState::default();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = state.start_with(|_| panic!("launch blew up"));
+            }));
+            assert!(panicked.is_err());
+            assert!(state.1.lock().unwrap().is_none(), "the slot must be freed by the unwind");
+            assert!(state.start_with(|p| ManagedCore::launch(ready_core(), Duration::from_secs(10), p)).is_ok());
+            state.stop();
+        }
+
+        #[test]
+        fn tray_restart_failures_are_shown_and_exit_is_not() {
+            use super::super::tray_restart_notice;
+            assert_eq!(tray_restart_notice(&Ok(false)), None);
+            assert_eq!(tray_restart_notice(&Ok(true)), None);
+            assert_eq!(tray_restart_notice(&Err(StartError::Cancelled)), None);
+            let busy = tray_restart_notice(&Err(StartError::Busy)).unwrap();
+            assert!(busy.contains("재시작하지 않았습니다") && busy.contains("진행 중"), "{busy}");
+            let failed = tray_restart_notice(&Err(StartError::Failed("readiness 형식 오류 (x)".into()))).unwrap();
+            assert!(failed.contains("실패") && failed.contains("readiness 형식 오류 (x)"), "{failed}");
+        }
+
+        #[test]
+        fn tray_restart_runs_off_the_main_thread_and_tells_the_user() {
+            let src = include_str!("lib.rs");
+            assert!(src.contains(concat!("\"restart\" => ", "restart_from_tray(app),")), "tray arm changed");
+            let start = src.find(concat!("fn restart_from_tray", "(")).expect("restart_from_tray");
+            let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+            assert!(body.contains("spawn_blocking"), "tray restart runs on the menu (main) thread again");
+            assert!(body.contains("tray_restart_notice") && body.contains(".show("), "tray failures are not shown");
+            assert!(!body.contains(".blocking_show"), "the notice must not block");
+            assert!(body.contains("TRAY_NOTICE_OPEN.swap"), "repeated clicks must not stack dialogs");
+            assert!(body.contains("location.reload()"), "a tray restart that moved the API must reload the page");
+            let cmd = src.find(concat!("async fn restart_core", "(")).expect("restart_core");
+            let cmd_body = &src[cmd..cmd + src[cmd..].find("\n}\n").unwrap()];
+            assert!(!cmd_body.contains("reload"), "restart_core must not reload the page under its own IPC call");
         }
     }
 }
