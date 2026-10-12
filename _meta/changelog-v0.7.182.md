@@ -1516,6 +1516,7 @@ Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 
     - Host가 없거나 loopback 이름(`localhost`, `127.0.0.0/8`, `[::1]`, 포트 무관)이다.
     - Origin이 없거나 loopback 페이지 또는 데스크톱 webview(`tauri://localhost`, `http(s)://tauri.localhost`)다.
   - 형식이 틀린 값, `null` Origin, 경로나 userinfo가 붙은 Origin, Host나 Origin이 여러 개인 요청은 거부한다.
+  - Origin 없이 `Sec-Fetch-Site: cross-site`·`same-site`인 요청(다른 사이트의 `<img>`·`<script src>`·링크처럼 Origin 없이 실행되는 로드)도 거부한다. 주소창 입력(`none`)과 같은 origin은 통과한다(독립 리뷰).
   - 조건을 못 맞추면 토큰을 요구한다(401, detail에 사유). websocket은 1008로 닫는다.
   - Bearer 토큰 요청과 원격 출처 판정은 바뀌지 않았다. Docker `spa_server`(Host 재작성)와 tailnet·LAN 원격 클라이언트는 그대로다.
   - MCP(`LanTokenAuth`)는 같은 판정을 상속한다. MCP SDK의 DNS rebinding 보호는 원격 Host 때문에 계속 끈다.
@@ -1535,18 +1536,23 @@ Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 
 
   - 수정 후 실제 브라우저 실행은 headless Chrome이 두 번째 실행부터 페이지를 열지 못해(페이지 서버에 요청 없음) **UNKNOWN**이다. 브라우저가 보내는 것과 같은 Host/Origin 헤더로 HTTP 수준에서 검증했다.
 - **기존 동작과 달라진 점**:
+  - 새로 토큰이 필요한 로컬 클라이언트: Android 에뮬레이터의 `http://10.0.2.2:8765`(`mobile/` 기본값, 호스트 loopback으로 NAT됨), 기기 이름(예: Debian의 `127.0.1.1` 이름)이나 `0.0.0.0`으로 이 PC에 접속하는 클라이언트. `127.0.0.1`·`localhost`를 쓰거나 토큰을 설정한다.
   - 다른 origin 페이지의 요청은 #15 로컬 전용 guard(403)보다 먼저 게이트에서 401로 거부된다. 토큰을 가진 요청은 여전히 guard가 403으로 막는다(테스트로 두 단계 모두 확인).
   - 테스트 클라이언트 기본 Host를 `testserver`에서 `127.0.0.1`로 바꿨다(`tests/conftest.py`). 여러 테스트의 `base_url="http://raven"`도 `http://127.0.0.1`로 바꿨다. 판정 기대값은 바뀌지 않았다.
 - **문서**: ADR `adr-2026-10-12-loopback-browser-context`(신규), `adr-2026-10-09-mcp-remote-token`, README(MCP·Core API 접근 정책), `access.py`·`mcp/auth.py`·`mcp/cli.py` 설명.
 - **검증**:
-  - `tests/test_loopback_browser_context.py` 91건 신규:
+  - `tests/test_loopback_browser_context.py` 106건 신규:
     - 이 PC의 Host 8종 × Origin 8종 통과, Host 없는 클라이언트 통과.
     - 낯선 Host 13종, 낯선 Origin 14종 거부, 중복 헤더 거부.
     - 토큰이 있으면 Host·Origin 무관, 원격 출처 판정 불변, 거부 사유 표시, websocket.
     - Core API와 MCP가 모든 조합(launcher·strict)에서 같은 판정, 실제 MCP 앱이 MCP 처리 전에 거부.
-  - 변형 검사: 게이트에서 이 검사를 빼면 신규 테스트 61건이 실패한다.
+    - Origin 없는 cross-site·same-site 로드 거부, 주소창·같은 origin·데스크톱 webview는 통과.
+    - launcher 모드의 vite 형태(XFF 127.0.0.1 + Host 재작성 + 페이지 Origin): 로컬 페이지 통과, 다른 origin·cross-site 거부, LAN 브라우저는 토큰 필요.
+    - 실제 API 앱에서 데스크톱 Origin 통과(CORS 헤더 포함), `tauri://evil` 거부.
+  - 변형 검사: 게이트에서 이 검사를 빼면 신규 테스트 61건, `Sec-Fetch-Site` 규칙만 빼면 8건이 실패한다.
+- **독립 리뷰**: blocker 없음. should-fix 3건(새로 토큰이 필요한 로컬 클라이언트 문서화, launcher 모드 vite 형태 테스트, Origin 없는 cross-site 로드 — `Sec-Fetch-Site` 규칙으로 구현)을 반영했다.
   - 전체 pytest 2723 passed, 2 failed(기존 실패 `closed_stderr_pipe`·`test_no_candidates_is_not_an_error`).
 - **잔여 위험**:
   - loopback 이름으로 서빙되는 다른 로컬 웹 앱의 페이지(같은 PC의 `http://localhost:3000` 등)는 여전히 토큰 없이 호출할 수 있다. loopback 프로세스 신뢰와 같은 부류다.
-  - Origin을 보내지 않는 브라우저 요청은 Host 검사에만 기댄다(rebinding은 Host로 막힘).
+  - `Sec-Fetch-Site`를 보내지 않는 오래된 브라우저에서는 Origin 없는 cross-site GET이 여전히 실행된다(응답은 읽지 못함). rebinding은 Host로 막힌다.
   - 실제 DNS rebinding 브라우저 재현과 수정 후 브라우저 실측은 **UNKNOWN**이다.

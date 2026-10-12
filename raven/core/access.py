@@ -269,7 +269,10 @@ _WEBVIEW_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "ht
 def _loopback_name(host: str) -> bool:
     """``localhost`` or a loopback IP literal (port and IPv6 brackets already removed)."""
     host = host.strip().rstrip(".").lower()
-    return host == "localhost" or (_parse_ip(host) is not None and _parse_ip(host).is_loopback)
+    if host == "localhost":
+        return True
+    addr = _parse_ip(host)
+    return addr is not None and addr.is_loopback
 
 
 def _host_part(authority: str) -> str | None:
@@ -310,15 +313,25 @@ def is_local_browser_context(scope) -> bool:
     (``localhost``, ``127.x.x.x``, ``[::1]``, any port) and an ``Origin`` that is a
     loopback page or the desktop webview. Programs that send neither still pass.
     A Bearer token is checked separately and is not affected.
+
+    A browser leaves Origin out of plain cross-site loads (``<img>``, ``<script src>``,
+    a link or GET form from another site), which still run. It marks them with
+    ``Sec-Fetch-Site: cross-site`` / ``same-site``; without an Origin to judge, those
+    are refused too. A URL typed by the user (``none``) and same-origin loads pass.
     """
     hosts: list[str] = []
     origins: list[str] = []
+    fetch_sites: list[str] = []
     for key, value in scope.get("headers", []):
         if key == b"host":
             hosts.append(value.decode("latin-1"))
         elif key == b"origin":
             origins.append(value.decode("latin-1"))
+        elif key == b"sec-fetch-site":
+            fetch_sites.append(value.decode("latin-1").strip().lower())
     if len(hosts) > 1 or len(origins) > 1:
+        return False
+    if not origins and any(site in ("cross-site", "same-site") for site in fetch_sites):
         return False
     if hosts:
         host = _host_part(hosts[0])

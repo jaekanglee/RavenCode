@@ -25,6 +25,7 @@ tags: [security, access, mcp, api]
 - `raven/core/access.py::is_local_browser_context` — 토큰 없는 loopback 요청이 통과하려면:
   - Host가 없거나 loopback 이름이다: `localhost`(끝 점 허용), `127.0.0.0/8`, `[::1]`, 포트 무관. 형식이 틀리거나 Host가 여러 개면 거부.
   - Origin이 없거나 loopback 페이지(`http(s)://localhost|127.x|[::1][:port]`)이거나 데스크톱 webview(`tauri://localhost`, `http(s)://tauri.localhost`)다. `null`, 경로·userinfo가 붙은 값, Origin 여러 개는 거부.
+  - Origin이 없는데 `Sec-Fetch-Site`가 `cross-site`·`same-site`이면 거부한다. 브라우저는 다른 사이트에서 시작된 단순 로드(`<img>`, `<script src>`, 링크·GET 폼)에 Origin을 붙이지 않지만 요청은 실행되고, 이 헤더로 표시한다. 주소창 직접 입력(`none`)과 같은 origin은 통과한다. 데스크톱 webview는 cross-site지만 Origin을 보내므로 Origin 규칙이 판정한다(독립 리뷰).
 - 조건을 못 맞추면 토큰을 요구한다(401, 사유를 적은 detail). 유효한 Bearer가 있으면 Host·Origin을 보지 않는다 — Docker `spa_server`(Host를 `api:8765`로 바꿈), tailnet·LAN 원격 클라이언트가 그대로 동작한다.
 - websocket도 같다(1008로 닫음).
 - MCP SDK 보호는 계속 끈다. 같은 판정을 게이트가 원격 Bearer와 분리해서 한다.
@@ -39,11 +40,14 @@ tags: [security, access, mcp, api]
 | vite 대시보드(`changeOrigin`, `xfwd`) | `127.0.0.1:8765` / `http://127.0.0.1:5173`·`http://localhost:5173` | 통과 (실측) |
 | 데스크톱 webview | `127.0.0.1:<port>` / `tauri://localhost`·`http(s)://tauri.localhost` | 통과 |
 | Docker `spa_server`, 원격 Bearer 클라이언트 | 임의 / 임의 | Bearer로 통과 |
-| 다른 사이트의 페이지, 낯선 Host | | 토큰 필요 |
+| 다른 사이트의 페이지, 낯선 Host, Origin 없는 cross-site 로드 | | 토큰 필요 |
+| **새로 토큰이 필요한 로컬 클라이언트** | | |
+| Android 에뮬레이터의 `http://10.0.2.2:8765`(호스트 loopback으로 NAT됨, `mobile/` 기본값) | `10.0.2.2:8765` | 토큰 필요 — 앱에 키를 설정한다 |
+| 기기 이름으로 이 PC에 접속하는 로컬 클라이언트(예: Debian `/etc/hosts`의 `127.0.1.1` 이름), `http://0.0.0.0:8765` | 기기 이름 / `0.0.0.0` | 토큰 필요 — `127.0.0.1`·`localhost`를 쓰거나 토큰을 쓴다 |
 
 ## 결과·잔여 위험
 
 - 토큰 없이 이 PC의 API·MCP를 쓰는 브라우저 페이지는 loopback 페이지와 데스크톱 webview뿐이다.
-- 브라우저가 Origin을 보내지 않는 요청(일부 GET 탐색 등)은 Host 검사에만 기댄다. DNS rebinding은 Host에 사이트 이름이 남아 막히고, 다른 origin의 일반 탐색(링크 클릭 등)은 응답을 읽을 수 없다.
+- Origin이 없는 cross-site 로드는 `Sec-Fetch-Site`로 거부한다. 이 헤더를 보내지 않는 오래된 브라우저(Safari 16.4 이전 등)에서는 그런 GET이 여전히 실행된다 — 응답은 읽을 수 없지만, 상태를 바꾸는 GET이 있으면 실행된다. DNS rebinding은 Host에 사이트 이름이 남아 막힌다.
 - loopback 이름으로 서빙되는 다른 로컬 웹 앱(같은 PC의 `http://localhost:3000` 등)의 페이지는 여전히 토큰 없이 호출할 수 있다 — loopback 프로세스 신뢰와 같은 부류의 승인된 잔여 위험이다.
 - 실제 브라우저에서의 DNS rebinding 재현과, 수정 후 브라우저 실측은 UNKNOWN(headless Chrome이 두 번째 실행부터 페이지를 열지 못함). 수정 후 동작은 브라우저가 보내는 것과 같은 Host/Origin 헤더로 HTTP 수준에서 검증했다.

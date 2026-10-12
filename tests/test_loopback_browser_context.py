@@ -210,3 +210,48 @@ def test_the_real_mcp_app_refuses_a_foreign_host_before_any_mcp_handling(vaults_
     assert foreign.status_code == 401 and foreign.json()["error"] == "unauthorized"
     assert cross.status_code == 401
 
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+@pytest.mark.parametrize("site", ["cross-site", "same-site", "Cross-Site"])
+def test_a_cross_site_load_without_origin_needs_a_token(vaults_root, gate_cls, site) -> None:
+    """<img src>, <script src>, a link from another site: no Origin, but marked cross-site."""
+    assert _status(gate_cls, [("host", "127.0.0.1:8765"), ("sec-fetch-site", site)]) == 401
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+@pytest.mark.parametrize("headers", [
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "none")],  # typed in the address bar
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "same-origin")],
+    # the desktop webview fetching the Core is cross-site, but it sends its Origin
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("origin", "tauri://localhost")],
+])
+def test_fetch_metadata_does_not_block_local_use(vaults_root, gate_cls, headers) -> None:
+    assert _status(gate_cls, headers) == 200
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+def test_the_vite_dashboard_shape_in_launcher_mode(vaults_root, monkeypatch, gate_cls) -> None:
+    """vite (changeOrigin + xfwd): Host rewritten to the API, XFF 127.0.0.1, page Origin kept."""
+    monkeypatch.setattr(access, "_socket_peer", True)
+    vite = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "127.0.0.1"), ("x-forwarded-host", "localhost:5173"),
+            ("x-forwarded-proto", "http"), ("x-forwarded-port", "5173")]
+    assert _status(gate_cls, vite + [("origin", "http://localhost:5173")]) == 200
+    assert _status(gate_cls, vite + [("origin", "http://127.0.0.1:5173"), ("sec-fetch-site", "same-origin")]) == 200
+    assert _status(gate_cls, vite + [("origin", "https://evil.example")]) == 401
+    assert _status(gate_cls, vite + [("sec-fetch-site", "cross-site")]) == 401
+    # a LAN browser through vite: XFF names it — a token is needed, as before
+    lan = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "192.168.1.50"), ("origin", "http://192.168.0.52:5173")]
+    assert _status(gate_cls, lan) == 401
+
+
+def test_the_real_api_app_serves_the_desktop_webview_origin(vaults_root) -> None:
+    from fastapi.testclient import TestClient
+
+    from raven.api.server import app
+
+    client = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8765")
+    ok = client.get("/api/vaults", headers={"Origin": "tauri://localhost", "Sec-Fetch-Site": "cross-site"})
+    assert ok.status_code == 200
+    assert ok.headers.get("access-control-allow-origin") == "tauri://localhost"
+    assert client.get("/api/vaults", headers={"Origin": "tauri://evil"}).status_code == 401
