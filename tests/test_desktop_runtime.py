@@ -366,6 +366,15 @@ def test_explicit_non_loopback_host_is_honoured_with_opt_in() -> None:
         process.wait(timeout=5)
 
 
+def _cors_answer(req: Request) -> tuple[int, str | None]:
+    """Status and Access-Control-Allow-Origin, also for a refused (4xx) answer."""
+    try:
+        with urlopen(req, timeout=5) as response:
+            return response.status, response.headers.get("access-control-allow-origin")
+    except HTTPError as error:
+        return error.code, error.headers.get("access-control-allow-origin")
+
+
 def test_no_automatic_wildcard_cors() -> None:
     """The runtime must not flip RAVEN_ALLOW_ALL_CORS on its own.
 
@@ -379,8 +388,9 @@ def test_no_automatic_wildcard_cors() -> None:
         ready = _wait_for_ready(process)
         base = f"http://{ready['host']}:{ready['port']}"
         req = Request(f"{base}/api/vaults", headers={"Origin": "https://evil.example.com"})
-        with urlopen(req, timeout=5) as response:
-            allow = response.headers.get("access-control-allow-origin")
+        status, allow = _cors_answer(req)
+        # Issue #28: a page of another site gets no tokenless loopback access at all.
+        assert status == 401
         assert allow != "*", "wildcard CORS enabled automatically"
         assert allow != "https://evil.example.com", "arbitrary origin allowed"
     finally:
@@ -484,7 +494,7 @@ def test_remote_bind_serves_api_behind_its_own_token_gate() -> None:
 
     async def call(client_ip: str) -> httpx.Response:
         transport = httpx.ASGITransport(app=api_app, client=(client_ip, 44444))
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.get("/api/vaults")
 
     assert asyncio.run(call("192.168.1.50")).status_code == 401
@@ -504,8 +514,7 @@ def test_wildcard_cors_switch_cannot_open_the_api() -> None:
         base = f"http://{ready['host']}:{ready['port']}"
         for origin in ("https://evil.example.com", "http://127.0.0.1:5173"):
             req = Request(f"{base}/api/vaults", headers={"Origin": origin})
-            with urlopen(req, timeout=5) as response:
-                allow = response.headers.get("access-control-allow-origin")
+            _status, allow = _cors_answer(req)
             assert allow != "*", f"wildcard CORS granted for {origin}"
     finally:
         process.terminate()

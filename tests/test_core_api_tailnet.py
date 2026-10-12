@@ -65,7 +65,7 @@ def _call(peer, headers=None):
     transport = httpx.ASGITransport(app=app, client=(peer, 44444))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.get("/api/vaults", headers=headers or {})
 
     return asyncio.run(go())
@@ -131,7 +131,7 @@ def test_mcp_gate_uses_the_same_route_check(monkeypatch, tmp_path):
     transport = httpx.ASGITransport(app=app, client=("100.64.200.3", 1))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.post("/mcp")
 
     assert asyncio.run(go()).status_code == 401

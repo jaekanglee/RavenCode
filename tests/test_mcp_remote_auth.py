@@ -87,7 +87,7 @@ def _call(app, peer, method="POST", body=None, headers=None):
     transport = httpx.ASGITransport(app=app, client=(peer, 44444))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.request(method, "/mcp", headers={**ACCEPT, **(headers or {})},
                                    content=json.dumps(body) if body is not None else None)
 

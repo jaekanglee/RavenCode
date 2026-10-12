@@ -1499,3 +1499,54 @@ launcher 모드(`python -m raven.api`, 데스크톱 API·MCP)의 게이트는 lo
   - `tests/test_mcp_forwarded_parity.py`·`test_core_api_forwarded.py`·`test_spa_server_auth.py` 1100 passed.
 - **독립 리뷰**: blocker·should-fix 없음. nit 2건(spa_server strip 테스트에 새 헤더, README·ADR의 strict 모드 헤더 목록)을 반영했다.
 - **잔여 위험 (변경 없음)**: 이 기기에서 도는 프록시가 **출처 헤더를 하나도 붙이지 않고** API를 LAN에 중계하면 직접 loopback 접속과 구분할 수 없다(승인된 잔여 위험, README). 목록에 없는 비표준 헤더만 쓰는 프록시도 같다.
+
+## 63. 토큰 없는 loopback 통과에 loopback Host·Origin 요구 — 브라우저가 다른 사이트 대신 보내는 요청 차단 (Issue #28)
+
+Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 신뢰는 "이 PC의 프로그램과 이 PC가 서빙하는 대시보드"를 위한 것이다. 그런데 브라우저는 다른 사이트의 페이지를 위해서도 loopback 소켓으로 요청을 보내고, 게이트는 소켓 주소만 봤다.
+
+- **수정 전 확인** (격리 포트, 임시 vault, master `fd1d573`):
+  - HTTP 수준: Core API와 standalone MCP 모두, Host `evil.example`(DNS rebinding 때 서버가 받는 조건)이나 Origin `https://evil.example`인 요청을 토큰 없이 200으로 받았다. 다른 origin의 `text/plain` POST도 핸들러까지 도달했다.
+  - 실제 브라우저: Chrome 155(headless, 임시 프로필)에서 LAN IP origin(`http://192.168.0.52:48880`)의 페이지가 다음을 했다.
+    - `http://127.0.0.1:<port>/api/vaults` 응답 본문을 읽었다. CORS 정규식이 사설망 origin을 허용한다.
+    - `no-cors` `text/plain` POST로 `/api/debug-log`(opt-in 켬)에 기록했다.
+    - 이 실행에서 Chrome의 Local Network Access는 이를 막지 않았다.
+  - 실제 DNS rebinding(제어하는 DNS 필요)은 재현하지 않았다. 서버가 받는 조건만 재현했다.
+- **수정** (`raven/core/access.py::is_local_browser_context`, `TokenGate`):
+  - 토큰 없는 loopback 통과에는 다음이 더 필요하다.
+    - Host가 없거나 loopback 이름(`localhost`, `127.0.0.0/8`, `[::1]`, 포트 무관)이다.
+    - Origin이 없거나 loopback 페이지 또는 데스크톱 webview(`tauri://localhost`, `http(s)://tauri.localhost`)다.
+  - 형식이 틀린 값, `null` Origin, 경로나 userinfo가 붙은 Origin, Host나 Origin이 여러 개인 요청은 거부한다.
+  - 조건을 못 맞추면 토큰을 요구한다(401, detail에 사유). websocket은 1008로 닫는다.
+  - Bearer 토큰 요청과 원격 출처 판정은 바뀌지 않았다. Docker `spa_server`(Host 재작성)와 tailnet·LAN 원격 클라이언트는 그대로다.
+  - MCP(`LanTokenAuth`)는 같은 판정을 상속한다. MCP SDK의 DNS rebinding 보호는 원격 Host 때문에 계속 끈다.
+  - Core API CORS 정규식은 그대로 둔다. 토큰을 가진 원격 대시보드가 쓰고, 토큰 없는 요청은 이제 게이트가 막는다.
+- **수정 후** (같은 조건, 실제 서버):
+
+  | 요청 | 수정 전 | 수정 후 |
+  |---|---|---|
+  | API, Host `evil.example` | 200 | 401 |
+  | API, Origin `https://evil.example` | 200 | 401 |
+  | API, 다른 origin의 `text/plain` POST | 핸들러 도달(422) | 401 |
+  | MCP initialize, Host `evil.example` | 200 | 401 |
+  | API·MCP, Host `127.0.0.1`·`localhost`, Origin 없음 | 200 | 200 |
+  | API, Origin `tauri://localhost` | 200 | 200 |
+  | vite 대시보드(실제 vite, `http://127.0.0.1:…`·`http://localhost:…` 페이지) | 200 | 200 |
+  | vite 경유, 다른 origin | 200 | 401 |
+
+  - 수정 후 실제 브라우저 실행은 headless Chrome이 두 번째 실행부터 페이지를 열지 못해(페이지 서버에 요청 없음) **UNKNOWN**이다. 브라우저가 보내는 것과 같은 Host/Origin 헤더로 HTTP 수준에서 검증했다.
+- **기존 동작과 달라진 점**:
+  - 다른 origin 페이지의 요청은 #15 로컬 전용 guard(403)보다 먼저 게이트에서 401로 거부된다. 토큰을 가진 요청은 여전히 guard가 403으로 막는다(테스트로 두 단계 모두 확인).
+  - 테스트 클라이언트 기본 Host를 `testserver`에서 `127.0.0.1`로 바꿨다(`tests/conftest.py`). 여러 테스트의 `base_url="http://raven"`도 `http://127.0.0.1`로 바꿨다. 판정 기대값은 바뀌지 않았다.
+- **문서**: ADR `adr-2026-10-12-loopback-browser-context`(신규), `adr-2026-10-09-mcp-remote-token`, README(MCP·Core API 접근 정책), `access.py`·`mcp/auth.py`·`mcp/cli.py` 설명.
+- **검증**:
+  - `tests/test_loopback_browser_context.py` 91건 신규:
+    - 이 PC의 Host 8종 × Origin 8종 통과, Host 없는 클라이언트 통과.
+    - 낯선 Host 13종, 낯선 Origin 14종 거부, 중복 헤더 거부.
+    - 토큰이 있으면 Host·Origin 무관, 원격 출처 판정 불변, 거부 사유 표시, websocket.
+    - Core API와 MCP가 모든 조합(launcher·strict)에서 같은 판정, 실제 MCP 앱이 MCP 처리 전에 거부.
+  - 변형 검사: 게이트에서 이 검사를 빼면 신규 테스트 61건이 실패한다.
+  - 전체 pytest 2723 passed, 2 failed(기존 실패 `closed_stderr_pipe`·`test_no_candidates_is_not_an_error`).
+- **잔여 위험**:
+  - loopback 이름으로 서빙되는 다른 로컬 웹 앱의 페이지(같은 PC의 `http://localhost:3000` 등)는 여전히 토큰 없이 호출할 수 있다. loopback 프로세스 신뢰와 같은 부류다.
+  - Origin을 보내지 않는 브라우저 요청은 Host 검사에만 기댄다(rebinding은 Host로 막힘).
+  - 실제 DNS rebinding 브라우저 재현과 수정 후 브라우저 실측은 **UNKNOWN**이다.

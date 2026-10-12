@@ -71,7 +71,7 @@ def _call(method, path, peer, headers=None, **kw):
     transport = httpx.ASGITransport(app=app, client=(peer, 44444))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.request(method, path, headers=headers or {}, **kw)
 
     return asyncio.run(go())
@@ -171,7 +171,7 @@ def test_mcp_gate_uses_the_same_forwarded_rule(vaults_root, strict_mode):
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.post("/mcp", headers={"X-Forwarded-For": "127.0.0.1"})
 
     assert asyncio.run(go()).status_code == 401

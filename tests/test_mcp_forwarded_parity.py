@@ -59,7 +59,7 @@ def _status(gate_cls, peer, headers: list[tuple[str, str]]):
     transport = httpx.ASGITransport(app=gate_cls(_inner()), client=(peer, 40000))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return (await c.post("/x", headers=httpx.Headers(headers))).status_code
 
     return asyncio.run(go())
@@ -221,7 +221,7 @@ def test_real_mcp_app_agrees_on_rejections(vaults_root, monkeypatch):
         transport = httpx.ASGITransport(app=app, client=(peer, 40000))
 
         async def go():
-            async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
                 return await c.post("/mcp", content=body, headers=httpx.Headers(
                     headers + [("Accept", "application/json, text/event-stream"),
                                ("Content-Type", "application/json")]))

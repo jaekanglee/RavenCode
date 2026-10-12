@@ -160,7 +160,14 @@ def test_tailnet_via_the_local_dashboard_proxy_is_refused(root, tmp_path, monkey
 def test_loopback_socket_with_a_foreign_origin_is_refused(root, tmp_path, endpoint, origin) -> None:
     """DNS rebinding / a LAN page through a local proxy: socket is loopback, Origin is not."""
     case = _make(root, tmp_path, endpoint)
+    # Issue #28: without a token the access gate refuses it first (no tokenless loopback
+    # trust for a foreign Origin) ...
     res = _send(TestClient(app, client=LOCAL), case, {"Origin": origin})
+    assert res.status_code == 401 and "Host/Origin" in res.json()["detail"], res.text
+    case.untouched()
+    # ... and with a token this route's own guard still keeps it to this PC (#15).
+    token = mcp_tokens.add_token("t28")
+    res = _send(TestClient(app, client=LOCAL), case, {"Origin": origin, "Authorization": f"Bearer {token}"})
     assert res.status_code == 403 and "이 PC에서만" in res.json()["detail"], res.text
     case.untouched()
 

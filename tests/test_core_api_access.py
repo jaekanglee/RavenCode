@@ -82,7 +82,7 @@ def _call(method: str, path: str, client_ip: str, headers: dict[str, str] | None
     transport = httpx.ASGITransport(app=app, client=(client_ip, 44444))
 
     async def go() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.request(method, path, headers=headers or {}, **kw)
 
     return asyncio.run(go())
