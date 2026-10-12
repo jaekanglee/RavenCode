@@ -1447,3 +1447,25 @@ Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값�
   - `--host tailscale`의 자동 재시작은 webview를 reload한다. 편집기 초안은 localStorage에 남지만 그 밖의 화면 상태는 사라진다. 이 모드에서 tailnet 주소로 옮겨 가면 webview는 loopback 클라이언트가 아니게 되어 토큰이 필요하다(#16부터의 동작).
   - uvicorn 내부 속성(`servers`, `server_state`, `lifespan.state`, `config.http_protocol_class`, `config.backlog`)에 기대 guard를 붙인다. 0.52.1(uvloop 0.22.1 포함)에서 확인했다. 바뀌면 attach가 실패해 `error`로 보고되고 광고하지 않는다(fail-closed).
   - Windows는 **UNKNOWN**. Linux GUI 런타임도 **UNKNOWN**이다(Linux는 Core·단위 테스트만).
+
+## 61. `/api/debug-log` — 기본 꺼짐, 크기 상한, 한 줄 JSON 기록 (Issue #19)
+
+대시보드는 브라우저 오류(`window.onerror`, `unhandledrejection`, fetch 실패)를 `POST /api/debug-log`로 보낸다. 이 endpoint는 docstring에만 "dev only"라고 적혀 있었고, 실제로는 항상 열려 있었다.
+
+- **수정 전 재현** (master `c6b1211`, loopback 클라이언트, 임시 로그 경로):
+  - 환경 변수 없이도 200을 돌려줬고, 응답에 서버 쪽 로그 절대 경로가 담겼다.
+  - `message`에 개행을 넣으면 `[2026-10-12 18:00:00] ERROR forged … msg: forged` 같은 가짜 항목이 실제 항목과 구분되지 않게 기록됐다.
+  - 200 KB 요청 50회로 로그가 10,004,320바이트까지 커졌다. 상한도 회전도 없었다.
+  - 원격 출처는 #24의 TokenGate가 이미 토큰을 요구하므로, 이 문제는 loopback 출처(이 PC의 프로세스·브라우저 페이지)에 해당한다.
+- **수정** (`raven/api/server.py`):
+  - **opt-in**: `RAVEN_DEBUG_LOG=1`(`true`/`yes`/`on`)일 때만 기록한다. 그 밖에는 **404**다. 값은 요청마다 읽는다. 어떤 실행기(`./raven.sh`, 데스크톱, Docker)도 기본으로 켜지 않는다 — `raven.sh`는 운영 인스턴스도 띄우므로 거기서 켜지 않았다.
+  - **기록 형식**: 항목 하나가 JSON 한 줄이다(`ts`, `level`, `source`, `message`, `url`, `vault`, `stack[]`). 개행·제어문자는 JSON escape로, JSON이 escape하지 않는 줄 구분 문자(U+0085, U+2028, U+2029)는 따로 escape해 `str.splitlines()` 기준으로도 항상 한 줄이다. 한글은 그대로 읽힌다.
+  - **크기**: 필드마다 길이를 자른다(`message` 2000자, `url` 500, `vault` 128, `source` 64, `level` 16, `stack` 10줄 × 300자). 파일이 1 MiB를 넘게 되면 `.1`로 한 번 회전한다(이전 `.1`은 덮어씀). 디스크 사용은 약 2 MiB를 넘지 않는다. 회전과 기록은 lock 하나 안에서 해 동시 요청이 항목을 섞거나 상한을 넘지 않는다.
+  - **경로**: `tmp/dashboard.log`는 `./raven.sh`가 vite 출력을 쓰는 파일이다. 다른 프로세스가 열어 둔 파일은 안전하게 회전할 수 없어 이 로그는 `tmp/dashboard-client.log`로 옮겼다.
+  - 응답은 `{"ok": true}`뿐이다(서버 경로를 돌려주지 않음). 쓰기 실패는 기존처럼 200 + `ok: false`다(오류 보고 채널이 5xx를 내지 않는다).
+  - 대시보드의 오류 수집 자체는 그대로다. 꺼진 서버에서는 404가 조용히 무시된다.
+- **문서**: README 환경 변수 표에 `RAVEN_DEBUG_LOG`를 추가했다. `dashboard/src/main.tsx`·`lib/api.ts` 주석의 로그 위치를 바로잡았다.
+- **검증**:
+  - `tests/test_debug_log_endpoint.py` 24건 신규: opt-in이 아니면 404이고 파일을 만들지 않음(7가지 값) / 켜면 기록·경로 미노출(4가지 값) / 개행·CR·VT/FF·FS/GS/RS·NEL·U+2028/2029·NUL/ESC가 모든 필드에서 한 줄로 기록됨(8) / 항목당 한 줄·한글 유지 / 필드 상한 / 회전 후 두 파일 모두 상한 이하·회전이 항목을 자르지 않음 / 8 스레드 동시 기록에서 항목이 섞이지 않음 / 요청마다 게이트 적용. 기존 테스트 2건은 opt-in을 켜고 임시 경로를 쓰도록 바꿨다(이전에는 저장소 `tmp/`에 실제로 썼다).
+  - 변형 검사: 게이트 제거, U+2028 escape 제거, JSON 대신 평문, 회전 제거, lock 제거, 필드 상한 제거 — 각각 신규 테스트가 실패한다.
+- **잔여 위험**: 켜 둔 동안에는 loopback 출처 누구나 항목을 쓸 수 있다(최대 약 2 MiB, 위조 불가). 진단할 때만 켠다. 브라우저 페이지를 통한 loopback 신뢰 문제는 #28에서 다룬다.

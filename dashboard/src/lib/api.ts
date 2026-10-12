@@ -273,7 +273,7 @@ export async function fetchSystemInfo(): Promise<SystemInfo | null> {
 }
 
 // ─── debug logger (Raven-Debug v0.6.10+) ─────────────────────
-// fetch throw / React error 등을 tmp/dashboard.log에 자동 기록.
+// fetch throw / React error 등을 localStorage(raven:debug:log)에 기록.
 // 브라우저 console에서 못 봐도 사용자가 cat으로 직접 확인 가능.
 let _logInited = false;
 function _ensureLogInited() {

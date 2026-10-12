@@ -16,6 +16,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import threading
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -2979,8 +2980,13 @@ def post_log_rotate(name: str, year: Optional[int] = None, force: bool = False):
 
 # ─── /api/debug-log (v0.6.10+, 개발 단계 throw/error catch) ───────
 # Dashboard 브라우저에서 fetch throw / window.onerror / unhandledrejection
-# 등을 POST하면 서버가 tmp/dashboard.log에 append. mobile DevTools 못 볼 때
-# 사용자가 `cat tmp/dashboard.log`로 직접 진단 가능.
+# 등을 POST하면 서버가 tmp/dashboard-client.log에 append. mobile DevTools 못 볼 때
+# 사용자가 `cat tmp/dashboard-client.log`로 직접 진단 가능.
+#
+# Issue #19: tmp/dashboard.log는 `./raven.sh`가 vite 출력을 쓰는 파일이라(다른 프로세스가
+# 열어 둔 파일을 회전할 수 없으므로) 이 로그는 별도 파일을 쓴다. 진단용 endpoint라 기본은 꺼져 있다(`RAVEN_DEBUG_LOG=1`일 때만, 아니면 404).
+# 한 항목은 JSON 한 줄이다 — 입력의 개행·제어문자가 escape되어 로그 줄을 위조할 수 없다.
+# 파일이 DEBUG_LOG_MAX_BYTES를 넘으면 `.1`로 한 번 회전한다(최대 약 2배 크기).
 class DebugLogEntry(BaseModel):
     level: str = Field("info", description="info | warn | error")
     source: str = Field("", description="dashboard | unhandledrejection | fetch | component")
@@ -2990,26 +2996,49 @@ class DebugLogEntry(BaseModel):
     vault: str = Field("", description="active vault (선택)")
 
 
-_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "tmp" / "dashboard.log"
+_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "tmp" / "dashboard-client.log"
+DEBUG_LOG_MAX_BYTES = 1024 * 1024
+_DEBUG_FIELD_MAX = {"level": 16, "source": 64, "message": 2000, "url": 500, "vault": 128}
+_DEBUG_STACK_LINES, _DEBUG_STACK_LINE_MAX = 10, 300
+_debug_log_lock = threading.Lock()
+# json.dumps escapes U+0000–U+001F; these also end a line for str.splitlines and some viewers.
+_LINE_BREAKS_JSON_KEEPS = str.maketrans({"\x85": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+
+
+def debug_log_enabled() -> bool:
+    return os.environ.get("RAVEN_DEBUG_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _debug_log_record(entry: DebugLogEntry) -> str:
+    """One JSON line for ``entry``: fields capped, newlines and control characters escaped."""
+    record = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    for name, limit in _DEBUG_FIELD_MAX.items():
+        record[name] = getattr(entry, name)[:limit]
+    if entry.stack:
+        record["stack"] = [line[:_DEBUG_STACK_LINE_MAX] for line in entry.stack.splitlines()[:_DEBUG_STACK_LINES]]
+    return json.dumps(record, ensure_ascii=False).translate(_LINE_BREAKS_JSON_KEEPS) + "\n"
 
 
 @app.post("/api/debug-log")
 def post_debug_log(entry: DebugLogEntry):
-    """Dashboard throw / error를 tmp/dashboard.log에 append. dev only."""
+    """Dashboard throw / error를 tmp/dashboard-client.log에 JSON 한 줄로 append (opt-in, Issue #19)."""
+    if not debug_log_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    line = _debug_log_record(entry)
     try:
-        _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {entry.level.upper():5s} {entry.source:20s} vault={entry.vault or '-':12s} url={entry.url or '-'}\n"
-        line += f"  msg: {entry.message}\n"
-        if entry.stack:
-            for sl in entry.stack.splitlines()[:10]:
-                line += f"  at:  {sl}\n"
-        line += "\n"
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line)
+        with _debug_log_lock:
+            _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                size = _DEBUG_LOG_PATH.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            if size + len(line.encode("utf-8")) > DEBUG_LOG_MAX_BYTES:
+                _DEBUG_LOG_PATH.replace(_DEBUG_LOG_PATH.with_name(_DEBUG_LOG_PATH.name + ".1"))
+            with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(line)
     except OSError as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "path": str(_DEBUG_LOG_PATH)}
+    return {"ok": True}
 
 
 # ────────────────────────── garden endpoint (v0.7.27) ──────────────────────────
