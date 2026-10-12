@@ -16,14 +16,18 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import threading
+import unicodedata
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Header, Response, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from raven.core import registry, resolve_active_vault, link_module, recommend_module
 from raven.core.registry import VAULTS_ROOT
@@ -3001,8 +3005,19 @@ DEBUG_LOG_MAX_BYTES = 1024 * 1024
 _DEBUG_FIELD_MAX = {"level": 16, "source": 64, "message": 2000, "url": 500, "vault": 128}
 _DEBUG_STACK_LINES, _DEBUG_STACK_LINE_MAX = 10, 300
 _debug_log_lock = threading.Lock()
-# json.dumps escapes U+0000–U+001F; these also end a line for str.splitlines and some viewers.
-_LINE_BREAKS_JSON_KEEPS = str.maketrans({"\x85": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+# json.dumps escapes U+0000–U+001F only. Everything else that is not a visible character is
+# escaped too: C1 controls (U+0085 ends a line for str.splitlines, U+009B is CSI on some
+# terminals), format characters such as bidi overrides, line/paragraph separators, and lone
+# surrogates (which UTF-8 cannot even encode — the write used to fail with a 500).
+_INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
+_LINE_BOUNDARY = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _escape_invisible(text: str) -> str:
+    return "".join(
+        f"\\u{ord(ch):04x}" if ord(ch) > 0x7E and unicodedata.category(ch) in _INVISIBLE_CATEGORIES else ch
+        for ch in text
+    )
 
 
 def debug_log_enabled() -> bool:
@@ -3015,16 +3030,34 @@ def _debug_log_record(entry: DebugLogEntry) -> str:
     for name, limit in _DEBUG_FIELD_MAX.items():
         record[name] = getattr(entry, name)[:limit]
     if entry.stack:
-        record["stack"] = [line[:_DEBUG_STACK_LINE_MAX] for line in entry.stack.splitlines()[:_DEBUG_STACK_LINES]]
-    return json.dumps(record, ensure_ascii=False).translate(_LINE_BREAKS_JSON_KEEPS) + "\n"
+        # Split only as far as needed (the same boundaries as str.splitlines).
+        lines = _LINE_BOUNDARY.split(entry.stack, maxsplit=_DEBUG_STACK_LINES)[:_DEBUG_STACK_LINES]
+        record["stack"] = [line[:_DEBUG_STACK_LINE_MAX] for line in lines if line]
+    return _escape_invisible(json.dumps(record, ensure_ascii=False)) + "\n"
 
 
-@app.post("/api/debug-log")
-def post_debug_log(entry: DebugLogEntry):
-    """Dashboard throw / error를 tmp/dashboard-client.log에 JSON 한 줄로 append (opt-in, Issue #19)."""
+@app.post("/api/debug-log", openapi_extra={"requestBody": {"content": {"application/json": {"schema": DebugLogEntry.model_json_schema()}}}})
+async def post_debug_log(request: Request):
+    """Dashboard throw / error를 tmp/dashboard-client.log에 JSON 한 줄로 append (opt-in, Issue #19).
+
+    The body is read only after the switch: a closed endpoint answers 404 to any body,
+    malformed or not, instead of a 422 that would tell it exists.
+    """
     if not debug_log_enabled():
         raise HTTPException(status_code=404, detail="Not Found")
-    line = _debug_log_record(entry)
+    try:
+        # json.loads, not the strict JSON parser: a browser that cut a message mid-emoji
+        # sends a lone surrogate (valid JSON), and that report should still be written.
+        entry = DebugLogEntry.model_validate(json.loads(await request.body()))
+    except ValueError as exc:  # JSONDecodeError, ValidationError, undecodable bytes
+        errors = exc.errors(include_url=False) if isinstance(exc, ValidationError) else [
+            {"type": "json_invalid", "loc": ["body"], "msg": "JSON decode error", "input": None}
+        ]
+        raise RequestValidationError(errors) from None
+    return await run_in_threadpool(_append_debug_log, _debug_log_record(entry))
+
+
+def _append_debug_log(line: str) -> dict:
     try:
         with _debug_log_lock:
             _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -52,6 +52,9 @@ FORGERIES = [
     "a\x85b",
     "a b c",
     "a\x00b\x1bc",
+    "a\x9b31mred\x9b0m",  # C1 CSI
+    "a\u202eevil\u202c",  # bidi override
+    "a\ud800b",  # lone surrogate: UTF-8 cannot encode it (was a 500)
 ]
 
 
@@ -59,7 +62,8 @@ FORGERIES = [
 def test_newlines_and_control_characters_cannot_forge_lines(client, log_path, monkeypatch, message) -> None:
     monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
     payload = {"message": message, "source": message, "level": message, "url": message, "vault": message, "stack": message}
-    assert client.post("/api/debug-log", json=payload).status_code == 200
+    body = json.dumps(payload)  # ASCII-escaped, as a browser's JSON.stringify sends lone surrogates
+    assert client.post("/api/debug-log", content=body, headers={"content-type": "application/json"}).status_code == 200
     text = log_path.read_text(encoding="utf-8")
     assert text.endswith("\n")
     lines = text.splitlines()  # splits on every line boundary Python knows, U+2028 included
@@ -135,3 +139,48 @@ def test_endpoint_is_gated_on_every_request(client, log_path, monkeypatch) -> No
     monkeypatch.setenv("RAVEN_DEBUG_LOG", "0")
     assert client.post("/api/debug-log", json={"message": "b"}).status_code == 404
     assert len(log_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+INVISIBLE = ["\x7f", "\x85", "\x9b", "\u200e", "\u202e", "\u2066", "\u2028", "\u2029", "\ufeff", "\ud800", "\udfff"]
+
+
+@pytest.mark.parametrize("ch", INVISIBLE)
+def test_invisible_characters_are_written_escaped(client, log_path, monkeypatch, ch) -> None:
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    resp = client.post("/api/debug-log", content=json.dumps({"message": f"x{ch}y"}), headers={"content-type": "application/json"})
+    assert resp.status_code == 200 and resp.json() == {"ok": True}
+    raw = log_path.read_bytes()
+    assert ch.encode("utf-8", "surrogatepass") not in raw
+    assert json.loads(raw.decode("utf-8"))["message"] == f"x{ch}y"  # escaped, not lost
+
+
+def test_visible_text_is_left_as_is(client, log_path, monkeypatch) -> None:
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    text = "한글 テスト émoji 😀 tab\tend"
+    client.post("/api/debug-log", json={"message": text})
+    raw = log_path.read_text(encoding="utf-8")
+    assert "한글 テスト émoji 😀" in raw
+    assert json.loads(raw)["message"] == text
+
+
+@pytest.mark.parametrize("body", [b"not json", b'{"message": 123}', b"{}", b'{"message": "ok"}'])
+def test_a_closed_endpoint_answers_404_whatever_the_body(client, log_path, monkeypatch, body) -> None:
+    monkeypatch.delenv("RAVEN_DEBUG_LOG", raising=False)
+    resp = client.post("/api/debug-log", content=body, headers={"content-type": "application/json"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("body", [b"not json", b'{"message": 123}', b"{}"])
+def test_an_open_endpoint_still_validates_the_body(client, log_path, monkeypatch, body) -> None:
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    resp = client.post("/api/debug-log", content=body, headers={"content-type": "application/json"})
+    assert resp.status_code == 422
+    assert not log_path.exists()
+
+
+def test_sendbeacon_style_blob_body_is_accepted(client, log_path, monkeypatch) -> None:
+    """main.tsx posts a Blob typed application/json via sendBeacon."""
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    resp = client.post("/api/debug-log", content=json.dumps({"level": "error", "message": "m"}).encode(),
+                       headers={"content-type": "application/json"})
+    assert resp.status_code == 200
