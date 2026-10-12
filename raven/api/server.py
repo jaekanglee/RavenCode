@@ -30,6 +30,7 @@ from raven.core import db_module, lint_module, export_module
 from raven.core import slug_module, frontmatter_module, archive_module
 from raven.core import log_module
 from raven.core import contracts
+from raven.core import network_status
 from raven.core import policy as policy_module
 from raven.core.vault import Vault
 from raven.core import backup as backup_module
@@ -309,6 +310,9 @@ def system_info():
         "bind_host": bound_host(),
         "allow_all_cors": _allow_all_cors,
         "port": port,
+        # Issue #58: the Desktop Core's actual sockets — tailnet address held or
+        # not, MCP advertised address, restart requested. null on other launchers.
+        "network": network_status.snapshot(),
     }
 
 

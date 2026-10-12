@@ -5,6 +5,7 @@ import { UpdatePanel } from "../components/UpdatePanel";
 import { BackupPanel } from "../components/BackupPanel";
 import { useAppUpdater } from "../lib/useAppUpdater";
 import { describeBindExposure } from "../lib/bind-exposure";
+import { describeTailnetAccess } from "../lib/network-status";
 import { coreEndpointMoved } from "../lib/core-endpoint";
 import { getApiBase } from "../lib/api-base";
 import {
@@ -49,11 +50,18 @@ export function VaultManage() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const bindExposure = describeBindExposure(sysInfo?.bind_host);
+  // Issue #58: tailnet endpoints come from the Core's actual sockets, not the
+  // detected IP alone — and they change while the app runs, so keep polling.
+  const access = describeTailnetAccess(sysInfo);
 
   useEffect(() => {
-    fetchSystemInfo().then((info) => {
-      if (info) setSysInfo(info);
-    });
+    const load = () =>
+      fetchSystemInfo().then((info) => {
+        if (info) setSysInfo(info);
+      });
+    void load();
+    const id = setInterval(() => void load(), 10000);
+    return () => clearInterval(id);
   }, []);
 
   function handleCopy(text: string, key: string) {
@@ -476,7 +484,7 @@ export function VaultManage() {
         </h2>
 
         {/* Tailscale IP 기반 MCP / API 정보 (자동 감지 시 최상단 전면 노출) */}
-        {sysInfo?.tailscale_ip && (
+        {sysInfo && access.tailscaleIp && (
           <div
             style={{
               background: "var(--color-surface-soft)",
@@ -487,7 +495,7 @@ export function VaultManage() {
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-primary)", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-              <span>🔒</span> 내 Tailscale 접속 정보 (감지된 IP: {sysInfo.tailscale_ip})
+              <span>🔒</span> 내 Tailscale 접속 정보 (감지된 IP: {access.tailscaleIp})
             </div>
 
             {/* 단독 IP & 포트 요약 바 */}
@@ -506,10 +514,10 @@ export function VaultManage() {
             >
               <div style={{ fontSize: 12 }}>
                 <span style={{ color: "var(--color-muted)", marginRight: 4 }}>내 Tailscale IP:</span>
-                <strong style={{ fontFamily: "monospace", fontSize: 13, color: "var(--color-primary)" }}>{sysInfo.tailscale_ip}</strong>
+                <strong style={{ fontFamily: "monospace", fontSize: 13, color: "var(--color-primary)" }}>{access.tailscaleIp}</strong>
                 <button
                   type="button"
-                  onClick={() => handleCopy(sysInfo.tailscale_ip!, "ts_ip_only")}
+                  onClick={() => handleCopy(access.tailscaleIp!, "ts_ip_only")}
                   style={{
                     background: "none",
                     border: "none",
@@ -553,11 +561,12 @@ export function VaultManage() {
               <div style={{ fontSize: 12 }}>
                 <span style={{ color: "var(--color-muted)", marginRight: 4 }}>원격 등록 주소 (IP:Port):</span>
                 <strong style={{ fontFamily: "monospace", fontSize: 13, color: "var(--color-ink)" }}>
-                  {sysInfo.tailscale_ip}:{sysInfo.port || 8765}
+                  {access.tailscaleIp}:{sysInfo.port || 8765}
                 </strong>
                 <button
                   type="button"
-                  onClick={() => handleCopy(`${sysInfo.tailscale_ip}:${sysInfo.port || 8765}`, "ts_host_only")}
+                  disabled={!access.api.url && access.known}
+                  onClick={() => handleCopy(`${access.tailscaleIp}:${sysInfo.port || 8765}`, "ts_host_only")}
                   style={{
                     background: "none",
                     border: "none",
@@ -596,14 +605,15 @@ export function VaultManage() {
                   <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", textTransform: "uppercase", marginBottom: 4 }}>
                     Tailscale REST API 엔드포인트
                   </div>
-                  <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: "var(--color-primary)" }}>
-                    {sysInfo.tailscale_api}
+                  <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: access.api.url ? "var(--color-primary)" : "var(--color-danger-text)" }}>
+                    {access.api.url ?? access.api.reason}
                   </div>
                 </div>
                 <Button
                   variant="pillPrimary"
                   size="sm"
-                  onClick={() => handleCopy(sysInfo.tailscale_api!, "ts_api")}
+                  disabled={!access.api.url}
+                  onClick={() => handleCopy(access.api.url!, "ts_api")}
                   style={{ fontSize: 11, alignSelf: "flex-start" }}
                 >
                   {copiedKey === "ts_api" ? "✅ 복사됨!" : "📋 Tailscale API URL 복사"}
@@ -626,14 +636,15 @@ export function VaultManage() {
                   <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-primary)", textTransform: "uppercase", marginBottom: 4 }}>
                     Tailscale MCP (LLM 에이전트) 엔드포인트
                   </div>
-                  <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: "var(--color-primary)" }}>
-                    {sysInfo.tailscale_mcp}
+                  <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: access.mcp.url ? "var(--color-primary)" : "var(--color-danger-text)" }}>
+                    {access.mcp.url ?? access.mcp.reason}
                   </div>
                 </div>
                 <Button
                   variant="pillPrimary"
                   size="sm"
-                  onClick={() => handleCopy(sysInfo.tailscale_mcp!, "ts_mcp")}
+                  disabled={!access.mcp.url}
+                  onClick={() => handleCopy(access.mcp.url!, "ts_mcp")}
                   style={{ fontSize: 11, alignSelf: "flex-start" }}
                 >
                   {copiedKey === "ts_mcp" ? "✅ 복사됨!" : "📋 Tailscale MCP URL 복사"}
@@ -673,16 +684,16 @@ export function VaultManage() {
           >
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", textTransform: "uppercase", marginBottom: 4 }}>
-                내 PC REST API 엔드포인트 {sysInfo?.tailscale_ip ? "(🔒 Tailscale 감지)" : "(127.0.0.1)"}
+                내 PC REST API 엔드포인트 {access.api.url ? "(🔒 Tailscale 감지)" : "(127.0.0.1)"}
               </div>
-              <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: sysInfo?.tailscale_ip ? "var(--color-primary)" : "var(--color-ink)" }}>
-                {sysInfo?.tailscale_api || "http://127.0.0.1:8765"}
+              <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: access.api.url ? "var(--color-primary)" : "var(--color-ink)" }}>
+                {access.api.url || sysInfo?.local_api || "http://127.0.0.1:8765"}
               </div>
             </div>
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => handleCopy(sysInfo?.tailscale_api || "http://127.0.0.1:8765", "local_api")}
+              onClick={() => handleCopy(access.api.url || sysInfo?.local_api || "http://127.0.0.1:8765", "local_api")}
               style={{ fontSize: 11, alignSelf: "flex-start" }}
             >
               {copiedKey === "local_api" ? "✅ 복사됨!" : "📋 API URL 복사"}
@@ -703,16 +714,16 @@ export function VaultManage() {
           >
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-primary)", textTransform: "uppercase", marginBottom: 4 }}>
-                내 PC MCP (LLM 에이전트) 엔드포인트 {sysInfo?.tailscale_ip ? "(🔒 Tailscale 감지)" : "(127.0.0.1)"}
+                내 PC MCP (LLM 에이전트) 엔드포인트 {access.mcp.url ? "(🔒 Tailscale 감지)" : "(127.0.0.1)"}
               </div>
               <div style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 600, wordBreak: "break-all", marginBottom: 12, color: "var(--color-primary)" }}>
-                {sysInfo?.tailscale_mcp || "http://127.0.0.1:8765/mcp"}
+                {access.mcp.url || access.localMcp}
               </div>
             </div>
             <Button
               variant="pillPrimary"
               size="sm"
-              onClick={() => handleCopy(sysInfo?.tailscale_mcp || "http://127.0.0.1:8765/mcp", "local_mcp")}
+              onClick={() => handleCopy(access.mcp.url || access.localMcp, "local_mcp")}
               style={{ fontSize: 11, alignSelf: "flex-start" }}
             >
               {copiedKey === "local_mcp" ? "✅ 복사됨!" : "📋 MCP URL 복사"}
@@ -751,6 +762,20 @@ export function VaultManage() {
                 <span style={{ color: "var(--color-muted)" }}>표준 API 포트:</span>{" "}
                 <strong style={{ fontFamily: "monospace" }}>{sysInfo?.port || 8765}</strong>
               </div>
+              {access.known && (
+                <div>
+                  <span style={{ color: "var(--color-muted)" }}>네트워크 상태:</span>{" "}
+                  {access.problems.length === 0 ? (
+                    <span style={{ color: "var(--color-success-text)", fontWeight: 600 }}>정상 (실제 소켓 기준)</span>
+                  ) : (
+                    <ul style={{ margin: "4px 0 0", paddingLeft: 16, color: "var(--color-danger-text)" }}>
+                      {access.problems.map((problem) => (
+                        <li key={problem}>{problem}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

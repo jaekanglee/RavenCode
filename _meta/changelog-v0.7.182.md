@@ -1370,3 +1370,80 @@ readiness는 실제 bind와 무관하게 항상 `{"host": "127.0.0.1"}`을 보�
   - Windows, Linux GUI 런타임은 **UNKNOWN**(Linux는 단위 테스트만).
   - 트레이 재시작으로 포트가 바뀌어 reload될 때 그 순간 진행 중인 IPC 호출은 다시 보내질 수 있다(읽기는 무해). 편집 중인 미저장 내용은 reload로 사라진다 — 포트가 실제로 바뀐 경우에만 발생한다.
   - 지연된 기동(최대 60초) 동안 재시작은 거절된다. 멈춘 기동을 즉시 끊고 다시 시작하는 수단은 앱 종료뿐이다.
+
+## 60. 실행 중 Tailscale 주소가 바뀌어도 MCP·API 보호와 광고 주소를 실제 소켓에 맞춘다 (Issue #58)
+
+Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값으로 `--host tailscale` bind, readiness endpoint, MCP 광고 주소, #54 MCP guard를 고정했다. 실행 중 tailnet이 올라오거나 IP가 바뀌면 다음 문제가 생겼다.
+
+- wildcard(`0.0.0.0`) 모드: 새 `IP:P`는 wildcard 소켓이 받지만 아무도 잡고 있지 않다. macOS에서는 다른 프로세스가 그 주소에 bind해 에이전트 요청을 Bearer 토큰째 가져갈 수 있었다(#54 경로가 새 주소에서 다시 열림). API 포트도 같다.
+- 광고된 MCP 주소는 옛 IP나 loopback으로 남았다.
+- `--host tailscale` 모드: API·MCP 소켓이 사라진 주소에 묶여 있고 webview endpoint도 그 주소에 남았다.
+
+- **수정 전 재현** (macOS, 격리 포트 48765/48766, Tailscale 조회 결과만 control 파일로 시뮬레이션, 새 주소 = 이 PC의 LAN IP):
+  - 기동 시 tailnet 없음 → 나중에 주소 A가 생김: master(`a52d27a`)는 readiness `mcp_host`가 `127.0.0.1`로 남았다. 다른 프로세스가 `A:48766`(MCP)·`A:48765`(API)에 `SO_REUSEADDR`·`SO_REUSEPORT` 어느 쪽으로든 bind했고, 에이전트가 보낸 Bearer 토큰을 그 프로세스가 받았다(4/4 가로챔).
+  - 시작 시 주소 A → 사라짐 → 같은 A로 복귀, 조회 실패·지연, Core 재시작 중 변경은 master에서 아무것도 갱신되지 않았다(이벤트 없음, 광고 주소 고정).
+- **설계 비교**:
+  - A. 주소가 바뀔 때마다 Core 전체 재시작: readiness·bind 초기화는 재사용하지만, wildcard 모드에서도 진행 중 요청이 끊기고 webview가 reload된다. wildcard 소켓은 새 주소도 이미 받으므로 재시작할 이유가 없다. 재시작 사이에는 guard도 없다.
+  - B. guard·광고 주소만 실행 중 갱신(**채택**, wildcard 모드): 새 주소를 먼저 잡고, 응답을 확인한 뒤 광고한다. Core 재시작, 요청 중단, reload가 없다.
+  - C. `--host tailscale` 비권장 + 수동 재시작: 단순하지만 특정 주소 bind 사용자의 복구가 자동화되지 않는다.
+  - 결론: B에 `--host tailscale`용 재시작 정책을 결합했다. 특정 주소 소켓은 주소를 옮길 수 없으므로 그 모드만 #44 경로로 재시작한다.
+- **수정 — Core** (`raven/desktop/netwatch.py` 신규, `runtime.py`):
+  - **감지**: readiness 이후 감시 스레드가 1초마다 Tailscale 주소를 확인한다. macOS는 routing socket의 주소 변경 메시지로 더 빨리 깨어난다(0.2초 정착 대기). 조회는 DNS 없이, `100.100.100.100`으로 가는 경로의 출발 주소를 본다. `100.64.0.0/10` 안이고 이 PC에 bind할 수 있을 때만 주소로 인정한다(userspace 모드처럼 경로만 있는 경우는 "없음"). 기동 시 조회도 같은 함수를 쓴다.
+  - **실패와 미할당 구분**: 조회는 2초 timeout이 있는 별도 스레드에서 돈다. 이전 조회가 아직 걸려 있으면 새로 시작하지 않는다. 오류·timeout·비정상 값(빈 문자열, `0.0.0.0`, loopback, IPv6 등)은 "error"이고 **아무것도 바꾸지 않는다**. "none"만 광고를 loopback으로 되돌린다.
+  - **guard 수명주기 (wildcard API·MCP)**:
+    - 새 주소를 처음 본 tick에 그 주소의 guard 소켓을 bind+listen한다. 실행 중 uvicorn 서버가 그 소켓도 받게 한다(`attach_socket`: uvicorn `startup`과 같은 protocol factory를 서버 자신의 event loop에서 붙인다. uvicorn 종료 시 함께 닫힌다).
+    - #22 정체성 probe로 이 Core가 그 주소에서 응답하는지 확인한 뒤에만 `protected`가 된다. MCP는 그다음 tick(2회 연속 관측)에 광고한다. 광고는 보호 확인 뒤에만 일어난다.
+    - 다른 프로세스가 이미 그 주소를 잡고 있으면(`EADDRINUSE`): `blocked`. 광고하지 않고, loopback 광고를 유지하고, `alert` 이벤트·stderr·`/api/system/info`로 알린다. 매 tick bind를 다시 시도하고 그 프로세스가 놓으면 그때 잡는다.
+    - 주소가 아직 할당되지 않았으면 `pending`, 응답 확인 실패·attach 실패는 `error`(재시도). 어느 쪽도 광고하지 않는다. 광고 중인 주소가 `protected`가 아니게 되면 debounce 없이 즉시 loopback으로 되돌린다.
+    - **이전 guard는 Core 종료 때까지 유지**한다. 주소가 사라져도 닫지 않으므로 같은 주소가 돌아오는 순간부터 보호된다(돌아오면 응답을 다시 확인). 이미 받는 wildcard 소켓보다 노출 범위가 넓어지지 않는다.
+    - Linux는 wildcard 옆 특정 주소 bind를 커널이 막으므로 guard 없이(`None`) 응답 확인만 한다(#49와 같은 규칙).
+  - **`--host tailscale`**: bind한 주소와 현재 주소가 5초 넘게 다르면 shell에 `rebind`를 요청한다(요청이 해결되지 않으면 30초마다 다시). tailnet 없이 loopback으로 낮춰 기동한 경우 tailnet이 생기면 같은 방식으로 그 주소로 옮겨 간다. 5초 미만 흔들림은 무시한다.
+  - **이벤트 채널**: readiness 이후 stdout에는 이 이벤트(`mcp_endpoint`, `alert`, `rebind`)만 한 줄씩 나간다. fd 1을 stderr로 옮기므로 이후의 `print`나 자식 프로세스 출력이 이벤트로 읽힐 수 없다. readiness 형식은 그대로다.
+  - **종료**: 감시 스레드를 서버보다 먼저 멈추고 기다린다(최대 3초). 종료 중인 서버에는 guard를 붙이지 않고, 붙은 뒤 종료가 시작됐으면 바로 닫는다. attach가 timeout된 뒤 늦게 성공하면 그 결과를 다음 tick에 쓰고, 같은 소켓을 두 번 붙이지 않는다(독립 리뷰 N1).
+- **수정 — shell** (`desktop/src-tauri/src/core.rs`, `lib.rs`):
+  - readiness 뒤 stdout 줄 중 알려진 이벤트만 파싱한다(나머지는 기존처럼 stderr로 중계). 이벤트에는 보낸 Core의 id가 붙는다. id는 셸 안에서 재사용되지 않는다.
+  - 이미 교체된 Core의 이벤트는 버린다. 아직 저장되지 않은 Core(readiness 직후 첫 확인)의 이벤트는 5초까지 기다렸다가 전달한다(독립 리뷰 S1: 이것이 없으면 기동 직후 API guard 경고가 사라졌다).
+  - `mcp_endpoint`: 관리 화면이 5초마다 읽는 `core_status`·`mcp_endpoint`가 새 주소를 돌려준다.
+  - `alert`: non-blocking 경고 대화상자(한 번에 하나). 이 주소로 오는 요청이 다른 프로세스로 갈 수 있다고 알린다.
+  - `rebind`: 전용 스레드에서 #44 경로(`do_restart_core`, 한 번에 하나, 이전 Core 먼저 정지)로 재시작한다. endpoint가 바뀌었으면 webview를 reload한다. 실패는 대화상자로 알리고, `Busy`·취소는 조용히 넘긴다(Core가 다시 요청함).
+  - **재시작 루프 방지**: 네트워크 재시작은 첫 번째는 즉시, 다음은 20초 뒤부터 가능하다. 그 뒤 5분 안에 다시 일어날 때마다 간격이 두 배가 된다(최대 10분). 현재 간격보다 5분 넘게 조용하면 20초로 돌아간다. 간격 안에 온 요청은 버리지 않고 기다렸다가, 그 Core가 아직 실행 중이면 실행한다(독립 리뷰 S2).
+- **상태 보고** (`raven/core/network_status.py`, `raven/api/server.py`, `dashboard`):
+  - `GET /api/system/info`에 `network`를 추가했다(추가 필드, 기존 필드는 그대로). 현재 Tailscale 조회 결과(state·ip·detail), API의 실제 bind·접속 주소·tailnet 주소 상태(`protected`/`blocked`/`pending`/`error`/`not_listening`)·재시작 요청 여부, MCP의 bind·실제 광고 주소·tailnet 상태, 그리고 지금 문제인 항목(`problems`)이 들어간다. Desktop Core가 아닌 실행에서는 `null`이다.
+  - 관리 화면은 Core가 잡고 있는(`protected`) 주소만 Tailscale API·MCP URL로 보여 주고, 아니면 이유를 표시한다(예: API가 127.0.0.1에만 bind, 다른 프로세스가 점유). MCP URL은 API 포트가 아니라 실제 MCP 포트를 쓴다(기존 표시는 API 포트 + `/mcp`였다). `네트워크 상태` 줄에 `problems`를 보여 주고, 10초마다 다시 읽는다.
+- **API·MCP 인증 정책은 바뀌지 않았다**: guard 소켓으로 들어온 요청도 출발지가 tailnet 주소이므로 TokenGate·LanTokenAuth가 같은 규칙으로 판정한다.
+- **수정 후 재현** (같은 조건):
+
+  | 상황 | 결과 |
+  |---|---|
+  | 기동 시 없음 → A | 첫 tick에 A의 MCP·API guard, 2초 뒤 `mcp_endpoint` A. 후발 bind 4조합 모두 `EADDRINUSE(48)`. 토큰 없는 MCP 401, API 401, loopback MCP 406 |
+  | A → 없음 → A | 없음 2 tick 뒤 loopback 광고, guard 유지(없는 동안에도 후발 bind 거부), 복귀 후 A 재광고 |
+  | A를 다른 프로세스가 먼저 점유 | `blocked`, `alert` 1회, 광고는 loopback 유지, `problems`에 표시. 점유 해제 후 1–2초 안에 guard 확보·A 광고 |
+  | 조회 실패 / 30초 지연 | 상태 유지(광고 A, 이벤트 없음), `problems`에 실패 표시. 지연 중 `/api/system/info` 지연 최대 5.6ms |
+  | `--host tailscale` A → 1초 흔들림 → 없음 | 흔들림 무시, 5.5초 지속 뒤 `rebind` 1회 |
+  | 주소 변화 중 토큰 없는 MCP 요청 연속(4 스레드, 13초) | loopback 406, A 401만. 오류 0(같은 부하의 master와 동일). 200 응답 없음 |
+- **Linux 실제 커널** (Docker `python:3.12-slim`, linuxkit 6.10, dummy 인터페이스로 `100.64.1.1`/`100.64.1.2`를 실제로 추가·삭제, 조회 함수는 실제 코드):
+  - 조회 함수가 주소·없음을 구분했다.
+  - wildcard: 없음 → A → B → 없음 → B 각각 1.5초 안에 `mcp_endpoint` 이벤트. 새 주소 후발 bind는 커널이 `EADDRINUSE(98)`로 거부. 토큰 없는 요청 401.
+  - `--host tailscale`: 1.5초 동안 주소가 사라졌다 돌아와도 같은 소켓이 계속 응답했다(Linux). 다른 주소로 지속 변경 시 6초 뒤 `rebind`.
+- **macOS 실제 GUI** (scratch에만 둔 별도 identifier 빌드, 실제 셸 + 실제 Core, 격리 HOME·vault·API 48765·MCP 48766, Tailscale 조회만 control 파일로 시뮬레이션):
+  - wildcard: A 등장 후 셸의 MCP endpoint가 `http://A:48766/mcp`로, 사라지면 loopback으로 바뀌었다. 등장 전 후발 bind 성공, 등장 후 거부(48).
+  - 점유된 A: 경고 대화상자 경로 실행, 메인 스레드는 run loop 대기(`mach_msg`), 재시작 프레임 없음. 점유 해제 후 A 광고.
+  - 기동 전에 API의 tailnet 주소를 점유: readiness 직후 경고가 셸에 도달(리뷰 S1 수정 확인).
+  - `--host tailscale`: A → 없음이면 6초 뒤 재시작해 `127.0.0.1`에, 다시 A면 20초 간격을 지켜 재시작해 `A`에 bind. 20초 걸리는 느린 재시작 동안 메인 스레드는 대기 상태였고 Core는 항상 1개였다.
+  - 흔들림 5회: 네트워크 재시작이 7초, 27초(+20), 67초(+40), 147초(+80), 307초(+160)에 일어났다. 매 단계 Core 1개, 종료 후 남은 Core 0.
+- **검증**:
+  - Python: `tests/test_desktop_netwatch.py` 42건 신규(조회 7경우·DNS 없음·비정상 값·timeout·중복 조회 없음·예외 / attach 서빙·종료 시 해제·종료 중 거부·느린 attach 재사용 / 늦게 등장한 주소 보호 후 광고·사라짐·흔들림·조회 실패·점유(macOS)·응답 확인 실패·미할당·즉시 철회·비정상 조회값 / rebind 3경우·흔들림·조회 실패 / 스레드 정지·예외 생존·유휴 tick 수·routing 메시지 필터 / 이벤트 채널 끊김·stdout 분리 / 실제 Core 종단 간 2건·standalone `null`). 기존 테스트 2건은 조회 함수가 바뀌어 patch 대상만 바꿨다.
+  - 변형 검사: guard 생략, 보호 전 광고, 조회 실패를 "없음"으로 처리, stdout 분리 생략, rebind debounce 생략, 비정상 조회값 허용, 늦은 attach 재사용 생략 — 각각 신규 테스트가 실패한다.
+  - 전체 pytest(macOS): 2243 passed, 2 failed(기존 실패 `closed_stderr_pipe`·`test_no_candidates_is_not_an_error`).
+  - Linux Docker pytest(`test_desktop_netwatch`·`test_desktop_runtime`·`test_mcp_lan_token_auth`·`test_core_api_access`): 수정본 205 passed, 7 skipped(Linux에는 guard 소켓이 없어 해당 경로가 없음), 1 failed(같은 기존 실패). master는 같은 3개 파일에서 165 passed, 1 failed(같음).
+  - Rust `cargo test`(macOS): 78 passed(신규 13: 이벤트 파싱 2·relay 2·endpoint 갱신·교체된 Core 무시·경고·재시작 간격·backoff·저장 전 이벤트 대기·실패 안내·Core 일치·구조). `cargo clippy` 신규 경고 없음.
+  - dashboard: `network-status.test.ts` 6건, vitest 535 passed, `tsc -b` 통과.
+- **독립 리뷰**: blocker 없음. should-fix 2건(S1 기동 직후 경고 유실, S2 흔들림 시 무한 재시작)과 nit 4건(늦은 attach 중복, 첫 tick 예외 보호, 종료 순서 주석, API 경고 문구)을 반영했다. ssl factory 인자(데스크톱은 TLS 없음)는 반영하지 않았다.
+- **잔여 위험·UNKNOWN**:
+  - 새 주소가 처음 관측되기 전 구간(폴링 최대 1초, macOS routing socket으로는 약 0.2초)에는 다른 프로세스가 먼저 잡을 수 있다. 그 경우 `blocked`로 알리고 광고하지 않지만, 그 주소로 직접 접속하는 에이전트 요청은 막지 못한다. 어떤 방식으로도 0으로 만들 수 없다.
+  - 실제 Tailscale 주소 변경은 운영 tailnet을 건드리지 않고는 재현할 수 없어 **UNKNOWN**(macOS는 조회 시뮬레이션, Linux는 dummy 인터페이스로 실제 주소 변경). 특히 macOS에서 주소가 사라졌다 돌아올 때 guard 소켓이 계속 유효한지는 **UNKNOWN**(돌아오면 응답 확인을 다시 하고, 실패하면 광고하지 않고 `problems`에 표시한다).
+  - IPv6 tailnet 주소(`fd7a:…`)는 다루지 않는다. Core 소켓은 IPv4 전용이라 IPv6로는 듣지 않지만, MagicDNS 이름으로 IPv6를 고르는 에이전트는 그 주소를 먼저 잡은 다른 프로세스에 닿을 수 있다(#54부터 있던 한계).
+  - CGNAT `100.64.0.0/10`을 LAN 주소로 받는 환경에서는 그 주소를 tailnet으로 오인할 수 있다(기존 `get_tailscale_ip`와 같은 한계).
+  - `--host tailscale`의 자동 재시작은 webview를 reload한다. 편집기 초안은 localStorage에 남지만 그 밖의 화면 상태는 사라진다. 이 모드에서 tailnet 주소로 옮겨 가면 webview는 loopback 클라이언트가 아니게 되어 토큰이 필요하다(#16부터의 동작).
+  - uvicorn 내부 속성(`servers`, `server_state`, `lifespan.state`, `config.http_protocol_class`, `config.backlog`)에 기대 guard를 붙인다. 0.52.1(uvloop 0.22.1 포함)에서 확인했다. 바뀌면 attach가 실패해 `error`로 보고되고 광고하지 않는다(fail-closed).
+  - Windows는 **UNKNOWN**. Linux GUI 런타임도 **UNKNOWN**이다(Linux는 Core·단위 테스트만).
