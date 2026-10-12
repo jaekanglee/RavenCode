@@ -1,9 +1,12 @@
 use serde::Deserialize;
 use std::env;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Default Core API bind host.
 ///
@@ -153,6 +156,167 @@ pub(crate) fn ready_endpoints(ready: &ReadyMessage) -> Result<(String, Option<St
     Ok((format!("http://{}", SocketAddr::new(host, ready.port)), mcp_endpoint))
 }
 
+/// How long the shell waits for the Core's readiness line (Issue #43).
+///
+/// A normal start takes well under 2 s (macOS: ~0.4–0.7 s, ~2 s with a cold
+/// bytecode cache). The Core's own deadlines can legitimately take longer and
+/// still end in a readiness line: uvicorn start (10 s), MCP start (10 s, then
+/// API-only), the #22 identity probes (a few seconds each) and the #50 MCP stop
+/// join (2 s) — about 30 s after imports, which have no deadline of their own.
+/// 60 s stays above that path, so a slow but healthy Core is not killed, while
+/// a Core that hangs silently no longer holds the shell forever. The webview
+/// does not wait on this directly: `core_endpoint` answers `Err` after 15 s and
+/// the dashboard keeps asking again (30 attempts).
+pub(crate) const CORE_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often the readiness wait checks for exit, cancellation and the deadline.
+const READINESS_POLL: Duration = Duration::from_millis(50);
+
+/// After stdout closes, how long to wait for the Core to exit before calling it hung.
+const EOF_EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// How long a failure waits for the stderr relay to drain after the kill. A
+/// grandchild holding the pipe open must not turn the error path into a hang.
+const STDERR_DRAIN: Duration = Duration::from_secs(1);
+
+/// Bytes of the Core's stderr kept for the failure message.
+const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+/// Why `ManagedCore::start` returned without a running Core.
+#[derive(Debug)]
+pub(crate) enum StartError {
+    /// The shell aborted the start (app exit, or a newer restart took over).
+    /// Nothing failed, so there is nothing to report to the user.
+    Cancelled,
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Python Core 기동이 취소되었습니다 (앱 종료 또는 새 재시작)"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+/// A Core that has been spawned but has not reported ready yet (Issue #43).
+///
+/// The child sits here during the readiness wait so another thread — app exit,
+/// a newer restart — can kill it with `cancel`; the waiting thread notices
+/// within one poll and returns `StartError::Cancelled`.
+#[derive(Default)]
+pub(crate) struct PendingStart {
+    child: Mutex<Option<Child>>,
+    cancelled: AtomicBool,
+}
+
+impl PendingStart {
+    pub(crate) fn cancel(&self) {
+        // Flag first: a start that has not parked its child yet sees it and kills
+        // the child itself; one that has, loses it here.
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.child.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+/// The Core's stderr, relayed to the shell's stderr from spawn on, with the
+/// tail kept for failure messages. Reading it from the start also means a Core
+/// that writes more than a pipe buffer before readiness can no longer block.
+struct StderrTail {
+    /// `None` once the Core is ready: from then on stderr is only relayed.
+    text: Arc<Mutex<Option<String>>>,
+    /// Disconnects when the relay thread hits EOF.
+    done: mpsc::Receiver<()>,
+}
+
+impl StderrTail {
+    fn spawn(stderr: Option<ChildStderr>) -> Self {
+        let text = Arc::new(Mutex::new(Some(String::new())));
+        let (done_tx, done) = mpsc::channel::<()>();
+        if let Some(stream) = stderr {
+            let sink = Arc::clone(&text);
+            let spawned = std::thread::Builder::new()
+                .name("raven-core:stderr".into())
+                .spawn(move || {
+                    let _done = done_tx;
+                    relay_lines("core:stderr", &mut BufReader::new(stream), Some(&sink));
+                });
+            if spawned.is_err() {
+                eprintln!("[core] could not start the stderr relay");
+            }
+        }
+        Self { text, done }
+    }
+
+    fn stop_keeping(&self) {
+        *self.text.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// The stderr tail once the relay has drained (bounded by `STDERR_DRAIN`).
+    fn detail(&self) -> String {
+        let _ = self.done.recv_timeout(STDERR_DRAIN);
+        let text = self.text.lock().unwrap_or_else(PoisonError::into_inner);
+        match text.as_deref().unwrap_or("").trim() {
+            "" => "stderr 출력 없음".to_string(),
+            tail => format!("stderr: {tail}"),
+        }
+    }
+}
+
+/// Relay a child pipe line-by-line to the shell's stderr until EOF.
+///
+/// The reader thread must outlive `start()`; otherwise the pipe's read end is
+/// closed and the child's next write fails with EPIPE. Invalid UTF-8 is relayed
+/// lossily instead of ending the relay (which would close the pipe).
+fn relay_lines<R: BufRead>(tag: &str, reader: &mut R, tail: Option<&Mutex<Option<String>>>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf);
+                let text = text.trim_end_matches(['\r', '\n']);
+                eprintln!("[raven-{tag}] {text}");
+                if let Some(tail) = tail {
+                    let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                    let Some(kept) = guard.as_mut() else { continue };
+                    kept.push_str(text);
+                    kept.push('\n');
+                    if kept.len() > STDERR_TAIL_BYTES {
+                        let mut cut = kept.len() - STDERR_TAIL_BYTES;
+                        while !kept.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        kept.drain(..cut);
+                    }
+                }
+            }
+        }
+    }
+}
+
+const DEV_ENV_HINT: &str = "('make install'로 파이썬 개발 환경을 재구축해 보세요)";
+
+/// Kill `child` (if still running) and describe the failure with its stderr.
+fn abort(mut child: Child, stderr: &StderrTail, what: String) -> StartError {
+    let _ = child.kill();
+    let _ = child.wait();
+    StartError::Failed(format!("{what}. {}", stderr.detail()))
+}
+
+fn exited_before_ready(status: ExitStatus) -> String {
+    format!("Python Core가 readiness를 보고하기 전에 종료되었습니다 ({status}) {DEV_ENV_HINT}")
+}
+
 pub(crate) struct ManagedCore {
     child: Child,
     pub endpoint: String,
@@ -160,7 +324,11 @@ pub(crate) struct ManagedCore {
 }
 
 impl ManagedCore {
-    pub(crate) fn start(mcp: bool, resource_dir: Option<PathBuf>) -> Result<Self, String> {
+    pub(crate) fn start(
+        mcp: bool,
+        resource_dir: Option<PathBuf>,
+        pending: &PendingStart,
+    ) -> Result<Self, StartError> {
         let (python, python_path) = resolve_python(resource_dir.as_deref());
         let host = env::var("RAVEN_DESKTOP_HOST")
             .ok()
@@ -174,82 +342,162 @@ impl ManagedCore {
         // reaching RunEvent::Exit (SIGTERM/SIGHUP, crash) — see runtime.py PARENT_PID_ENV.
         cmd.env("RAVEN_DESKTOP_PARENT_PID", std::process::id().to_string());
         cmd.args(&spec.args)
-            .current_dir(safe_workspace(spec.env.iter().any(|(k, _)| k == "PYTHONPATH")))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .current_dir(safe_workspace(spec.env.iter().any(|(k, _)| k == "PYTHONPATH")));
         for (key, value) in &spec.env {
             cmd.env(key, value);
         }
+        Self::launch(cmd, CORE_READINESS_TIMEOUT, pending)
+    }
+
+    /// Spawn `cmd` and wait — at most `timeout` — for its readiness line.
+    ///
+    /// Issue #43: this used to be a bare blocking `read_line`, so a Core that
+    /// neither printed, exited nor closed stdout held the shell forever. Every
+    /// way out of the wait now ends with the child killed and reaped, except a
+    /// valid, consistent readiness line.
+    pub(crate) fn launch(
+        mut cmd: Command,
+        timeout: Duration,
+        pending: &PendingStart,
+    ) -> Result<Self, StartError> {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|error| {
-            format!(
+            StartError::Failed(format!(
                 "Python Core 시작 실패 ({}): {error}",
-                spec.program.display()
-            )
+                Path::new(cmd.get_program()).display()
+            ))
         })?;
+        let stdout = child.stdout.take();
+        let stderr = StderrTail::spawn(child.stderr.take());
+        let Some(stdout) = stdout else {
+            return Err(abort(child, &stderr, "Python Core readiness stream을 열 수 없습니다".into()));
+        };
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Python Core readiness stream을 열 수 없습니다".to_string())?;
-        let stderr = child.stderr.take();
+        // First line → channel; the same thread then keeps relaying stdout.
+        let (line_tx, line_rx) = mpsc::sync_channel::<std::io::Result<String>>(1);
+        let spawned = std::thread::Builder::new()
+            .name("raven-core".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut buf = Vec::new();
+                let first = reader
+                    .read_until(b'\n', &mut buf)
+                    .map(|_| String::from_utf8_lossy(&buf).into_owned());
+                let ok = first.is_ok();
+                let _ = line_tx.send(first);
+                if ok {
+                    relay_lines("core", &mut reader, None);
+                }
+            });
+        if let Err(error) = spawned {
+            return Err(abort(child, &stderr, format!("Python Core readiness reader 시작 실패: {error}")));
+        }
 
-        let mut line = String::new();
-        let mut stdout_reader = BufReader::new(stdout);
-        stdout_reader
-            .read_line(&mut line)
-            .map_err(|error| format!("Python Core readiness 읽기 실패: {error}"))?;
-
-        let ready: ReadyMessage = match serde_json::from_str(&line) {
-            Ok(msg) => msg,
-            Err(error) => {
-                // A Core that is still running (e.g. a version that omits a
-                // required field) would never close stderr — stop it first so
-                // reading the rest cannot block the shell forever.
+        {
+            let mut slot = pending.child.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.is_cancelled() {
+                drop(slot);
                 let _ = child.kill();
                 let _ = child.wait();
-                let mut err_msg = String::new();
-                if let Some(err_stream) = stderr {
-                    let mut stderr_reader = BufReader::new(err_stream);
-                    let _ = stderr_reader.read_to_string(&mut err_msg);
-                }
-                let err_msg_trimmed = err_msg.trim();
-                let detail = if err_msg_trimmed.is_empty() {
-                    "Python 프로세스가 응답 출력을 생성하지 않고 즉시 종료되었습니다.".to_string()
-                } else {
-                    format!("stderr: {err_msg_trimmed}")
-                };
-                return Err(format!(
-                    "Python Core readiness 형식 오류 ({error}). {detail} ('make install'로 파이썬 개발 환경을 재구축해 보세요)"
+                return Err(StartError::Cancelled);
+            }
+            *slot = Some(child);
+        }
+
+        let deadline = Instant::now() + timeout;
+        let read = loop {
+            match line_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()).min(READINESS_POLL)) {
+                Ok(read) => break read,
+                // The reader always sends before it ends; treat a lost sender as EOF.
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(String::new()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let mut slot = pending.child.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(running) = slot.as_mut() else {
+                return Err(StartError::Cancelled);
+            };
+            // Exit is checked apart from EOF: a grandchild can hold stdout open
+            // after the Core itself is gone.
+            if let Ok(Some(status)) = running.try_wait() {
+                let child = slot.take().expect("checked above");
+                return Err(abort(child, &stderr, exited_before_ready(status)));
+            }
+            if Instant::now() >= deadline {
+                let child = slot.take().expect("checked above");
+                return Err(abort(
+                    child,
+                    &stderr,
+                    format!(
+                        "Python Core가 {}초 안에 readiness를 보고하지 않아 종료했습니다",
+                        timeout.as_secs_f32()
+                    ),
                 ));
             }
         };
 
-        let (endpoint, mcp_endpoint) = match ready_endpoints(&ready) {
-            Ok(endpoints) => endpoints,
+        let Some(mut child) = pending.child.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return Err(StartError::Cancelled);
+        };
+        let line = match read {
+            Ok(line) => line,
             Err(error) => {
-                // The Core already reported ready and is listening; refusing it
-                // must not leave it running behind the error dialog.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
+                return Err(abort(child, &stderr, format!("Python Core readiness 읽기 실패: {error}")))
             }
         };
-
-        // Keep draining both pipes for the life of the child. Dropping the
-        // handles here closed the read ends, so every later `sys.stderr.write`
-        // in the Python Core (e.g. hybrid_search's sqlite-vec warning) raised
-        // BrokenPipeError inside the request handler → 500 on /hybrid-search.
-        forward_pipe("core", stdout_reader);
-        if let Some(err_stream) = stderr {
-            forward_pipe("core:stderr", BufReader::new(err_stream));
+        if line.is_empty() {
+            // stdout closed. Usually the Core is exiting — give it a moment so
+            // the message can say how it ended.
+            let grace = Instant::now() + EOF_EXIT_GRACE;
+            loop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(abort(child, &stderr, exited_before_ready(status)));
+                }
+                if Instant::now() >= grace {
+                    return Err(abort(
+                        child,
+                        &stderr,
+                        "Python Core가 readiness 없이 stdout을 닫았습니다 (프로세스는 살아 있었음)".into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
 
+        let ready: ReadyMessage = match serde_json::from_str(&line) {
+            Ok(msg) => msg,
+            Err(error) => {
+                return Err(abort(
+                    child,
+                    &stderr,
+                    format!("Python Core readiness 형식 오류 ({error}) {DEV_ENV_HINT}"),
+                ))
+            }
+        };
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(abort(
+                child,
+                &stderr,
+                format!("Python Core가 readiness 직후 종료되었습니다 ({status})"),
+            ));
+        }
+        let (endpoint, mcp_endpoint) = match ready_endpoints(&ready) {
+            Ok(endpoints) => endpoints,
+            // The Core already reported ready and is listening; refusing it
+            // must not leave it running behind the error dialog.
+            Err(error) => return Err(abort(child, &stderr, error)),
+        };
+
+        // Both pipes keep being drained for the life of the child (see
+        // `relay_lines`): the stdout thread above continues after the first
+        // line, and the stderr relay runs until EOF — without keeping a tail.
+        stderr.stop_keeping();
         Ok(Self {
             child,
             endpoint,
             mcp_endpoint,
         })
     }
+
 
     /// Test double: a "running" Core with the given endpoints (the child is a finished `true`).
     #[cfg(test)]
@@ -259,6 +507,11 @@ impl ManagedCore {
             endpoint: endpoint.to_string(),
             mcp_endpoint: mcp_endpoint.map(str::to_string),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     pub(crate) fn stop(&mut self) {
@@ -278,24 +531,6 @@ impl Drop for ManagedCore {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Relay a child pipe line-by-line to the shell's stderr until EOF.
-///
-/// The reader thread must outlive `start()`; otherwise the pipe's read end is
-/// closed and the child's next write fails with EPIPE.
-fn forward_pipe<R: Read + Send + 'static>(tag: &'static str, reader: BufReader<R>) {
-    std::thread::Builder::new()
-        .name(format!("raven-{tag}"))
-        .spawn(move || {
-            for line in reader.lines() {
-                match line {
-                    Ok(text) => eprintln!("[raven-{tag}] {text}"),
-                    Err(_) => break,
-                }
-            }
-        })
-        .ok();
 }
 
 /// Resolve the Python interpreter and optional PYTHONPATH.
@@ -426,5 +661,234 @@ mod tests {
     fn mcp_without_its_own_host_follows_the_api_host() {
         let (_, mcp) = endpoints(r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1","mcp_port":8766}"#).unwrap();
         assert_eq!(mcp.as_deref(), Some("http://127.0.0.1:8766/mcp"));
+    }
+
+    /// Issue #43: `launch` against `sh` stand-ins for the Python Core.
+    #[cfg(unix)]
+    mod readiness_wait {
+        use super::super::{ManagedCore, PendingStart, StartError};
+        use std::path::PathBuf;
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const READY: &str = r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}"#;
+
+        /// `sh -c script`, with `$PIDFILE` pointing at a fresh per-test file.
+        fn core(name: &str, script: &str) -> (Command, PathBuf) {
+            let pidfile = std::env::temp_dir().join(format!("raven43-{}-{name}.pid", std::process::id()));
+            let _ = std::fs::remove_file(&pidfile);
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(script).env("PIDFILE", &pidfile);
+            (cmd, pidfile)
+        }
+
+        fn pid(pidfile: &PathBuf) -> String {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(pidfile) {
+                    if !text.trim().is_empty() {
+                        return text.trim().to_string();
+                    }
+                }
+                assert!(Instant::now() < deadline, "the stand-in never wrote {pidfile:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// Whether `pid` still exists a moment from now (killing races the check by microseconds).
+        fn alive(pid: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while exists(pid) {
+                if Instant::now() >= deadline {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        fn exists(pid: &str) -> bool {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+
+        fn failed(result: Result<ManagedCore, StartError>) -> String {
+            match result {
+                Err(StartError::Failed(message)) => message,
+                Err(StartError::Cancelled) => panic!("cancelled, expected a failure"),
+                Ok(core) => panic!("started at {}, expected a failure", core.endpoint),
+            }
+        }
+
+        #[test]
+        fn readiness_line_starts_the_core_and_drop_stops_it() {
+            let (cmd, pidfile) = core("ok", &format!("echo $$ > \"$PIDFILE\"; echo '{READY}'; exec sleep 30"));
+            let mut core = ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()).unwrap();
+            assert_eq!(core.endpoint, "http://127.0.0.1:41000");
+            assert!(core.is_alive());
+            let pid = pid(&pidfile);
+            assert!(exists(&pid));
+            drop(core);
+            assert!(!alive(&pid), "dropping the Core must stop it");
+        }
+
+        #[test]
+        fn silent_live_core_times_out_and_is_killed() {
+            let (cmd, pidfile) = core("silent", "echo $$ > \"$PIDFILE\"; echo still-importing >&2; exec sleep 30");
+            let started = Instant::now();
+            let message = failed(ManagedCore::launch(cmd, Duration::from_millis(400), &PendingStart::default()));
+            let took = started.elapsed();
+            assert!(took >= Duration::from_millis(400) && took < Duration::from_secs(3), "{took:?}");
+            assert!(message.contains("readiness를 보고하지 않아 종료했습니다"), "{message}");
+            assert!(message.contains("still-importing"), "stderr tail missing: {message}");
+            assert!(!alive(&pid(&pidfile)), "the timed-out Core must be killed");
+        }
+
+        #[test]
+        fn readiness_just_after_the_deadline_is_a_timeout() {
+            let (cmd, pidfile) = core("late", &format!("echo $$ > \"$PIDFILE\"; sleep 1; echo '{READY}'; exec sleep 30"));
+            let message = failed(ManagedCore::launch(cmd, Duration::from_millis(500), &PendingStart::default()));
+            assert!(message.contains("readiness를 보고하지 않아"), "{message}");
+            assert!(!alive(&pid(&pidfile)));
+        }
+
+        #[test]
+        fn readiness_just_before_the_deadline_is_accepted() {
+            let (cmd, _) = core("early", &format!("sleep 1; echo '{READY}'; exec sleep 30"));
+            let core = ManagedCore::launch(cmd, Duration::from_secs(2), &PendingStart::default()).unwrap();
+            assert_eq!(core.endpoint, "http://127.0.0.1:41000");
+        }
+
+        #[test]
+        fn malformed_readiness_is_a_format_error_and_the_core_is_killed() {
+            let (cmd, pidfile) = core("garbage", "echo $$ > \"$PIDFILE\"; echo boom-detail >&2; echo not-json; exec sleep 30");
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()));
+            assert!(message.contains("readiness 형식 오류"), "{message}");
+            assert!(message.contains("boom-detail"), "{message}");
+            assert!(!alive(&pid(&pidfile)));
+        }
+
+        #[test]
+        fn readiness_from_before_issue_16_is_refused() {
+            // Issue #16 contract: `bind_host` is required.
+            let (cmd, pidfile) = core(
+                "old16",
+                r#"echo $$ > "$PIDFILE"; echo '{"host":"127.0.0.1","port":41000}'; exec sleep 30"#,
+            );
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()));
+            assert!(message.contains("readiness 형식 오류") && message.contains("bind_host"), "{message}");
+            assert!(!alive(&pid(&pidfile)));
+        }
+
+        #[test]
+        fn inconsistent_readiness_kills_the_core() {
+            let (cmd, pidfile) = core(
+                "incons",
+                r#"echo $$ > "$PIDFILE"; echo '{"host":"127.0.0.1","port":41000,"bind_host":"192.168.0.52"}'; exec sleep 30"#,
+            );
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()));
+            assert!(message.contains("일관되지 않습니다"), "{message}");
+            assert!(!alive(&pid(&pidfile)));
+        }
+
+        #[test]
+        fn closed_stdout_on_a_live_core_is_reported_and_killed() {
+            let (cmd, pidfile) = core("eof", "echo $$ > \"$PIDFILE\"; exec >&-; exec sleep 30");
+            let started = Instant::now();
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()));
+            assert!(started.elapsed() < Duration::from_secs(4), "must not wait for the timeout");
+            assert!(message.contains("stdout을 닫았습니다"), "{message}");
+            assert!(!alive(&pid(&pidfile)));
+        }
+
+        #[test]
+        fn early_exit_reports_the_status_and_stderr() {
+            let (cmd, _) = core("exit", "echo 'Traceback: no module named x' >&2; exit 3");
+            let started = Instant::now();
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()));
+            assert!(started.elapsed() < Duration::from_secs(4));
+            assert!(message.contains("readiness를 보고하기 전에 종료되었습니다"), "{message}");
+            assert!(message.contains('3'), "{message}");
+            assert!(message.contains("no module named x"), "{message}");
+        }
+
+        #[test]
+        fn early_exit_is_seen_even_when_a_grandchild_keeps_the_pipes_open() {
+            // The Core is gone but a leftover child still holds stdout/stderr: no EOF
+            // arrives, so exit must be noticed on its own and stderr draining bounded.
+            let (cmd, pidfile) = core("orphanpipe", "sleep 30 & echo $! > \"$PIDFILE\"; exit 4");
+            let started = Instant::now();
+            let message = failed(ManagedCore::launch(cmd, Duration::from_secs(20), &PendingStart::default()));
+            let took = started.elapsed();
+            let grandchild = pid(&pidfile);
+            let _ = Command::new("kill").arg(&grandchild).status();
+            assert!(took < Duration::from_secs(4), "{took:?}");
+            assert!(message.contains("종료되었습니다"), "{message}");
+        }
+
+        #[test]
+        fn stderr_beyond_a_pipe_buffer_before_readiness_does_not_block() {
+            // 256 KiB of warnings before the readiness line: with nobody reading
+            // stderr until readiness, the Core blocked on write and never got there.
+            let (cmd, _) = core(
+                "flood",
+                &format!("i=0; while [ $i -lt 4096 ]; do echo 'warning: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >&2; i=$((i+1)); done; echo '{READY}'; exec sleep 30"),
+            );
+            let core = ManagedCore::launch(cmd, Duration::from_secs(20), &PendingStart::default()).unwrap();
+            assert_eq!(core.endpoint, "http://127.0.0.1:41000");
+        }
+
+        #[test]
+        fn cancel_during_the_wait_kills_the_core() {
+            let (cmd, pidfile) = core("cancel", "echo $$ > \"$PIDFILE\"; exec sleep 30");
+            let pending = Arc::new(PendingStart::default());
+            let p2 = Arc::clone(&pending);
+            let waiter = std::thread::spawn(move || ManagedCore::launch(cmd, Duration::from_secs(20), &p2));
+            let pid = pid(&pidfile);
+            pending.cancel();
+            assert!(!alive(&pid), "cancel must kill the waiting Core itself");
+            let started = Instant::now();
+            assert!(matches!(waiter.join().unwrap(), Err(StartError::Cancelled)));
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn cancel_before_spawn_never_leaves_a_core_running() {
+            // The child may be killed before it can write a pidfile, so look for
+            // its unique command line instead (read-only `pgrep`).
+            let marker = format!("sleep 31.{}", std::process::id());
+            let (cmd, _) = core("precancel", &format!("exec {marker}"));
+            let pending = PendingStart::default();
+            pending.cancel();
+            assert!(matches!(ManagedCore::launch(cmd, Duration::from_secs(20), &pending), Err(StartError::Cancelled)));
+            std::thread::sleep(Duration::from_millis(200));
+            let found = Command::new("pgrep").args(["-f", &marker]).output().unwrap();
+            assert!(found.stdout.is_empty(), "cancelled start left {marker} running");
+        }
+
+        #[test]
+        fn a_start_after_repeated_failures_succeeds() {
+            for (name, script) in [("r1", "exec sleep 30"), ("r2", "echo nope; exec sleep 30"), ("r3", "exit 1")] {
+                let (cmd, _) = core(name, script);
+                let _ = failed(ManagedCore::launch(cmd, Duration::from_millis(300), &PendingStart::default()));
+            }
+            let (cmd, _) = core("r4", &format!("echo '{READY}'; exec sleep 30"));
+            assert!(ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()).is_ok());
+        }
+
+        #[test]
+        fn missing_program_is_a_start_failure_naming_it() {
+            let message = failed(ManagedCore::launch(
+                Command::new("/nonexistent/raven-python"),
+                Duration::from_secs(1),
+                &PendingStart::default(),
+            ));
+            assert!(message.contains("Python Core 시작 실패") && message.contains("/nonexistent/raven-python"), "{message}");
+        }
     }
 }
