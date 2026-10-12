@@ -197,14 +197,19 @@ def test_login_sets_a_strict_httponly_cookie_and_dashboard_works(stack):
 def test_cookie_driven_writes_need_same_origin(stack):
     p = stack["port"]
     _, headers, _ = _login(p, stack["token"])
-    c = {"Cookie": _cookie(headers), "Host": f"127.0.0.1:{p}"}
-    assert _req(p, "DELETE", "/api/vaults/beta?force=true", c)[0] == 403
-    assert _req(p, "DELETE", "/api/vaults/beta?force=true", {**c, "Origin": "http://evil.example"})[0] == 403
-    assert _req(p, "DELETE", "/api/vaults/beta?force=true", {**c, "Origin": f"http://localhost:{p + 1}"})[0] == 403
+    c = {"Cookie": _cookie(headers), "Host": f"127.0.0.1:{p}", "Content-Type": "application/json"}
+    body = json.dumps({"path": "csrf-probe"})
+    folder = stack["vaults"] / "beta" / "csrf-probe"
+    assert _req(p, "POST", "/api/vaults/beta/folders", c, body)[0] == 403
+    assert _req(p, "POST", "/api/vaults/beta/folders", {**c, "Origin": "http://evil.example"}, body)[0] == 403
+    assert _req(p, "POST", "/api/vaults/beta/folders", {**c, "Origin": f"http://localhost:{p + 1}"}, body)[0] == 403
+    assert not folder.exists()
+    same = {**c, "Origin": f"http://127.0.0.1:{p}"}
+    assert _req(p, "POST", "/api/vaults/beta/folders", same, body)[0] in (200, 201)
+    assert folder.is_dir()
+    # Issue #15: removing a vault from disk is "this PC only"; the proxy hop is not this PC.
+    assert _req(p, "DELETE", "/api/vaults/beta?force=true", same)[0] == 403
     assert (stack["vaults"] / "beta").exists()
-    status = _req(p, "DELETE", "/api/vaults/beta?force=true", {**c, "Origin": f"http://127.0.0.1:{p}"})[0]
-    assert status == 200
-    assert not (stack["vaults"] / "beta").exists()
 
 
 def test_bearer_header_clients_pass_through(stack):
