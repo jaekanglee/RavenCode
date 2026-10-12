@@ -164,6 +164,7 @@ class TestErrorEnvelopePreserved:
         def explode(*_args, **_kwargs):
             raise OSError("disk full")
 
+        monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
         monkeypatch.setattr(Path, "mkdir", explode)
         resp = client.post("/api/debug-log", json={"level": "error", "message": "x"})
 

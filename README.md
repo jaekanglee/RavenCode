@@ -191,6 +191,7 @@ make desktop-release   # 새 버전을 물어 범프·커밋·태그·푸시 →
 | `WIKI_VAULTS_DIR` | `~/Raven` | vaults 루트 전체 변경 |
 | `WIKI_VAULT` | (registry default) | active vault 일시 변경 |
 | `GEMINI_API_KEY` | (없음) | AI 보조 기능(태그 추천·RAG 답변·AI 조언·모순 탐지·초안 생성)의 Gemini 호출 키. 없으면 외부 호출 없이 비-LLM fallback으로 동작한다. **`OPENAI_API_KEY`·`API_KEY`·`GOOGLE_API_KEY`는 Gemini 키로 쓰지 않는다**(#47, 다른 서비스 키가 Google로 전송되던 문제) |
+| `RAVEN_DEBUG_LOG` | (꺼짐) | `1`이면 `POST /api/debug-log`가 대시보드의 브라우저 오류를 `tmp/dashboard-client.log`에 JSON 한 줄씩 기록한다(1 MiB를 넘으면 `.1`로 한 번 회전). 꺼져 있으면 404. 진단할 때만 켠다(#19) |
 
 ```bash
 # 예: 다른 위치 vault 사용

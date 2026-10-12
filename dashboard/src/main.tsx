@@ -61,8 +61,9 @@ if (!(window as any).__TAURI_INTERNALS__) {
   });
 }
 
-// ─── v0.6.10+ 개발 단계 throw/error catch (tmp/dashboard.log) ─────
-// mobile DevTools 못 볼 때 사용자가 `cat tmp/dashboard.log`로 직접 진단.
+// ─── v0.6.10+ 개발 단계 throw/error catch (tmp/dashboard-client.log) ─────
+// mobile DevTools 못 볼 때 사용자가 `cat tmp/dashboard-client.log`로 직접 진단.
+// Issue #19: 서버가 RAVEN_DEBUG_LOG=1일 때만 받는다(아니면 404, 무시됨).
 // ESbuild/Node 환경에서는 window 없음 → 가드.
 if (typeof window !== "undefined") {
   const post = (entry: {

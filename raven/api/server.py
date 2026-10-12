@@ -16,13 +16,18 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
+import threading
+import unicodedata
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Header, Response, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from raven.core import registry, resolve_active_vault, link_module, recommend_module
 from raven.core.registry import VAULTS_ROOT
@@ -2979,8 +2984,13 @@ def post_log_rotate(name: str, year: Optional[int] = None, force: bool = False):
 
 # ─── /api/debug-log (v0.6.10+, 개발 단계 throw/error catch) ───────
 # Dashboard 브라우저에서 fetch throw / window.onerror / unhandledrejection
-# 등을 POST하면 서버가 tmp/dashboard.log에 append. mobile DevTools 못 볼 때
-# 사용자가 `cat tmp/dashboard.log`로 직접 진단 가능.
+# 등을 POST하면 서버가 tmp/dashboard-client.log에 append. mobile DevTools 못 볼 때
+# 사용자가 `cat tmp/dashboard-client.log`로 직접 진단 가능.
+#
+# Issue #19: tmp/dashboard.log는 `./raven.sh`가 vite 출력을 쓰는 파일이라(다른 프로세스가
+# 열어 둔 파일을 회전할 수 없으므로) 이 로그는 별도 파일을 쓴다. 진단용 endpoint라 기본은 꺼져 있다(`RAVEN_DEBUG_LOG=1`일 때만, 아니면 404).
+# 한 항목은 JSON 한 줄이다 — 입력의 개행·제어문자가 escape되어 로그 줄을 위조할 수 없다.
+# 파일이 DEBUG_LOG_MAX_BYTES를 넘으면 `.1`로 한 번 회전한다(최대 약 2배 크기).
 class DebugLogEntry(BaseModel):
     level: str = Field("info", description="info | warn | error")
     source: str = Field("", description="dashboard | unhandledrejection | fetch | component")
@@ -2990,26 +3000,80 @@ class DebugLogEntry(BaseModel):
     vault: str = Field("", description="active vault (선택)")
 
 
-_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "tmp" / "dashboard.log"
+_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "tmp" / "dashboard-client.log"
+DEBUG_LOG_MAX_BYTES = 1024 * 1024
+_DEBUG_FIELD_MAX = {"level": 16, "source": 64, "message": 2000, "url": 500, "vault": 128}
+_DEBUG_STACK_LINES, _DEBUG_STACK_LINE_MAX = 10, 300
+_debug_log_lock = threading.Lock()
+# json.dumps escapes U+0000–U+001F only. Everything else that is not a visible character is
+# escaped too: C1 controls (U+0085 ends a line for str.splitlines, U+009B is CSI on some
+# terminals), format characters such as bidi overrides, line/paragraph separators, and lone
+# surrogates (which UTF-8 cannot even encode — the write used to fail with a 500).
+_INVISIBLE_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
+_LINE_BOUNDARY = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
-@app.post("/api/debug-log")
-def post_debug_log(entry: DebugLogEntry):
-    """Dashboard throw / error를 tmp/dashboard.log에 append. dev only."""
+def _escape_invisible(text: str) -> str:
+    return "".join(
+        # json.dumps(ensure_ascii=True) spells it as JSON does: \\uXXXX, or a surrogate
+        # pair above U+FFFF (a bare 5-digit \\u escape would change the text).
+        json.dumps(ch)[1:-1] if ord(ch) > 0x7E and unicodedata.category(ch) in _INVISIBLE_CATEGORIES else ch
+        for ch in text
+    )
+
+
+def debug_log_enabled() -> bool:
+    return os.environ.get("RAVEN_DEBUG_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _debug_log_record(entry: DebugLogEntry) -> str:
+    """One JSON line for ``entry``: fields capped, newlines and control characters escaped."""
+    record = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    for name, limit in _DEBUG_FIELD_MAX.items():
+        record[name] = getattr(entry, name)[:limit]
+    if entry.stack:
+        # Split only as far as needed (the same boundaries as str.splitlines).
+        lines = _LINE_BOUNDARY.split(entry.stack, maxsplit=_DEBUG_STACK_LINES)[:_DEBUG_STACK_LINES]
+        record["stack"] = [line[:_DEBUG_STACK_LINE_MAX] for line in lines if line]
+    return _escape_invisible(json.dumps(record, ensure_ascii=False)) + "\n"
+
+
+@app.post("/api/debug-log", openapi_extra={"requestBody": {"content": {"application/json": {"schema": DebugLogEntry.model_json_schema()}}}})
+async def post_debug_log(request: Request):
+    """Dashboard throw / error를 tmp/dashboard-client.log에 JSON 한 줄로 append (opt-in, Issue #19).
+
+    The body is read only after the switch: a closed endpoint answers 404 to any body,
+    malformed or not, instead of a 422 that would tell it exists.
+    """
+    if not debug_log_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
     try:
-        _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {entry.level.upper():5s} {entry.source:20s} vault={entry.vault or '-':12s} url={entry.url or '-'}\n"
-        line += f"  msg: {entry.message}\n"
-        if entry.stack:
-            for sl in entry.stack.splitlines()[:10]:
-                line += f"  at:  {sl}\n"
-        line += "\n"
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line)
+        # json.loads, not the strict JSON parser: a browser that cut a message mid-emoji
+        # sends a lone surrogate (valid JSON), and that report should still be written.
+        entry = DebugLogEntry.model_validate(json.loads(await request.body()))
+    except ValueError as exc:  # JSONDecodeError, ValidationError, undecodable bytes
+        errors = exc.errors(include_url=False) if isinstance(exc, ValidationError) else [
+            {"type": "json_invalid", "loc": ["body"], "msg": "JSON decode error", "input": None}
+        ]
+        raise RequestValidationError(errors) from None
+    return await run_in_threadpool(_append_debug_log, _debug_log_record(entry))
+
+
+def _append_debug_log(line: str) -> dict:
+    try:
+        with _debug_log_lock:
+            _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                size = _DEBUG_LOG_PATH.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            if size + len(line.encode("utf-8")) > DEBUG_LOG_MAX_BYTES:
+                _DEBUG_LOG_PATH.replace(_DEBUG_LOG_PATH.with_name(_DEBUG_LOG_PATH.name + ".1"))
+            with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(line)
     except OSError as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "path": str(_DEBUG_LOG_PATH)}
+    return {"ok": True}
 
 
 # ────────────────────────── garden endpoint (v0.7.27) ──────────────────────────

@@ -84,8 +84,12 @@ def test_log_rotate_endpoint_actually_runs(client, temp_vault_registered):
     assert forced.json()["rotated_to"]
 
 
-def test_debug_log_endpoint_still_works(client):
-    """post_debug_log의 실제 동작은 데드코드 제거 후에도 그대로 살아있어야 한다."""
+def test_debug_log_endpoint_still_works(client, monkeypatch, tmp_path):
+    """post_debug_log의 실제 동작은 데드코드 제거 후에도 그대로 살아있어야 한다(#19: opt-in)."""
+    import raven.api.server as server
+
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    monkeypatch.setattr(server, "_DEBUG_LOG_PATH", tmp_path / "dashboard-client.log")
     resp = client.post("/api/debug-log", json={"level": "info", "message": "hello"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
