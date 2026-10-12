@@ -35,6 +35,7 @@ else in the process — a stray ``print``, a subprocess — can write an event.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import errno
 import functools
 import ipaddress
@@ -152,14 +153,15 @@ class TimedLookup:
         return box[0]
 
 
-def serve_socket(server, sock: socket.socket, timeout: float = ATTACH_TIMEOUT) -> None:
-    """Make a running uvicorn ``server`` accept on ``sock`` as well.
+def attach_socket(server, sock: socket.socket) -> concurrent.futures.Future:
+    """Start making a running uvicorn ``server`` accept on ``sock`` as well.
 
     uvicorn takes its sockets only at start. This builds the same protocol
     factory its ``startup`` uses and adds the listener on the server's own event
     loop, so it is served like the others and closed by uvicorn's shutdown. A
-    listener added after shutdown began is closed at once. Raises on failure;
-    ``sock`` then stays open, bound and unserved — the caller decides.
+    listener added after shutdown began is closed at once. The returned future
+    fails if it could not be added; ``sock`` then stays open, bound and
+    unserved — the caller decides. Raises at once if the server is not running.
     """
     if not getattr(server, "started", False) or not getattr(server, "servers", None):
         raise RuntimeError("the server is not running")
@@ -180,7 +182,12 @@ def serve_socket(server, sock: socket.socket, timeout: float = ATTACH_TIMEOUT) -
         if server.should_exit:
             listener.close()
 
-    asyncio.run_coroutine_threadsafe(attach(), loop).result(timeout)
+    return asyncio.run_coroutine_threadsafe(attach(), loop)
+
+
+def serve_socket(server, sock: socket.socket, timeout: float = ATTACH_TIMEOUT) -> None:
+    """``attach_socket`` and wait for it (raises on failure or timeout)."""
+    attach_socket(server, sock).result(timeout)
 
 
 @dataclass
@@ -199,6 +206,8 @@ class Listener:
     detail: dict[str, str] = field(default_factory=dict)
     # Guards bound but not yet served (attach failed); retried every tick.
     unserved: dict[str, socket.socket] = field(default_factory=dict)
+    # An attach still in flight after its timeout: its outcome is used, never repeated.
+    attaching: dict[str, concurrent.futures.Future] = field(default_factory=dict)
 
 
 class EventStream:
@@ -405,10 +414,19 @@ class NetworkWatcher:
         sock = listener.unserved.get(ip)
         if sock is not None:
             try:
-                serve_socket(listener.server, sock)
+                pending = listener.attaching.get(ip) or attach_socket(listener.server, sock)
+                listener.attaching[ip] = pending
+                pending.result(ATTACH_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                # Still in flight: keep it and look at its outcome next time, so the
+                # same socket is never handed to the server twice.
+                self._set(listener, ip, "error", "the server has not taken the guard yet")
+                return
             except Exception as exc:  # noqa: BLE001 — keep the guard (fail closed), retry
+                listener.attaching.pop(ip, None)
                 self._set(listener, ip, "error", f"could not serve the guard: {type(exc).__name__}: {exc}")
                 return
+            listener.attaching.pop(ip, None)
             listener.held[ip] = listener.unserved.pop(ip)
         if self._is_self(listener.responder, listener.nonce, listener.port, ip):
             self._set(listener, ip, "protected")
@@ -525,7 +543,7 @@ class NetworkWatcher:
 
     # ── thread ─────────────────────────────────────────────────────────────
 
-    def _safe_tick(self) -> None:
+    def safe_tick(self) -> None:
         try:
             self.tick()
         except Exception as exc:  # noqa: BLE001 — the watcher must outlive one bad check
@@ -549,7 +567,7 @@ class NetworkWatcher:
             self._wait()
             if self._stop.is_set():
                 break
-            self._safe_tick()
+            self.safe_tick()
 
     def start(self) -> None:
         self._route = _route_socket()

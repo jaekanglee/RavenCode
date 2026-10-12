@@ -409,6 +409,28 @@ def test_an_address_this_core_does_not_answer_is_not_advertised() -> None:
         rig.close()
 
 
+@needs_lan
+def test_a_slow_attach_is_awaited_not_repeated(monkeypatch) -> None:
+    """A guard the server takes only after the timeout is used once it lands — never attached twice."""
+    rig = _Rig(_Switch(None))
+    monkeypatch.setattr(netwatch, "ATTACH_TIMEOUT", 0.2)
+    try:
+        before = len(rig.mcp.server.servers)
+        loop = rig.mcp.server.servers[0].get_loop()
+        loop.call_soon_threadsafe(time.sleep, 1.0)  # the MCP server's loop is busy for a second
+        rig.lookup.value = LAN
+        rig.ticks(1)
+        assert rig.watcher.snapshot()["mcp"]["tailnet"]["state"] == "error"
+        assert not _intruder_binds(LAN, rig.mcp.port)  # held all along
+        time.sleep(1.2)
+        rig.ticks(3)
+        assert rig.watcher.snapshot()["mcp"]["tailnet"]["state"] == "protected"
+        assert len(rig.mcp.server.servers) == before + 1
+        assert rig.events[-1] == {"event": "mcp_endpoint", "mcp_host": LAN, "mcp_port": rig.mcp.port}
+    finally:
+        rig.close()
+
+
 def test_an_address_not_assigned_yet_is_pending_and_not_advertised() -> None:
     rig = _Rig(_Switch("192.0.2.77"))  # TEST-NET-1: not on this host
     try:

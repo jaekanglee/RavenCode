@@ -780,7 +780,7 @@ def main() -> int:
         tailscale_requested=tailscale_requested,
         tailscale_bound=tailscale_bound,
     )
-    watcher.tick()
+    watcher.safe_tick()
     network_status.set_provider(watcher.snapshot)
     watcher.start()
 
@@ -795,7 +795,9 @@ def main() -> int:
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
-    # Stop the watcher first: no guard may be added to a server that is shutting down.
+    # Stop the watcher before the servers are joined. A guard it attaches while a
+    # server is already exiting (SIGTERM sets should_exit first) is closed by
+    # serve_socket's own should_exit checks.
     if not watcher.stop():
         print("⚠️  [Desktop Core] network watcher did not stop within 3s", file=sys.stderr)
     network_status.set_provider(None)
