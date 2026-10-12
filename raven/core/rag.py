@@ -1,13 +1,12 @@
 """raven.core.rag — 하이브리드 검색 결과를 기반으로 출처 인용이 포함된 AI 답변을 생성하는 RAG 핵심 모듈."""
 from __future__ import annotations
 
-import os
 import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
-from .gemini_client import generate_content
+from .gemini_client import gemini_api_key, generate_content
 from .vault import Vault
 from .hybrid_search import hybrid_search
 
@@ -70,7 +69,7 @@ def query_rag(vault: Vault, query_text: str) -> dict[str, Any]:
     context = "\n\n".join(context_parts)
 
     # 4. LLM 호출 시도
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    api_key = gemini_api_key()
     answer = ""
     used_llm = False
 

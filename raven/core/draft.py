@@ -1,7 +1,6 @@
 """raven.core.draft — AI-assisted Draft Generator 및 Commit 파이프라인."""
 from __future__ import annotations
 
-import os
 import json
 import sqlite3
 import re
@@ -9,7 +8,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .gemini_client import generate_content
+from .gemini_client import gemini_api_key, generate_content
 from .vault import Vault
 from .db import build_db
 
@@ -40,7 +39,7 @@ def generate_draft(
     drafts_dir = vault.root / "drafts"
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    api_key = gemini_api_key()
     used_llm = False
     title = topic
     tags = ["draft"]

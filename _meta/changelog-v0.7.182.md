@@ -1226,3 +1226,24 @@ Desktop MCP 포트 검사 `_port_is_free(host, port)`는 #22 이전 API 검사�
   - IPv6는 다루지 않는다(MCP 소켓은 IPv4 전용).
   - 로컬에 없는 광고 주소는 claim 단계 사전 probe에서 API only가 되지만, 경고 문구는 "already in use or answered by another server"로 나온다(동작은 안전, 문구만 부정확).
   - Linux는 Docker linuxkit + root만 확인했다. 다른 배포판·다른 UID 조합과 Windows는 **UNKNOWN**.
+
+## 55. Gemini 호출에 `GEMINI_API_KEY`만 사용 — 다른 서비스 키의 Google 전송 차단 (Issue #47)
+
+Gemini를 호출하는 5개 기능(태그 추천 `tagger`, RAG 답변 `rag`, AI 조언 `ai_advice`, 모순 탐지 `contradiction`, 초안 생성 `draft`)은 각자 `GEMINI_API_KEY` → `OPENAI_API_KEY` → `API_KEY` 순서로 키를 골라 `generativelanguage.googleapis.com`에 `x-goog-api-key` 헤더로 보냈다. `GEMINI_API_KEY`가 없으면 **OpenAI 키나 이름이 범용인 `API_KEY`(다른 도구가 설정한 값일 수 있음)가 Google로 전송됐다.** 인증이 실패해도 키는 이미 나간 뒤다. 저장소에 OpenAI를 호출하는 코드는 없다.
+
+- **수정**:
+  - `raven/core/gemini_client.py::gemini_api_key()`: 키 선택을 이 한 곳으로 모았다. `GEMINI_API_KEY`만 읽고, 비어 있거나 공백뿐이면 None.
+  - 5개 호출부는 각자 환경 변수를 읽지 않고 `gemini_api_key()`를 쓴다. 키가 없으면 지금처럼 요청 없이 비-LLM fallback으로 동작한다.
+  - Google 공식 별칭 `GOOGLE_API_KEY`도 읽지 않는다(키 이름 하나로 범위를 고정).
+  - 모델, payload, timeout, 헤더 인증 방식(#20), 응답 파싱, fallback 내용은 바뀌지 않았다. 새 의존성 없음.
+- **호환성 변경**: `OPENAI_API_KEY`나 `API_KEY`만 설정해 Gemini 기능을 써 왔다면, 이제 5개 기능이 fallback 결과(`used_llm: false`, AI 조언은 템플릿 문구)를 낸다. Gemini를 계속 쓰려면 같은 값을 `GEMINI_API_KEY`로 설정한다. README 환경 변수 표에 명시했다(`GOOGLE_API_KEY`도 쓰지 않음).
+- **독립 리뷰**: 남은 전송 경로·호출부 회귀·테스트 공허 통과 여부를 별도 리뷰로 확인했다. blocker 없음. 지적 3건(공백 키, 검사 범위를 `raven/` 전체로, README에 `GOOGLE_API_KEY` 명시)을 반영했다.
+- **검증** (가짜 키, httpx 전송 계층 `HTTPTransport.handle_request`에서 모든 요청 기록):
+  - master `785bd07`: 5개 기능 × `OPENAI_API_KEY`·`API_KEY` 단독 10가지 모두 Google로 요청이 나갔다(헤더에 그 키 값).
+  - 수정 후: 같은 10가지와 `GOOGLE_API_KEY` 단독 5가지에서 나가는 HTTP 요청 0건, 각 기능은 fallback 결과. `GEMINI_API_KEY`가 비어 있거나 공백뿐이어도 같다.
+  - 네 키를 모두 설정하면 기능마다 요청 1건, 대상은 `generativelanguage.googleapis.com`, 헤더 값은 `GEMINI_API_KEY`, URL·본문에 어떤 키도 없음, LLM 결과가 반영된다(`used_llm: true`).
+  - `raven/` 전체에서 키 환경 변수를 읽는 곳은 `gemini_client.py`뿐임을 테스트로 고정.
+  - `tests/test_gemini_key_scope.py` 24건 추가. master 코드에서 14건 실패(공백 키 경우 포함).
+- **잔여 위험**:
+  - 이미 Google로 전송된 적 있는 `OPENAI_API_KEY`/`API_KEY`는 이 수정으로 회수되지 않는다. 그런 설정으로 AI 기능을 쓴 적이 있다면 해당 키 교체를 권한다.
+  - 프로세스 밖(셸 프로필, launchd plist 등)의 기존 설정은 바꾸지 않는다.

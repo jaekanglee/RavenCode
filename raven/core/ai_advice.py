@@ -1,10 +1,9 @@
 """raven.core.ai_advice — LLM 연동을 통한 지식 네트워크 진단 맞춤형 조언 생성 모듈."""
 from __future__ import annotations
 
-import os
 import json
 from typing import Any, List, Dict
-from .gemini_client import generate_content
+from .gemini_client import gemini_api_key, generate_content
 from .vault import Vault
 from .advice import get_advice
 
@@ -17,7 +16,7 @@ def generate_ai_advice(vault: Vault) -> List[Dict[str, Any]]:
         return []
 
     # API key 확인 (vendor neutrality 준수)
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    api_key = gemini_api_key()
     
     if api_key:
         try:

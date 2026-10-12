@@ -6,7 +6,7 @@ import json
 import sqlite3
 import re
 from typing import Any, List, Optional
-from .gemini_client import generate_content
+from .gemini_client import gemini_api_key, generate_content
 from .vault import Vault
 
 def suggest_tags(vault: Vault, content: str, title: Optional[str] = None) -> dict[str, Any]:
@@ -24,7 +24,7 @@ def suggest_tags(vault: Vault, content: str, title: Optional[str] = None) -> dic
             conn.close()
 
     # 2. LLM 호출 시도
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    api_key = gemini_api_key()
     tags = []
     used_llm = False
 
