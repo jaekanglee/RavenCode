@@ -1247,3 +1247,29 @@ Gemini를 호출하는 5개 기능(태그 추천 `tagger`, RAG 답변 `rag`, AI 
 - **잔여 위험**:
   - 이미 Google로 전송된 적 있는 `OPENAI_API_KEY`/`API_KEY`는 이 수정으로 회수되지 않는다. 그런 설정으로 AI 기능을 쓴 적이 있다면 해당 키 교체를 권한다.
   - 프로세스 밖(셸 프로필, launchd plist 등)의 기존 설정은 바꾸지 않는다.
+
+## 56. 경로를 받거나 vault를 지우는 API는 이 PC에서만 (Issue #15)
+
+`_require_loopback`(소켓 loopback + 로컬 Origin 화이트리스트)은 백업 내보내기·가져오기 2곳에만 붙어 있었다. 앱 전체 게이트(TokenGate, #14)는 유효한 Bearer 토큰을 가진 원격 클라이언트를 통과시키므로, LAN·tailnet 기기가 토큰 하나로 서버 PC의 임의 경로에 vault를 만들고, 등록하고, 복제하고, 정적 사이트를 내보내고, vault를 디스크에서 지울 수 있었다(격리 재현, master `ec1f67b`: 원격 Bearer, vite 프록시를 거친 tailnet, loopback 소켓 + 외부 Origin 모두 통과).
+
+- **수정** (`raven/api/server.py`):
+  - 기준: 서버 PC의 **임의 경로를 받는** 작업과 데이터를 **복구할 수 없게 지우는** 작업은 이 PC에서만. 아래 8곳에 `_require_loopback`을 적용했다. 핸들러 첫 줄에서 검사해 404 등 다른 판정보다 먼저 거부한다.
+    - 경로를 받는 API: `POST /api/vaults`(생성), `POST /api/vaults/register`, `POST /api/vaults/{name}/workspace`, `POST /api/vaults/{name}/repair`, `POST /api/vaults/{name}/clone`, `POST /api/vaults/{name}/export`(`out_dir`를 줄 때만)
+    - 복구 불가 삭제: `DELETE /api/vaults/{name}?force=true`, `POST /api/vaults/{name}/archive/clean?apply=true`
+  - 원격 Bearer 토큰으로 우회할 수 없다. TokenGate가 `scope["client"]`를 실효 출처로 바꿔 두므로 vite 프록시(xfwd)를 거친 tailnet 요청, strict 모드의 `unknown` 출처도 비-loopback이다.
+  - 거부 문구를 백업 전용에서 일반 문구로 바꿨다("서버 PC의 경로를 지정하거나 vault를 지우는 작업은 이 PC에서만 할 수 있습니다").
+  - 독립 리뷰에서 찾은 결함: `PUT /api/vaults/{name}`(이름 변경)이 새 이름을 검증하지 않아 `../x`나 절대경로로 vault 디렉터리를 서버의 임의 위치로 옮길 수 있었다. 새 이름은 같은 폴더 안의 디렉터리 이름만 허용하고(구분자·`.`·`..`·절대경로 400), 이미 있는 디렉터리 위로는 옮기지 않는다(409, POSIX rename은 빈 디렉터리를 조용히 교체한다). 이름 변경 자체는 원격에서도 그대로 된다.
+  - 읽기 전용 API, 전면 인증, MCP 인증 정책은 바꾸지 않았다.
+- **원격에 그대로 열어 둔 것** (TokenGate 인증, 원격 Dashboard·MCP와 같은 vault 안 편집):
+  - 페이지 생성·수정·삭제. 페이지 삭제는 `_archive/`로 옮기는 복구 가능한 삭제이고 slug는 vault 안으로 검증된다. MCP의 같은 동작과 같은 경로다.
+  - `DELETE /api/vaults/{name}?force=false`(등록 해제만, 페이지가 있으면 409 그대로), `archive/clean?apply=false`(미리보기), `export`(기본 위치), 이름 변경(같은 폴더 안), 폴더 생성, raw·draft·feedback 편집.
+- **호환성 변경**: 원격 Dashboard(tailnet·LAN 브라우저, Docker dashboard 프록시)에서는 위 8개 작업이 403으로 막힌다. 백업이 이미 그랬던 것과 같다. 같은 PC에서도 Dashboard를 LAN·tailnet 주소(예: `http://100.x:5173`)로 열면 Origin이 로컬이 아니어서 막힌다 — 데스크톱 앱, `http://localhost:5173`, CLI를 쓴다. `tests/test_spa_server_auth.py`의 CSRF 검사 표본을 vault 삭제에서 vault 안 폴더 생성으로 바꾸고, 프록시를 거친 `force=true` 삭제는 같은 Origin이어도 403임을 함께 확인한다.
+- **검증**:
+  - `tests/test_api_local_only_guard.py` 145건: 8개 endpoint × (로컬 허용 Origin 6종 정상 동작·실제 반영 / 원격 Bearer 403·변경 없음 / 토큰 없는 원격 401 / vite 프록시 경유 tailnet 403 / strict 모드 `unknown` 403 / loopback 소켓 + 외부 Origin 6종 403·문구 확인), IPv6·IPv4-mapped·`127.0.0.2` loopback 허용, `force=false` 409 유지, `apply=false`·기본 export·페이지 쓰기·삭제는 원격 인증으로 유지, 이름 변경 경로 탈출 6종 400·기존 디렉터리 409·일반 이름 변경 유지. master 코드에서 80건 실패.
+  - 기존 백업 가드(`test_api_backup.py`), TokenGate 프록시 판정(`test_core_api_forwarded.py`) 회귀 없음.
+- **잔여 위험**:
+  - raw 파일 삭제(`DELETE .../raw/{path}`)와 draft 삭제는 vault 안의 단일 파일 hard delete이며 원격 인증 클라이언트에 열려 있다(raw의 `X-Actor`는 식별용 헤더이지 인증이 아니다). vault 안 편집으로 분류해 이번에는 막지 않았다.
+  - `POST /api/debug-log`의 무제한 append는 #19 범위.
+  - Origin 검사는 `tauri://` 스킴이면 호스트를 보지 않는다(브라우저가 이 스킴을 위조할 수 없어 실제 피해 없음).
+  - Origin이 없는 비브라우저 요청은 소켓·프록시 판정만으로 통과한다 — 앞단 로컬 프록시가 X-Forwarded-For를 붙여야 한다(`access.py`에 문서화된 기존 전제).
+  - Dashboard의 archive 정리는 403일 때 상태 코드만 보여 준다(문구 표시는 Dashboard 변경이라 범위 밖).

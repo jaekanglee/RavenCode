@@ -501,8 +501,9 @@ class WorkspacePayload(BaseModel):
 
 
 @app.post("/api/vaults/{name}/workspace")
-def associate_workspace(name: str, payload: WorkspacePayload):
-    """Associate or unlink a workspace directory with a vault."""
+def associate_workspace(name: str, payload: WorkspacePayload, request: Request):
+    """Associate or unlink a workspace directory with a vault. loopback 전용 (#15)."""
+    _require_loopback(request)
     meta = registry().get(name)
     if not meta:
         raise HTTPException(status_code=404, detail=f"vault {name!r} not found")
@@ -726,8 +727,9 @@ class VaultCreate(BaseModel):
 
 
 @app.post("/api/vaults")
-def create_vault(payload: VaultCreate):
-    """Create and register a plain Markdown vault."""
+def create_vault(payload: VaultCreate, request: Request):
+    """Create and register a plain Markdown vault. loopback 전용 (#15)."""
+    _require_loopback(request)
     from raven.core.vault import Vault as _Vault
 
     # Validate: name not already taken
@@ -780,8 +782,9 @@ def create_vault(payload: VaultCreate):
         },
     }
 @app.post("/api/vaults/register")
-def register_vault(payload: VaultRegister):
-    """Register an existing folder as a vault (no file changes)."""
+def register_vault(payload: VaultRegister, request: Request):
+    """Register an existing folder as a vault (no file changes). loopback 전용 (#15)."""
+    _require_loopback(request)
     from raven.core.registry import VaultMeta
     p = Path(payload.path).expanduser().resolve()
     if not p.exists() or not p.is_dir():
@@ -1729,8 +1732,16 @@ def rename_vault(name: str, payload: VaultRename):
     if reg.get(new_name):
         raise HTTPException(status_code=409, detail=f"vault {new_name!r} already exists")
 
+    # #15 review: the new name is a directory name next to the old one, never a
+    # path — "../x" or an absolute name would move the vault anywhere on the server.
+    if "/" in new_name or "\\" in new_name or new_name in (".", "..") or Path(new_name).is_absolute():
+        raise HTTPException(status_code=400, detail=f"invalid new name: {new_name!r}")
     old_root = v.root
     new_root = old_root.parent / new_name
+    if new_root.parent != old_root.parent:
+        raise HTTPException(status_code=400, detail=f"invalid new name: {new_name!r}")
+    if new_root.exists():  # rename() would silently replace an empty directory
+        raise HTTPException(status_code=409, detail=f"{new_root} already exists")
 
     # 1. rename directory on disk
     try:
@@ -1763,7 +1774,7 @@ class VaultRepairPath(BaseModel):
 
 
 @app.post("/api/vaults/{name}/repair")
-def repair_vault_path(name: str, payload: VaultRepairPath):
+def repair_vault_path(name: str, payload: VaultRepairPath, request: Request):
     """Fix a vault's registered path without touching any files.
 
     Use when `.registry.json` points at a path that doesn't resolve in the
@@ -1775,7 +1786,9 @@ def repair_vault_path(name: str, payload: VaultRepairPath):
     `payload.path` must be resolvable by this process (same convention as
     `vault register`/`vault clone`) — when running via Docker, that means
     the container-internal path under WIKI_VAULTS_DIR, not the host path.
+    loopback 전용 (#15) — 등록 경로를 서버 PC의 임의 디렉터리로 바꾼다.
     """
+    _require_loopback(request)
     reg = registry()
     if reg.get(name) is None:
         raise HTTPException(status_code=404, detail=f"vault {name!r} not found")
@@ -1900,7 +1913,7 @@ def crosslink_resolve(name: str, payload: CrosslinkRequest):
 
 
 @app.delete("/api/vaults/{name}")
-def delete_vault(name: str, force: bool = False):
+def delete_vault(name: str, request: Request, force: bool = False):
     """Delete (unregister) a vault.
 
     Default behavior (force=False):
@@ -1910,8 +1923,11 @@ def delete_vault(name: str, force: bool = False):
     force=True:
         - removes the entire directory recursively (DESTRUCTIVE)
         - use with care
+        - loopback 전용 (#15). force=False(등록 해제만, 페이지가 있으면 409)는 그대로.
     """
     import shutil
+    if force:
+        _require_loopback(request)
     meta = registry().get(name)
     if not meta:
         raise HTTPException(status_code=404, detail=f"vault {name!r} not found")
@@ -2375,7 +2391,7 @@ class VaultClone(BaseModel):
 
 
 @app.post("/api/vaults/{name}/clone")
-def clone_vault(name: str, payload: VaultClone):
+def clone_vault(name: str, payload: VaultClone, request: Request):
     """Clone the vault named in the path (content + _meta) to a new vault.
 
     Skips _archive/ and wiki.db. The new vault is registered automatically.
@@ -2384,7 +2400,9 @@ def clone_vault(name: str, payload: VaultClone):
     (`POST /api/vaults/clone` → `POST /api/vaults/{name}/clone`), matching the
     v0.7.68 `POST /api/vaults/create` → `POST /api/vaults` correction — an
     action must not be a path segment.
+    loopback 전용 (#15) — 새 vault 경로를 서버 PC의 임의 디렉터리로 받는다.
     """
+    _require_loopback(request)
     src_meta = registry().get(name)
     if src_meta is None:
         raise HTTPException(status_code=404, detail=f"source vault {name!r} not found")
@@ -2429,9 +2447,15 @@ class BackupImportRequest(BaseModel):
     src_path: str = Field(..., description="가져올 백업 .zip 절대경로 (이 PC 기준)")
 
 
+_LOCAL_ONLY_DETAIL = "서버 PC의 경로를 지정하거나 vault를 지우는 작업은 이 PC에서만 할 수 있습니다"
+
+
 def _require_loopback(request: Request) -> None:
-    """경로를 받는 API는 같은 PC(loopback)에서만. API가 0.0.0.0에 바인딩돼 있어
-    내부망/tailnet 기기가 서버 PC의 임의 경로에 쓰거나 읽게 두면 안 된다.
+    """경로를 받는 API와 vault를 지우는 API는 같은 PC(loopback)에서만 (#15).
+    API가 0.0.0.0에 바인딩돼 있어 내부망/tailnet 기기가 서버 PC의 임의 경로에 쓰거나
+    읽거나, vault를 디스크에서 지우게 두면 안 된다. 원격 Bearer 토큰으로도 통과하지
+    못한다 — TokenGate가 ``scope["client"]``를 실효 출처로 바꿔 두므로 vite 프록시(xfwd)를
+    거친 tailnet 요청도 여기서는 비-loopback이다.
     request.client — uvicorn은 127.0.0.1 프록시가 붙인 X-Forwarded-For만 반영한다
     (기본 forwarded_allow_ips). Vite 프록시는 xfwd로 실제 LAN IP를 넘긴다.
     FORWARDED_ALLOW_IPS를 넓히면 이 검사가 무력화된다."""
@@ -2443,7 +2467,7 @@ def _require_loopback(request: Request) -> None:
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
     if addr is None or not addr.is_loopback:
-        raise HTTPException(status_code=403, detail="백업 내보내기·가져오기는 이 PC에서만 할 수 있습니다")
+        raise HTTPException(status_code=403, detail=_LOCAL_ONLY_DETAIL)
 
     # 소켓이 loopback이어도 브라우저 Origin은 못 믿는다 — CORS 허용 목록(위 _cors_origin_regex)은
     # Tailscale/사설 LAN 대역을 통째로 허용하고, Vite 개발 프록시(xfwd: true)가 실제 LAN IP를
@@ -2458,7 +2482,7 @@ def _require_loopback(request: Request) -> None:
             "localhost", "127.0.0.1", "::1", "tauri.localhost",
         }
         if not allowed:
-            raise HTTPException(status_code=403, detail="백업 내보내기·가져오기는 이 PC에서만 할 수 있습니다")
+            raise HTTPException(status_code=403, detail=_LOCAL_ONLY_DETAIL)
 
 
 def _require_absolute(raw: str) -> Path:
@@ -2513,10 +2537,13 @@ def list_archive(name: str, older_than: int = Query(0, description="only show en
 @app.post("/api/vaults/{name}/archive/clean")
 def clean_archive(
     name: str,
+    request: Request,
     older_than: int = Query(30, description="delete entries older than N days (0=all)"),
     apply: bool = Query(False, description="actually delete (default: dry-run)"),
 ):
-    """Delete old archived files. Dry-run by default."""
+    """Delete old archived files. Dry-run by default. apply=True는 loopback 전용 (#15)."""
+    if apply:
+        _require_loopback(request)
     v = _vault_or_404(name)
     result = archive_module.clean_archived(v, older_than_days=older_than, apply=apply)
     return result.to_dict() | {"vault": name}
@@ -2833,7 +2860,9 @@ def build(name: str):
 
 
 @app.post("/api/vaults/{name}/export")
-def export(name: str, out_dir: Optional[str] = None):
+def export(name: str, request: Request, out_dir: Optional[str] = None):
+    if out_dir:
+        _require_loopback(request)  # #15: 서버 PC의 임의 디렉터리에 쓴다
     v = _vault_or_404(name)
     target = Path(out_dir) if out_dir else None
     result = export_module.export_static(v, out_dir=target)
