@@ -1557,3 +1557,46 @@ Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 
   - loopback 이름으로 서빙되는 다른 로컬 웹 앱의 페이지(같은 PC의 `http://localhost:3000` 등)는 여전히 토큰 없이 호출할 수 있다. loopback 프로세스 신뢰와 같은 부류다.
   - `Sec-Fetch-Site`를 보내지 않는 오래된 브라우저에서는 Origin 없는 cross-site GET이 여전히 실행된다(응답은 읽지 못함). rebinding은 Host로 막힌다.
   - 실제 DNS rebinding 브라우저 재현과 수정 후 브라우저 실측은 **UNKNOWN**이다.
+
+## 64. 데스크톱 webview CSP 도입·ATS 예외 축소·vault 페이지 raw HTML 정화 (Issue #17)
+
+데스크톱 webview에는 CSP가 없었고(`csp: null`), 앱 전체에 ATS 예외(`NSAllowsArbitraryLoads`)가 걸려 있었다. 감사 기록은 "악용 가능한 sink 없음, 마크다운은 `skipHtml` 기본값에 의존"이었다. 이 작업 중 그 전제가 틀렸음을 확인했다.
+
+- **발견 — vault 페이지의 raw HTML이 그대로 렌더링됐다**:
+  - `MDEditor.Markdown`(`@uiw/react-md-editor` 4.1.1 → `@uiw/react-markdown-preview` 5.2.1)의 기본 진입점은 `skipHtml`과 무관하게 항상 `rehype-raw`를 넣는다. 거르는 것은 태그 이름 정규식(`/^[A-Za-z0-9]+$/`)뿐이었다.
+  - jsdom 렌더링: `<iframe srcdoc>`, `<iframe src>`, `<embed>`, `<object>`, `<form>`, `<base>`, `<style>`, `style=` 속성이 DOM에 남았다. 이벤트 핸들러 속성과 `javascript:` URL은 React가 막았다.
+  - **실제 데스크톱 앱**(수정 전 설정으로 만든 격리 빌드): vault 페이지의 `<iframe srcdoc="<script>…</script>">` 스크립트가 **앱 origin으로 실행됐다**(부모 창 변수에 접근). `<embed>`와 화면 전체를 덮는 `style` 오버레이도 렌더링됐다. vault 페이지는 사람·동기화·MCP 에이전트가 쓰므로 신뢰할 수 있는 마크업이 아니다.
+- **수정 1 — raw HTML 정화** (`dashboard/src/lib/markdown-safety.ts`, 신규 의존성 없음):
+  - 모든 `MDEditor.Markdown`(보기·편집 미리보기 3곳)에 `SAFE_MARKDOWN_PROPS`를 준다.
+  - `allowElement`: Markdown/GFM이 만드는 요소, 라이브러리의 복사·앵커 아이콘, 무해한 HTML(`details`, `kbd`, `sub`, `mark`, `br` 등)만 남기고 나머지는 내용째 버린다. `<input>`은 GFM 체크박스만.
+  - `rehypeRewrite`와 **마지막 rehype 플러그인**: `on*`, `style`, `srcdoc`, `action`/`formaction`, `target`/`download`/`autoplay` 등을 지우고, URL 속성은 http(s)·mailto·tel·상대 경로만 남긴다(이미지는 래스터 `data:`도). 제어문자를 섞은 `javascript:`도 거른다.
+  - 마지막 플러그인이 필요한 이유(독립 리뷰 BLOCKER): 라이브러리는 `rehypeRewrite` **뒤에** `rehype-attr`를 돌린다. 이것은 페이지의 `<!--rehype:style=…&href=…-->` 주석을 앞 요소의 속성으로 옮긴다. 그래서 `rehypeRewrite`만으로는 화면을 덮는 `style`과 `href` 교체가 되살아났다. 사용자 `rehypePlugins`는 그 뒤에 돌므로 여기서 한 번 더 정화한다. 요소 필터(`allowElement`)는 모든 플러그인 뒤에 적용된다.
+  - `skipHtml: true`를 명시했다(라이브러리 기본값 변경에 기대지 않음). 위의 이유로 이것만으로는 부족해 정화가 본체다.
+- **수정 2 — webview CSP** (`desktop/src-tauri/tauri.conf.json`):
+  - `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: http: https:; media-src …; connect-src 'self' ipc: http://ipc.localhost http: https: ws: wss:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'`.
+  - `script-src`는 `'self'`만이다. `unsafe-inline`·`unsafe-eval` 없음. `index.html`의 인라인 테마 스크립트는 `public/boot-theme.js`로 옮겼다.
+  - `style-src 'unsafe-inline'`은 남겼다: 라이브러리가 실행 중에 `<style>`을 넣고, React 인라인 스타일도 쓴다. Tauri가 style-src에 해시를 더하면 브라우저가 `'unsafe-inline'`을 무시하므로 `dangerousDisableAssetCspModification: ["style-src"]`로 그 수정만 끈다. 스크립트에는 해당하지 않는다.
+  - `connect-src`·`img-src`의 `http:`/`https:`: 사용자가 등록하는 다른 Raven 호스트(tailnet·LAN의 임의 주소)와 그 이미지에 필요하다.
+  - `devCsp`는 vite 개발 서버(HMR 인라인 스크립트) 때문에 `script-src`만 `'unsafe-inline' 'unsafe-eval'`을 더한다. 배포 빌드에는 쓰이지 않는다.
+- **수정 3 — ATS 축소** (`desktop/src-tauri/Info.plist`): `NSAllowsArbitraryLoads` → `NSAllowsLocalNetworking`(loopback, IP 주소, 점 없는 이름, `.local`) + `ts.net` 예외(Tailscale MagicDNS, 평문 HTTP 허용). 그 밖의 호스트는 HTTPS가 필요하다.
+  - **호환성 변경**: 점이 있는 사설 이름을 평문 HTTP로 쓰던 호스트 등록 — `nas.lan`, `*.home.arpa`, `*.internal`, 공유기 DNS 접미사, Headscale 등 `ts.net`이 아닌 MagicDNS 도메인 — 은 이제 일반 네트워크 오류로 실패한다. IP 주소나 `.local`·점 없는 이름으로 등록하거나 HTTPS를 쓴다.
+- **실제 앱 검증** (scratch에만 둔 별도 identifier `.app` 번들 2개, 실제 셸 + 실제 Core + 격리 HOME·vault, 같은 probe 스크립트):
+
+  | 항목 | 수정 전 설정 | 수정 후 |
+  |---|---|---|
+  | vault 페이지 `<iframe srcdoc><script>` | 실행됨, iframe 1·embed 1·overlay 1 | iframe·embed·overlay 0, 실행 안 됨 |
+  | 리뷰에서 찾은 `<!--rehype:style=…-->` 주석(화면 덮개) | — | 마지막 플러그인 추가 후 다시 만든 앱에서 `style` 속성 0, CSP 위반 0, 내보내기 정상 |
+  | 인라인 `<script>` / srcdoc 스크립트 / `eval` (probe가 직접 시도) | 모두 실행 | 모두 차단(CSP 위반 보고) |
+  | 대시보드 경로 8곳(홈·검색·그래프·로그·린트·정원·관리·페이지) | — | 앱 자체의 CSP 위반 0, 테마 스크립트 동작, 페이지 렌더링 |
+  | 내보내기(공유 → Markdown 저장) | 저장됨 | 저장됨(격리 HOME의 Downloads) |
+  | ATS: `127.0.0.1`·`localhost`·LAN IP·`<이름>.local` | 200 | 200 |
+  | ATS: 공개 도메인 평문 HTTP(`localtest.me`, 127.0.0.1로 해석) | 200 | 차단 |
+- **검증**:
+  - dashboard: `src/lib/markdown-safety.test.tsx` 33건 신규(위험 요소 15종 제거, 위험 속성·URL 14종 제거 — rehype-attr 주석 경로 포함, 일반 Markdown·GFM·위키링크·코드 복사 버튼·이미지·`details` 등 유지, 링크 대상 유지, 모든 `MDEditor.Markdown`에 적용됐는지 소스 검사). vitest 568 passed, `tsc -b` 통과. 마지막 플러그인을 빼면 신규 테스트 4건이 실패한다.
+  - Rust: `webview_csp_is_set_and_scripts_stay_self_only`(csp가 null이 아님, script-src `'self'`만, `unsafe-eval`·와일드카드 없음, `unsafe-inline`은 style-src에만, object/frame/base/form 제한, `index.html`에 인라인 스크립트 없음), `ats_allows_local_networking_not_arbitrary_loads`. `cargo test` 80 passed.
+- **독립 리뷰**: BLOCKER 1건(rehype-attr 주석으로 속성 복원)을 마지막 플러그인으로 고쳤다. should-fix 2건(점 있는 사설 이름의 ATS 실패 문서화, changelog 주장 정정)과 nit 4건(`target`·`download`·`autoplay` 제거, Rust 테스트의 인라인 스크립트 검사 강화·plist 공백 무관 비교)을 반영했고, 재검토에서 blocker·should-fix 없이 확인됐다. 원본 HTML의 `id`·`class`는 남는다(앱 스타일을 빌릴 수 있으나 스크립트는 아님 — 헤딩 앵커·코드 강조가 같은 속성을 쓴다).
+- **잔여 위험·UNKNOWN**:
+  - `ts.net` 예외 경로(MagicDNS 이름으로 등록한 호스트)는 실제 tailnet을 쓰지 않고는 확인할 수 없어 **UNKNOWN**. 공개 도메인을 평문 HTTP로 등록해 쓰던 구성은 이제 HTTPS가 필요하다.
+  - `style-src 'unsafe-inline'`은 남는다(스크립트 실행은 아니고 스타일 주입). `connect-src http:`는 넓다 — 임의의 사용자 호스트 때문이다.
+  - Windows·Linux webview의 CSP 동작은 **UNKNOWN**(macOS WKWebView만 실측). 정화는 플랫폼과 무관하다.
+  - 업데이트 서명 등 배포 번들 경로는 검증하지 않았다(scratch 번들은 `createUpdaterArtifacts: false`, 미서명).
