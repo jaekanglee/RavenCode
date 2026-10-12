@@ -1152,7 +1152,10 @@ mod tests {
         assert_eq!(security["dangerousDisableAssetCspModification"], serde_json::json!(["style-src"]));
         // The bundled page has no inline script that would need one.
         let index = include_str!("../../../dashboard/index.html");
-        assert!(!index.contains("<script>"), "inline <script> in dashboard/index.html");
+        for tag in index.split("<script").skip(1) {
+            let open = &tag[..tag.find('>').expect("unterminated <script")];
+            assert!(open.contains("src="), "inline <script{open}> in dashboard/index.html");
+        }
     }
 
     /// Issue #17: no app-wide ATS exception — plain HTTP only to local networks and MagicDNS.
@@ -1162,8 +1165,9 @@ mod tests {
         for key in ["NSAllowsArbitraryLoads", "NSAllowsArbitraryLoadsInWebContent", "NSAllowsArbitraryLoadsForMedia"] {
             assert!(!plist.contains(&format!("<key>{key}</key>")), "{key} is back");
         }
-        assert!(plist.contains("<key>NSAllowsLocalNetworking</key>\n\t\t<true/>"));
-        assert!(plist.contains("<key>ts.net</key>"));
+        let compact: String = plist.split_whitespace().collect();
+        assert!(compact.contains("<key>NSAllowsLocalNetworking</key><true/>"));
+        assert!(compact.contains("<key>ts.net</key>"));
     }
 
     #[test]

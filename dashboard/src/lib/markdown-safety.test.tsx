@@ -46,6 +46,10 @@ describe("raw HTML in vault pages (Issue #17)", () => {
     ["data html href", '<a href="data:text/html,x">l</a>', "a", "href"],
     ["svg data image", '<img src="data:image/svg+xml,<svg/>">', "img", "src"],
     ["javascript in markdown link", "[m](javascript:alert(1))", "a", "href"],
+    ["target and download", '<a href="https://x.example" target="_blank" download="f">l</a>', "a", "target"],
+    ["style via a rehype-attr comment", "click\n<!--rehype:style=position:fixed;inset:0;background:red-->", "p", "style"],
+    ["href via a rehype-attr comment", "[l](https://x.example)<!--rehype:href=data:text/html,x&target=_blank-->", "a", "target"],
+    ["srcset via a rehype-attr comment", "![i](https://x.example/a.png)<!--rehype:srcset=javascript:x-->", "img", "srcset"],
   ])("removes %s", (_name, source, tag, attribute) => {
     const element = dom(source).querySelector(tag);
     expect(element).not.toBeNull();
@@ -89,6 +93,11 @@ describe("raw HTML in vault pages (Issue #17)", () => {
     for (const tag of ["details", "summary", "mark", "kbd", "sub", "sup", "br", "strong"]) {
       expect(page.querySelector(tag), tag).not.toBeNull();
     }
+  });
+
+  it("a rehype-attr comment cannot swap a link for an unsafe one", () => {
+    const link = dom("[l](https://x.example)<!--rehype:href=data:text/html,x-->").querySelector("a")!;
+    expect(link.getAttribute("href")).toBeNull();
   });
 
   it("keeps link targets people use", () => {

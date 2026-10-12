@@ -12,9 +12,11 @@
  *  - `allowElement`: only the elements Markdown/GFM produce, the library's own
  *    copy/anchor icons and a few harmless inline HTML elements survive; anything
  *    else is dropped with its content. `<input>` only as a GFM task checkbox.
- *  - `rehypeRewrite`: removes event handlers, `style`, `srcdoc`, form targets and
- *    any URL attribute whose scheme is not http(s)/mailto/tel/relative (images may
- *    also use raster `data:` URLs).
+ *  - `rehypeRewrite` + a last rehype plugin: remove event handlers, `style`, `srcdoc`,
+ *    form targets, `target`/`download`/`autoplay` and any URL attribute whose scheme is
+ *    not http(s)/mailto/tel/relative (images may also use raster `data:` URLs). The
+ *    last plugin also covers attributes the library adds after rehypeRewrite (its
+ *    rehype-attr reads `<!--rehype:…-->` comments in the page).
  *  - `skipHtml: true` is set explicitly (the library default) so a future default
  *    change cannot add another raw-HTML path.
  * React already refuses `javascript:` URLs and string event handlers; this does not
@@ -35,7 +37,9 @@ const ALLOWED_TAGS = new Set([
 ]);
 
 const URL_ATTRIBUTES = new Set(["href", "src", "srcset", "cite", "poster", "background", "longdesc", "xlinkhref"]);
-const DROPPED_ATTRIBUTES = new Set(["style", "srcdoc", "action", "formaction", "ping", "manifest", "is"]);
+const DROPPED_ATTRIBUTES = new Set([
+  "style", "srcdoc", "action", "formaction", "ping", "manifest", "is", "target", "download", "autoplay",
+]);
 const SAFE_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 const RASTER_DATA_URL = /^data:image\/(png|jpe?g|gif|webp|avif|bmp);/i;
 
@@ -76,8 +80,26 @@ export function allowElement(element: Element): boolean {
   return true;
 }
 
+function sanitizeTree(node: Root | RootContent | ElementContent): void {
+  sanitizeNode(node);
+  if ("children" in node && Array.isArray(node.children)) {
+    for (const child of node.children) sanitizeTree(child as RootContent);
+  }
+}
+
+/**
+ * The same sanitizer as a rehype plugin. The library runs its own plugins first —
+ * including rehype-attr, which copies `<!--rehype:style=…&href=…-->` comments in the
+ * page onto the element before them — and the `rehypePlugins` given here after them,
+ * so this pass sees every attribute that will reach the DOM (#17 review).
+ */
+export function rehypeSanitizeLast() {
+  return (tree: Root) => sanitizeTree(tree);
+}
+
 export const SAFE_MARKDOWN_PROPS = {
   skipHtml: true,
   allowElement,
   rehypeRewrite: sanitizeNode,
-} as const;
+  rehypePlugins: [rehypeSanitizeLast],
+};
