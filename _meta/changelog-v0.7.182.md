@@ -1435,7 +1435,7 @@ Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값�
   - Python: `tests/test_desktop_netwatch.py` 42건 신규(조회 7경우·DNS 없음·비정상 값·timeout·중복 조회 없음·예외 / attach 서빙·종료 시 해제·종료 중 거부·느린 attach 재사용 / 늦게 등장한 주소 보호 후 광고·사라짐·흔들림·조회 실패·점유(macOS)·응답 확인 실패·미할당·즉시 철회·비정상 조회값 / rebind 3경우·흔들림·조회 실패 / 스레드 정지·예외 생존·유휴 tick 수·routing 메시지 필터 / 이벤트 채널 끊김·stdout 분리 / 실제 Core 종단 간 2건·standalone `null`). 기존 테스트 2건은 조회 함수가 바뀌어 patch 대상만 바꿨다.
   - 변형 검사: guard 생략, 보호 전 광고, 조회 실패를 "없음"으로 처리, stdout 분리 생략, rebind debounce 생략, 비정상 조회값 허용, 늦은 attach 재사용 생략 — 각각 신규 테스트가 실패한다.
   - 전체 pytest(macOS): 2243 passed, 2 failed(기존 실패 `closed_stderr_pipe`·`test_no_candidates_is_not_an_error`).
-  - Linux Docker pytest(`test_desktop_netwatch`·`test_desktop_runtime`·`test_mcp_lan_token_auth`·`test_core_api_access`): 수정본 205 passed, 6 skipped, 1 failed(같은 기존 실패). master는 같은 3개 파일에서 165 passed, 1 failed(같음).
+  - Linux Docker pytest(`test_desktop_netwatch`·`test_desktop_runtime`·`test_mcp_lan_token_auth`·`test_core_api_access`): 수정본 205 passed, 7 skipped(Linux에는 guard 소켓이 없어 해당 경로가 없음), 1 failed(같은 기존 실패). master는 같은 3개 파일에서 165 passed, 1 failed(같음).
   - Rust `cargo test`(macOS): 78 passed(신규 13: 이벤트 파싱 2·relay 2·endpoint 갱신·교체된 Core 무시·경고·재시작 간격·backoff·저장 전 이벤트 대기·실패 안내·Core 일치·구조). `cargo clippy` 신규 경고 없음.
   - dashboard: `network-status.test.ts` 6건, vitest 535 passed, `tsc -b` 통과.
 - **독립 리뷰**: blocker 없음. should-fix 2건(S1 기동 직후 경고 유실, S2 흔들림 시 무한 재시작)과 nit 4건(늦은 attach 중복, 첫 tick 예외 보호, 종료 순서 주석, API 경고 문구)을 반영했다. ssl factory 인자(데스크톱은 TLS 없음)는 반영하지 않았다.

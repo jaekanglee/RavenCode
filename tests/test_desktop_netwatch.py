@@ -410,6 +410,7 @@ def test_an_address_this_core_does_not_answer_is_not_advertised() -> None:
 
 
 @needs_lan
+@pytest.mark.skipif(not MACOS, reason="Linux takes no guard socket next to the wildcard (#49): nothing to attach")
 def test_a_slow_attach_is_awaited_not_repeated(monkeypatch) -> None:
     """A guard the server takes only after the timeout is used once it lands — never attached twice."""
     rig = _Rig(_Switch(None))
