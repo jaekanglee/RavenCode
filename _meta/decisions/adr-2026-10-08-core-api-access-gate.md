@@ -29,7 +29,7 @@ status: accepted
 | 그 외 (LAN, Docker bridge·gateway, IP가 아닌 값) | Bearer 토큰 필수. 발급 0개면 전부 401. 경로 예외 없음 |
 
 - **위치**: `raven/core/access.py::TokenGate`. `raven/api/server.py`가 CORS 안쪽에 한 번 설치한다. MCP의 `LanTokenAuth`는 이 클래스를 상속한다. 거부된 요청은 핸들러에 닿지 않는다. http와 websocket 요청 모두 검사한다.
-- **프록시 헤더** (X-Forwarded-For / Forwarded / X-Real-IP):
+- **프록시 헤더** (X-Forwarded-For / Forwarded / X-Real-IP, #29부터 X-Client-IP·True-Client-IP·CF-Connecting-IP·Fastly-Client-IP·X-Cluster-Client-IP 포함 — `_FORWARDING_HEADERS`):
   - strict 모드(기본): 게이트가 서버 설정을 모르는 경우다. 이런 헤더가 붙은 요청은 출처 신뢰를 받지 못한다. uvicorn은 헤더가 있을 때만 출처를 바꾸고 헤더는 요청에 남으므로, 이 규칙은 `forwarded_allow_ips` 값과 무관하게 성립한다.
   - launcher 모드: Raven 실행기(`python -m raven.api`, 데스크톱 API·MCP)가 `serve_kwargs()`로 uvicorn을 `proxy_headers=False`로 띄운다. 이때 게이트가 XFF를 직접 읽되, loopback peer가 보낸 경우만 본다. 오른쪽부터 loopback hop을 건너뛰고, 처음 나오는 주소를 출처로 삼는다. 해석할 수 없는 항목이 있거나 peer가 loopback이 아니면 신뢰하지 않는다.
   - **개정 (2026-10-12, #29)**: launcher 모드에서도 XFF 외의 출처 헤더(Forwarded, X-Real-IP, X-Client-IP, True-Client-IP, CF-Connecting-IP, Fastly-Client-IP, X-Cluster-Client-IP)가 하나라도 있으면 XFF와 함께 와도 출처를 알 수 없는 것으로 보고 토큰을 요구한다. 클라이언트의 XFF를 그대로 넘기고 실제 주소는 X-Real-IP에만 쓰는 프록시(예: nginx `proxy_set_header X-Real-IP $remote_addr;`만 쓴 구성)를 거치면 `X-Forwarded-For: 127.0.0.1`로 loopback을 사칭할 수 있었다. 지원 프록시(vite `xfwd`: XFF와 X-Forwarded-Port/-Proto/-Host만 보냄, `spa_server`: 클라이언트의 출처 헤더를 모두 버리고 XFF를 새로 씀)는 이 조합을 보내지 않는다.

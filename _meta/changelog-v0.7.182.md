@@ -1489,7 +1489,7 @@ launcher 모드(`python -m raven.api`, 데스크톱 API·MCP)의 게이트는 lo
   - vite dev 서버(대시보드와 같은 `changeOrigin`·`xfwd` 설정, scratch config로 격리 포트에 연결)가 보내는 헤더는 `X-Forwarded-For`, `X-Forwarded-Port`, `X-Forwarded-Proto`, `X-Forwarded-Host`뿐이다. 클라이언트가 보낸 X-Real-IP는 그대로 넘긴다.
   - vite 경유 loopback 클라이언트는 수정 전후 모두 200, LAN 클라이언트는 401(XFF로 127.0.0.1을 넣어도 vite가 실제 주소를 덧붙여 401).
   - 변경점: loopback 클라이언트가 vite를 거치며 직접 `X-Real-IP` 같은 헤더를 붙이면 이제 토큰이 필요하다. 브라우저와 대시보드는 이런 헤더를 보내지 않는다.
-  - `spa_server`: 기존 테스트 통과, 새 헤더도 업스트림에서 빠진다.
+  - `spa_server`: 기존 테스트 통과, 새 헤더도 업스트림에서 빠진다(strip 테스트에 5종 추가).
 - **수정 후 재현**: 같은 프록시 경로의 `X-Forwarded-For: 127.0.0.1` 요청이 401, 직접 API 조합 요청도 401.
 - **문서**: README 프록시 정책, ADR `adr-2026-10-08-core-api-access-gate`(개정 항목), `adr-2026-10-09-mcp-remote-token`, `raven/core/access.py` 모듈 docstring을 갱신했다.
 - **검증**:
@@ -1497,4 +1497,5 @@ launcher 모드(`python -m raven.api`, 데스크톱 API·MCP)의 게이트는 lo
   - parity 매트릭스(`HEADER_SETS`)에 조합 7가지를 더했다. 계약을 따로 적은 `_expected`도 새 헤더 목록을 쓴다. Core API와 MCP의 판정은 모든 경우 같다.
   - 토큰이 있으면 어떤 헤더 조합이든 통과한다. vite 형태의 헤더(XFF + X-Forwarded-Port/-Proto/-Host)는 기존 판정 그대로다.
   - `tests/test_mcp_forwarded_parity.py`·`test_core_api_forwarded.py`·`test_spa_server_auth.py` 1100 passed.
+- **독립 리뷰**: blocker·should-fix 없음. nit 2건(spa_server strip 테스트에 새 헤더, README·ADR의 strict 모드 헤더 목록)을 반영했다.
 - **잔여 위험 (변경 없음)**: 이 기기에서 도는 프록시가 **출처 헤더를 하나도 붙이지 않고** API를 LAN에 중계하면 직접 loopback 접속과 구분할 수 없다(승인된 잔여 위험, README). 목록에 없는 비표준 헤더만 쓰는 프록시도 같다.
