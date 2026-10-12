@@ -17,6 +17,15 @@ Readiness protocol:
 The Tauri shell reads this line, then exposes the endpoint(s) to the webview
 via the ``core_endpoint`` / ``mcp_endpoint`` commands.
 
+  Issue #58: after the readiness line, stdout carries only events from the
+  network watcher (``raven/desktop/netwatch.py``), one JSON object per line —
+  fd 1 is moved to stderr so nothing else can write one:
+    {"event": "mcp_endpoint", "mcp_host": ..., "mcp_port": ...}   advertised MCP moved
+    {"event": "alert", "kind": "guard_blocked", "listener": ..., "address": ...}
+    {"event": "rebind", "bound": ..., "tailscale_ip": ..., "target": ...}
+  ``rebind`` asks the shell for a restart (``--host tailscale`` only: its sockets
+  cannot follow a new address). The readiness line itself is unchanged.
+
   Issue #43: the shell waits at most 60 s for this line
   (``CORE_READINESS_TIMEOUT`` in desktop/src-tauri/src/core.rs), then kills the
   Core. Startup work before readiness — imports, the uvicorn and MCP deadlines
@@ -420,21 +429,29 @@ def _resolve_mcp_host(explicit: str | None, api_host: str) -> str:
     return api_host
 
 
+def _current_tailscale_ip() -> str | None:
+    """The tailnet address now — the same bounded, DNS-free lookup the watcher uses (#58).
+
+    A failed lookup counts as no tailnet here; the watcher retries it later.
+    """
+    from raven.desktop import netwatch
+
+    result = netwatch.TimedLookup(netwatch.lookup_tailscale)()
+    if result.state == "error":
+        print(f"⚠️  [Desktop Core] Tailscale lookup failed at start: {result.detail}", file=sys.stderr)
+    return result.ip if result.state == "ip" else None
+
+
 def _advertised_mcp_host(bind_host: str) -> str:
     """Address to report in the readiness line — 0.0.0.0 is not dialable.
 
     The shell shows it as the MCP endpoint; prefer the tailnet address (reachable
     from the owner's other devices — with a token since #26), else loopback.
+    Issue #58: the watcher moves it later, once a new address is held.
     """
     if bind_host != "0.0.0.0":
         return bind_host
-    try:
-        from raven.api.main import get_tailscale_ip
-
-        ts_ip = get_tailscale_ip()
-    except Exception:  # noqa: BLE001 — no tailnet is a normal state, not an error
-        ts_ip = None
-    return ts_ip or LOOPBACK_HOST
+    return _current_tailscale_ip() or LOOPBACK_HOST
 
 
 def _build_mcp_app(mode: str, host: str):
@@ -483,9 +500,10 @@ def main() -> int:
     # Issue #14: resolve before anything else touches the host. A wildcard or
     # named address only survives when remote access was opted into.
     bind_host = safe_bind_host(bind_host, allow_remote)
+    tailscale_bound: str | None = None
     if tailscale_requested:
-        from raven.api.main import get_tailscale_ip
-        ts_ip = get_tailscale_ip()
+        ts_ip = _current_tailscale_ip()
+        tailscale_bound = ts_ip
         if ts_ip:
             bind_host = ts_ip
             print(f"🔒 [Desktop Core] Auto-bound to Tailscale IP: {ts_ip}", file=sys.stderr)
@@ -516,6 +534,7 @@ def main() -> int:
         return 1
     api_port = api_sock.getsockname()[1]
     api_socks = [api_sock]
+    api_held: dict[str, socket.socket | None] = {}
     if bind_host == "0.0.0.0":
         try:
             guard = _bind_loopback_guard(api_port)
@@ -531,6 +550,7 @@ def main() -> int:
             return 1
         if guard is not None:
             api_socks.append(guard)
+        api_held[LOOPBACK_HOST] = guard
 
     # Issue #14: RAVEN_ALLOW_ALL_CORS is NOT set here. `raven.api.main` imports
     # `raven.api.server` (which snapshots the CORS config) before this module
@@ -592,6 +612,7 @@ def main() -> int:
         mcp_advertised = _advertised_mcp_host(mcp_host)
         mcp_sock = _bind_mcp_socket(mcp_host, args.mcp_port, mcp_advertised)
         mcp_socks: list[socket.socket] = []
+        mcp_held: dict[str, socket.socket | None] = {}
         if mcp_sock is None:
             print(
                 f"⚠️  [Desktop Core] MCP port {args.mcp_port} already in use or answered by "
@@ -602,7 +623,11 @@ def main() -> int:
             # Issue #54: hold loopback and the advertised address ourselves so
             # nobody can bind them after readiness (MCP stays best-effort).
             try:
-                mcp_socks = [mcp_sock, *_bind_mcp_guards(args.mcp_port, mcp_advertised)]
+                mcp_guards = _bind_mcp_guards(args.mcp_port, mcp_advertised)
+                mcp_socks = [mcp_sock, *mcp_guards]
+                guarded = list(dict.fromkeys([LOOPBACK_HOST, mcp_advertised]))
+                # Linux: no guard at all (the wildcard already keeps others off).
+                mcp_held = dict(zip(guarded, mcp_guards)) if mcp_guards else dict.fromkeys(guarded)
             except OSError as exc:
                 mcp_sock.close()
                 print(
@@ -726,6 +751,39 @@ def main() -> int:
         ready["mcp_host"] = mcp_advertised
     print(json.dumps(ready), flush=True)
 
+    # Issue #58: from here on stdout carries only the watcher's events to the shell.
+    from raven.core import network_status
+    from raven.desktop import netwatch
+
+    events = netwatch.EventStream.take_stdout()
+    api_listener = None
+    if bind_host == "0.0.0.0":
+        api_listener = netwatch.Listener("API", api_server, api_port, api_target, probe_nonce, held=api_held)
+    mcp_listener = None
+    if mcp_ready and mcp_host == "0.0.0.0":
+        mcp_listener = netwatch.Listener("MCP", mcp_server, args.mcp_port, mcp_target, mcp_probe_nonce, held=mcp_held)
+        # Checked above (#50): the advertised address is ours.
+        mcp_listener.state[mcp_advertised] = "protected"
+    watcher = netwatch.NetworkWatcher(
+        lookup=netwatch.TimedLookup(netwatch.lookup_tailscale),
+        emit=events,
+        bind_guard=_bind_guard,
+        is_self=_endpoint_is_self,
+        api_bind_host=bind_host,
+        api_port=api_port,
+        api_endpoint_host=endpoint_host,
+        api=api_listener,
+        mcp=mcp_listener,
+        mcp_bind_host=mcp_host if mcp_ready else None,
+        mcp_port=args.mcp_port if mcp_ready else None,
+        mcp_advertised=mcp_advertised if mcp_ready else None,
+        tailscale_requested=tailscale_requested,
+        tailscale_bound=tailscale_bound,
+    )
+    watcher.tick()
+    network_status.set_provider(watcher.snapshot)
+    watcher.start()
+
     try:
         while not api_server.should_exit:
             if parent_pid is not None and os.getppid() != parent_pid:
@@ -737,6 +795,10 @@ def main() -> int:
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
+    # Stop the watcher first: no guard may be added to a server that is shutting down.
+    if not watcher.stop():
+        print("⚠️  [Desktop Core] network watcher did not stop within 3s", file=sys.stderr)
+    network_status.set_provider(None)
     api_server.should_exit = True
     if mcp_server is not None:
         mcp_server.should_exit = True

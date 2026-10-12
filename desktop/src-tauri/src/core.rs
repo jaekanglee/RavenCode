@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -143,17 +143,87 @@ pub(crate) fn ready_endpoints(ready: &ReadyMessage) -> Result<(String, Option<St
             "Python Core readiness가 일관되지 않습니다: {bind}에 bind했는데 {host}로 접속하라고 보고했습니다"
         ));
     }
-    let mcp_endpoint = ready.mcp_port.and_then(|p| {
-        let raw = ready.mcp_host.as_deref().unwrap_or(&ready.host);
-        match raw.parse::<IpAddr>() {
-            Ok(ip) if p != 0 && !ip.is_unspecified() => Some(format!("http://{}/mcp", SocketAddr::new(ip, p))),
-            _ => {
-                eprintln!("[core] ignoring unusable MCP endpoint {raw:?}:{p}");
-                None
+    let mcp_endpoint = ready
+        .mcp_port
+        .and_then(|p| mcp_endpoint_url(ready.mcp_host.as_deref().unwrap_or(&ready.host), p));
+    Ok((format!("http://{}", SocketAddr::new(host, ready.port)), mcp_endpoint))
+}
+
+/// The MCP URL for an advertised address, or None (logged) when it is not dialable.
+fn mcp_endpoint_url(raw: &str, port: u16) -> Option<String> {
+    match raw.parse::<IpAddr>() {
+        Ok(ip) if port != 0 && !ip.is_unspecified() => Some(format!("http://{}/mcp", SocketAddr::new(ip, port))),
+        _ => {
+            eprintln!("[core] ignoring unusable MCP endpoint {raw:?}:{port}");
+            None
+        }
+    }
+}
+
+/// What a running Core tells the shell after readiness (Issue #58), one JSON
+/// object per stdout line — see `raven/desktop/netwatch.py`. The Core keeps
+/// stdout for these alone once it is ready.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CoreEvent {
+    /// The advertised MCP endpoint moved (a new tailnet address is held and
+    /// answered by this Core, or the endpoint fell back to loopback).
+    McpEndpoint(String),
+    /// A tailnet address could not be protected: another process holds it.
+    GuardBlocked { listener: String, address: String },
+    /// The Core is bound to a tailnet address that is gone or has changed
+    /// (`--host tailscale`); only a restart can move its sockets.
+    Rebind { bound: String, target: String },
+}
+
+/// Events from the Core with this id; ids are never reused within the shell.
+pub(crate) type EventSink = mpsc::Sender<(u64, CoreEvent)>;
+
+static NEXT_CORE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Deserialize)]
+struct EventLine {
+    event: String,
+    mcp_host: Option<String>,
+    mcp_port: Option<u16>,
+    kind: Option<String>,
+    listener: Option<String>,
+    address: Option<String>,
+    bound: Option<String>,
+    target: Option<String>,
+}
+
+/// Parse one post-readiness stdout line. Anything that is not a known, complete
+/// event is None (and is only relayed to stderr).
+pub(crate) fn parse_event(line: &str) -> Option<CoreEvent> {
+    let line: EventLine = serde_json::from_str(line.trim()).ok()?;
+    match line.event.as_str() {
+        "mcp_endpoint" => mcp_endpoint_url(line.mcp_host.as_deref()?, line.mcp_port?).map(CoreEvent::McpEndpoint),
+        "alert" if line.kind.as_deref() == Some("guard_blocked") => Some(CoreEvent::GuardBlocked {
+            listener: line.listener?,
+            address: line.address?,
+        }),
+        "rebind" => Some(CoreEvent::Rebind { bound: line.bound?, target: line.target? }),
+        _ => None,
+    }
+}
+
+/// Relay the Core's stdout after readiness: events to `events`, every line to stderr.
+fn relay_events<R: BufRead>(id: u64, reader: &mut R, events: Option<EventSink>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf);
+                let text = text.trim_end_matches(['\r', '\n']);
+                eprintln!("[raven-core] {text}");
+                if let (Some(sink), Some(event)) = (events.as_ref(), parse_event(text)) {
+                    let _ = sink.send((id, event));
+                }
             }
         }
-    });
-    Ok((format!("http://{}", SocketAddr::new(host, ready.port)), mcp_endpoint))
+    }
 }
 
 /// How long the shell waits for the Core's readiness line (Issue #43).
@@ -323,6 +393,8 @@ fn exited_before_ready(status: ExitStatus) -> String {
 
 pub(crate) struct ManagedCore {
     child: Child,
+    /// Tags this Core's events, so one from a Core already replaced is ignored.
+    pub id: u64,
     pub endpoint: String,
     pub mcp_endpoint: Option<String>,
 }
@@ -332,6 +404,7 @@ impl ManagedCore {
         mcp: bool,
         resource_dir: Option<PathBuf>,
         pending: &PendingStart,
+        events: Option<EventSink>,
     ) -> Result<Self, StartError> {
         let (python, python_path) = resolve_python(resource_dir.as_deref());
         let host = env::var("RAVEN_DESKTOP_HOST")
@@ -350,7 +423,7 @@ impl ManagedCore {
         for (key, value) in &spec.env {
             cmd.env(key, value);
         }
-        Self::launch(cmd, CORE_READINESS_TIMEOUT, pending)
+        Self::launch_with_events(cmd, CORE_READINESS_TIMEOUT, pending, events)
     }
 
     /// Spawn `cmd` and wait — at most `timeout` — for its readiness line.
@@ -359,11 +432,19 @@ impl ManagedCore {
     /// neither printed, exited nor closed stdout held the shell forever. Every
     /// way out of the wait now ends with the child killed and reaped, except a
     /// valid, consistent readiness line.
-    pub(crate) fn launch(
+    #[cfg(test)]
+    pub(crate) fn launch(cmd: Command, timeout: Duration, pending: &PendingStart) -> Result<Self, StartError> {
+        Self::launch_with_events(cmd, timeout, pending, None)
+    }
+
+    /// `launch`, with the Core's post-readiness events sent to `events` (Issue #58).
+    pub(crate) fn launch_with_events(
         mut cmd: Command,
         timeout: Duration,
         pending: &PendingStart,
+        events: Option<EventSink>,
     ) -> Result<Self, StartError> {
+        let id = NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|error| {
             StartError::Failed(format!(
@@ -377,7 +458,8 @@ impl ManagedCore {
             return Err(abort(child, &stderr, "Python Core readiness stream을 열 수 없습니다".into()));
         };
 
-        // First line → channel; the same thread then keeps relaying stdout.
+        // First line → channel; the same thread then relays stdout: events (#58)
+        // to `events`, every line to stderr.
         let (line_tx, line_rx) = mpsc::sync_channel::<std::io::Result<String>>(1);
         let spawned = std::thread::Builder::new()
             .name("raven-core".into())
@@ -390,7 +472,7 @@ impl ManagedCore {
                 let ok = first.is_ok();
                 let _ = line_tx.send(first);
                 if ok {
-                    relay_lines("core", &mut reader, None);
+                    relay_events(id, &mut reader, events);
                 }
             });
         if let Err(error) = spawned {
@@ -501,6 +583,7 @@ impl ManagedCore {
         stderr.stop_keeping();
         Ok(Self {
             child,
+            id,
             endpoint,
             mcp_endpoint,
         })
@@ -512,6 +595,7 @@ impl ManagedCore {
     pub(crate) fn for_test(endpoint: &str, mcp_endpoint: Option<&str>) -> Self {
         Self {
             child: Command::new("true").spawn().expect("spawn true"),
+            id: NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed),
             endpoint: endpoint.to_string(),
             mcp_endpoint: mcp_endpoint.map(str::to_string),
         }
@@ -669,6 +753,84 @@ mod tests {
     fn mcp_without_its_own_host_follows_the_api_host() {
         let (_, mcp) = endpoints(r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1","mcp_port":8766}"#).unwrap();
         assert_eq!(mcp.as_deref(), Some("http://127.0.0.1:8766/mcp"));
+    }
+
+    mod events {
+        use super::super::{parse_event, CoreEvent};
+
+        #[test]
+        fn known_events_are_parsed() {
+            assert_eq!(
+                parse_event(r#"{"event": "mcp_endpoint", "mcp_host": "100.64.1.2", "mcp_port": 8766}"#),
+                Some(CoreEvent::McpEndpoint("http://100.64.1.2:8766/mcp".into()))
+            );
+            assert_eq!(
+                parse_event(r#"{"event": "alert", "kind": "guard_blocked", "listener": "MCP", "address": "100.64.1.2:8766"}"#),
+                Some(CoreEvent::GuardBlocked { listener: "MCP".into(), address: "100.64.1.2:8766".into() })
+            );
+            assert_eq!(
+                parse_event(r#"{"event": "rebind", "bound": "100.64.1.2", "tailscale_ip": null, "target": "127.0.0.1"}"#),
+                Some(CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() })
+            );
+        }
+
+        #[test]
+        fn anything_else_is_not_an_event() {
+            for line in [
+                "",
+                "INFO: some log line",
+                r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}"#,
+                r#"{"event": "unknown"}"#,
+                r#"{"event": "mcp_endpoint", "mcp_host": "0.0.0.0", "mcp_port": 8766}"#,
+                r#"{"event": "mcp_endpoint", "mcp_host": "not-an-ip", "mcp_port": 8766}"#,
+                r#"{"event": "mcp_endpoint", "mcp_host": "100.64.1.2", "mcp_port": 0}"#,
+                r#"{"event": "mcp_endpoint", "mcp_host": "100.64.1.2"}"#,
+                r#"{"event": "alert", "kind": "other", "listener": "MCP", "address": "x"}"#,
+                r#"{"event": "rebind", "bound": "100.64.1.2"}"#,
+                r#"{"event": "rebind""#,
+            ] {
+                assert_eq!(parse_event(line), None, "{line}");
+            }
+        }
+    }
+
+    /// Issue #58: events after readiness reach the sink, tagged with the Core's id.
+    #[cfg(unix)]
+    mod event_relay {
+        use super::super::{CoreEvent, ManagedCore, PendingStart};
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        fn core_printing(after_ready: &str) -> Command {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                r#"echo '{{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}}'; {after_ready}; sleep 30"#
+            ));
+            cmd
+        }
+
+        #[test]
+        fn events_reach_the_sink_with_the_core_id_and_noise_does_not() {
+            let (sink, events) = mpsc::channel();
+            let script = r#"echo 'not json'; echo '{"event": "mcp_endpoint", "mcp_host": "100.64.1.2", "mcp_port": 8766}'; echo '{"event": "bogus"}'; echo '{"event": "rebind", "bound": "100.64.1.2", "target": "127.0.0.1"}'"#;
+            let core = ManagedCore::launch_with_events(core_printing(script), Duration::from_secs(10), &PendingStart::default(), Some(sink))
+                .unwrap();
+            let first = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            let second = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(first, (core.id, CoreEvent::McpEndpoint("http://100.64.1.2:8766/mcp".into())));
+            assert_eq!(second, (core.id, CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() }));
+            assert!(events.recv_timeout(Duration::from_millis(300)).is_err());
+            // The readiness line itself is not an event, and the endpoint came from it.
+            assert_eq!(core.mcp_endpoint, None);
+        }
+
+        #[test]
+        fn every_core_has_its_own_id() {
+            let a = ManagedCore::launch(core_printing("true"), Duration::from_secs(10), &PendingStart::default()).unwrap();
+            let b = ManagedCore::launch(core_printing("true"), Duration::from_secs(10), &PendingStart::default()).unwrap();
+            assert_ne!(a.id, b.id);
+        }
     }
 
     /// Issue #43: `launch` against `sh` stand-ins for the Python Core.

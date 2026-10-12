@@ -1488,9 +1488,11 @@ def test_runtime_goes_api_only_when_an_mcp_guard_cannot_be_held(tmp_path: Path, 
 
 @pytest.mark.parametrize("ts_ip, expected", [(None, "127.0.0.1"), ("100.101.102.103", "100.101.102.103")])
 def test_mcp_advertises_the_tailnet_address_only_when_one_is_up(monkeypatch, ts_ip, expected) -> None:
-    from raven.desktop import runtime
+    from raven.desktop import netwatch, runtime
 
-    monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: ts_ip)
+    # Issue #58: the Desktop Core uses the watcher's lookup, not raven.api.main's.
+    found = netwatch.Lookup("ip", ts_ip) if ts_ip else netwatch.Lookup("none")
+    monkeypatch.setattr("raven.desktop.netwatch.lookup_tailscale", lambda: found)
     assert runtime._advertised_mcp_host("0.0.0.0") == expected
     assert runtime._advertised_mcp_host("127.0.0.1") == "127.0.0.1"
 

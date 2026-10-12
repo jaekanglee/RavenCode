@@ -258,6 +258,8 @@ export interface SystemInfo {
   bind_host: string;
   allow_all_cors: boolean;
   port: number;
+  /** Issue #58: the Desktop Core's live network state; null on other launchers. */
+  network?: import("./network-status").NetworkStatus | null;
 }
 
 export async function fetchSystemInfo(): Promise<SystemInfo | null> {

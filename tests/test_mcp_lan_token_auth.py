@@ -143,11 +143,12 @@ def test_desktop_mcp_binds_all_interfaces_when_api_is_lan_wide():
 
 
 def test_advertised_mcp_host_is_connectable(monkeypatch):
-    from raven.desktop import runtime
+    from raven.desktop import netwatch, runtime
 
-    monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: "100.116.203.33")
+    # Issue #58: the Desktop Core uses the watcher's lookup, not raven.api.main's.
+    monkeypatch.setattr("raven.desktop.netwatch.lookup_tailscale", lambda: netwatch.Lookup("ip", "100.116.203.33"))
     assert runtime._advertised_mcp_host("0.0.0.0") == "100.116.203.33"
-    monkeypatch.setattr("raven.api.main.get_tailscale_ip", lambda: None)
+    monkeypatch.setattr("raven.desktop.netwatch.lookup_tailscale", lambda: netwatch.Lookup("none"))
     assert runtime._advertised_mcp_host("0.0.0.0") == "127.0.0.1"
     assert runtime._advertised_mcp_host("10.0.0.5") == "10.0.0.5"
 

@@ -36,11 +36,15 @@ fn show_and_recover(window: &WebviewWindow) {
 /// The third field is the API endpoint last handed to the webview. It outlives
 /// the Core (a failed restart leaves none running), so a later restart on another
 /// port is still recognised as a move.
+///
+/// The fourth is where every Core started from here sends its post-readiness
+/// events (Issue #58); set once in `setup`, absent in tests that do not need it.
 #[derive(Default)]
 struct CoreState(
     Mutex<Option<core::ManagedCore>>,
     Mutex<Option<Arc<core::PendingStart>>>,
     Mutex<Option<String>>,
+    Mutex<Option<core::EventSink>>,
 );
 
 /// Frees the "a start is running" slot however `start_with` ends — a panic in a
@@ -55,7 +59,8 @@ impl Drop for StartSlot<'_> {
 
 impl CoreState {
     fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<bool, core::StartError> {
-        self.start_with(|pending| core::ManagedCore::start(mcp, resource_dir, pending))
+        let events = self.3.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        self.start_with(|pending| core::ManagedCore::start(mcp, resource_dir, pending, events))
     }
 
     /// Replace the running Core (if any) with a new one; `Ok(true)` when its API
@@ -315,6 +320,154 @@ async fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
     off_runtime(move || do_restart_core(&app).map(|_| ()).map_err(|e| e.to_string())).await
 }
 
+/// What the shell does about one Core event (Issue #58).
+#[derive(Debug, PartialEq, Eq)]
+enum EventAction {
+    Nothing,
+    /// Tell the user (non-blocking warning dialog).
+    Notify(String),
+    /// Restart the Core through the #44 path (then reload if the endpoint moved).
+    Restart,
+    /// Restart at this time, if this Core is still the running one then.
+    RestartAt(std::time::Instant),
+}
+
+/// The shortest time between two network-triggered restarts. The Core already
+/// waits for a stable mismatch (5 s) and asks again after 30 s while it lasts; this
+/// keeps a flapping tailnet from restarting the Core in a loop even if a Core
+/// asked sooner (each new Core starts its own 5 s wait).
+const NETWORK_RESTART_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Apply `event` from the Core `id` to `state`. Events from a Core that is no
+/// longer the running one are dropped — it has been replaced or stopped.
+fn handle_core_event(
+    state: &CoreState,
+    id: u64,
+    event: core::CoreEvent,
+    last_network_restart: &mut Option<std::time::Instant>,
+) -> EventAction {
+    let mut running = state.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(core) = running.as_mut().filter(|core| core.id == id) else {
+        return EventAction::Nothing;
+    };
+    match event {
+        core::CoreEvent::McpEndpoint(endpoint) => {
+            eprintln!("Raven MCP endpoint moved to {endpoint}");
+            core.mcp_endpoint = Some(endpoint);
+            EventAction::Nothing
+        }
+        core::CoreEvent::GuardBlocked { listener, address } => EventAction::Notify(format!(
+            "Tailscale 주소 {address}의 {listener} 포트를 다른 프로세스가 먼저 잡고 있어 보호하지 못했습니다.\n\
+             그 주소로 접속하는 요청(Bearer 토큰 포함)은 Raven이 아니라 그 프로세스로 갈 수 있습니다. \
+             Raven은 이 주소를 MCP 주소로 알리지 않습니다. 그 프로세스를 확인해 종료하세요."
+        )),
+        core::CoreEvent::Rebind { bound, target } => {
+            eprintln!("[core] Core bound to {bound}, tailnet address now {target}");
+            network_restart_due(last_network_restart)
+        }
+    }
+}
+
+/// `Restart` now (and record it), or `RestartAt` once the minimum interval has passed.
+fn network_restart_due(last_network_restart: &mut Option<std::time::Instant>) -> EventAction {
+    let now = std::time::Instant::now();
+    if let Some(at) = last_network_restart.map(|last| last + NETWORK_RESTART_MIN_INTERVAL).filter(|at| *at > now) {
+        eprintln!("[core] network restart deferred until the 20s minimum interval has passed");
+        return EventAction::RestartAt(at);
+    }
+    *last_network_restart = Some(now);
+    eprintln!("[core] restarting the Core for the new tailnet address");
+    EventAction::Restart
+}
+
+/// Whether `id` is the Core running now.
+fn is_running_core(state: &CoreState, id: u64) -> bool {
+    state.0.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|core| core.id == id)
+}
+
+/// What the user is told when a network-triggered restart did not succeed.
+fn network_restart_notice(result: &Result<bool, core::StartError>) -> Option<String> {
+    match result {
+        // Another start owns the slot; the Core asks again later if still needed.
+        Ok(_) | Err(core::StartError::Cancelled | core::StartError::Busy) => None,
+        Err(error) => Some(format!(
+            "Tailscale 주소가 바뀌어 Backend를 다시 시작했지만 실패했습니다.\n{error}\n트레이의 Restart Backend로 다시 시도하세요."
+        )),
+    }
+}
+
+static EVENT_NOTICE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn show_warning(app: &tauri::AppHandle, open: &'static std::sync::atomic::AtomicBool, notice: String) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    eprintln!("{notice}");
+    if !open.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        app.dialog()
+            .message(notice)
+            .title("Raven")
+            .kind(MessageDialogKind::Warning)
+            .show(move |_| open.store(false, std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+/// Handle Core events for the life of the app, on their own thread (Issue #58):
+/// a restart waits up to the readiness timeout and must not hold the main thread.
+fn spawn_core_event_loop(app: &tauri::AppHandle) {
+    let (sink, events) = std::sync::mpsc::channel::<(u64, core::CoreEvent)>();
+    *app.state::<CoreState>().3.lock().unwrap_or_else(PoisonError::into_inner) = Some(sink);
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("raven-core-events".into()).spawn(move || {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut last_network_restart = None;
+        // A rebind that arrived within the minimum interval: (Core id, when to act).
+        let mut deferred: Option<(u64, std::time::Instant)> = None;
+        loop {
+            let next = match deferred {
+                Some((_, at)) => events.recv_timeout(at.saturating_duration_since(std::time::Instant::now())),
+                None => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            let action = match next {
+                Ok((id, event)) => match handle_core_event(&app.state::<CoreState>(), id, event, &mut last_network_restart) {
+                    EventAction::RestartAt(at) => {
+                        deferred = Some((id, at));
+                        EventAction::Nothing
+                    }
+                    other => other,
+                },
+                Err(RecvTimeoutError::Timeout) => match deferred.take() {
+                    // Still the Core that asked: nothing has restarted it meanwhile.
+                    Some((id, _)) if is_running_core(&app.state::<CoreState>(), id) => {
+                        network_restart_due(&mut last_network_restart)
+                    }
+                    _ => EventAction::Nothing,
+                },
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            match action {
+                EventAction::Nothing | EventAction::RestartAt(_) => {}
+                EventAction::Notify(notice) => show_warning(&app, &EVENT_NOTICE_OPEN, notice),
+                EventAction::Restart => {
+                    deferred = None;
+                    let result = do_restart_core(&app);
+                    if matches!(result, Ok(true)) {
+                        // The old endpoint is gone with its address; nothing in the
+                        // page is waiting on this restart (see restart_from_tray).
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.eval("location.reload()");
+                        }
+                    }
+                    if let Some(notice) = network_restart_notice(&result) {
+                        show_warning(&app, &EVENT_NOTICE_OPEN, notice);
+                    }
+                }
+            }
+        }
+    });
+    if spawned.is_err() {
+        eprintln!("[core] could not start the Core event thread — network changes will not be followed");
+    }
+}
+
 /// Resolves where an exported file should land inside `dir`.
 ///
 /// 웹뷰가 준 이름은 신뢰하지 않는다 — 경로 성분을 버리고 파일명만 취하며,
@@ -422,6 +575,8 @@ pub fn run() {
             // unwind 불가)으로 처리하므로, 여기서 실패를 직접 흡수해 다이얼로그 후 종료한다.
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
+            // Before the first start, so that Core's events are delivered too.
+            spawn_core_event_loop(&handle);
             // Issue #43: the readiness wait blocks (bounded by CORE_READINESS_TIMEOUT),
             // so it runs on the blocking pool rather than an async runtime worker.
             tauri::async_runtime::spawn_blocking(move || {
@@ -1354,6 +1509,112 @@ mod tests {
             let cmd = src.find(concat!("async fn restart_core", "(")).expect("restart_core");
             let cmd_body = &src[cmd..cmd + src[cmd..].find("\n}\n").unwrap()];
             assert!(!cmd_body.contains("reload"), "restart_core must not reload the page under its own IPC call");
+        }
+    }
+
+    /// Issue #58: what the shell does with a running Core's events.
+    mod core_events {
+        use super::super::{
+            core::{CoreEvent, ManagedCore, StartError},
+            handle_core_event, is_running_core, network_restart_notice, CoreState, EventAction,
+        };
+        use std::time::{Duration, Instant};
+
+        fn running(mcp: Option<&str>) -> (CoreState, u64) {
+            let state = CoreState::default();
+            let core = ManagedCore::for_test("http://127.0.0.1:5555", mcp);
+            let id = core.id;
+            *state.0.lock().unwrap() = Some(core);
+            (state, id)
+        }
+
+        fn mcp_of(state: &CoreState) -> Option<String> {
+            state.0.lock().unwrap().as_ref().and_then(|c| c.mcp_endpoint.clone())
+        }
+
+        #[test]
+        fn a_moved_mcp_endpoint_replaces_the_one_shown() {
+            let (state, id) = running(Some("http://127.0.0.1:8766/mcp"));
+            let action = handle_core_event(&state, id, CoreEvent::McpEndpoint("http://100.64.1.2:8766/mcp".into()), &mut None);
+            assert_eq!(action, EventAction::Nothing);
+            assert_eq!(mcp_of(&state).as_deref(), Some("http://100.64.1.2:8766/mcp"));
+        }
+
+        #[test]
+        fn events_from_a_replaced_or_stopped_core_are_ignored() {
+            let (state, id) = running(Some("http://127.0.0.1:8766/mcp"));
+            let stale = id + 1_000_000;
+            for event in [
+                CoreEvent::McpEndpoint("http://100.64.1.2:8766/mcp".into()),
+                CoreEvent::GuardBlocked { listener: "MCP".into(), address: "100.64.1.2:8766".into() },
+                CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() },
+            ] {
+                assert_eq!(handle_core_event(&state, stale, event, &mut None), EventAction::Nothing);
+            }
+            assert_eq!(mcp_of(&state).as_deref(), Some("http://127.0.0.1:8766/mcp"));
+            let empty = CoreState::default();
+            let event = CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() };
+            assert_eq!(handle_core_event(&empty, id, event, &mut None), EventAction::Nothing);
+        }
+
+        #[test]
+        fn a_blocked_guard_is_shown_to_the_user() {
+            let (state, id) = running(None);
+            let event = CoreEvent::GuardBlocked { listener: "MCP".into(), address: "100.64.1.2:8766".into() };
+            match handle_core_event(&state, id, event, &mut None) {
+                EventAction::Notify(text) => {
+                    assert!(text.contains("100.64.1.2:8766") && text.contains("MCP"), "{text}");
+                    assert!(text.contains("보호하지 못했습니다"), "{text}");
+                }
+                other => panic!("expected a notice, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_rebind_restarts_at_most_once_per_interval_and_a_later_one_waits_for_it() {
+            let (state, id) = running(None);
+            let rebind = || CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() };
+            let mut last = None;
+            assert_eq!(handle_core_event(&state, id, rebind(), &mut last), EventAction::Restart);
+            let first = last.unwrap();
+            match handle_core_event(&state, id, rebind(), &mut last) {
+                EventAction::RestartAt(at) => assert_eq!(at, first + Duration::from_secs(20)),
+                other => panic!("expected a deferred restart, got {other:?}"),
+            }
+            assert_eq!(last, Some(first), "a deferral is not a restart");
+            last = Some(Instant::now() - Duration::from_secs(21));
+            assert_eq!(handle_core_event(&state, id, rebind(), &mut last), EventAction::Restart);
+        }
+
+        #[test]
+        fn a_deferred_restart_only_applies_to_the_core_that_asked() {
+            let (state, id) = running(None);
+            assert!(is_running_core(&state, id));
+            assert!(!is_running_core(&state, id + 1_000_000));
+            *state.0.lock().unwrap() = None;
+            assert!(!is_running_core(&state, id));
+        }
+
+        #[test]
+        fn only_a_real_failure_of_a_network_restart_is_reported() {
+            assert_eq!(network_restart_notice(&Ok(true)), None);
+            assert_eq!(network_restart_notice(&Ok(false)), None);
+            assert_eq!(network_restart_notice(&Err(StartError::Busy)), None);
+            assert_eq!(network_restart_notice(&Err(StartError::Cancelled)), None);
+            let text = network_restart_notice(&Err(StartError::Failed("boom".into()))).unwrap();
+            assert!(text.contains("boom") && text.contains("Restart Backend"), "{text}");
+        }
+
+        #[test]
+        fn the_event_loop_restarts_off_the_main_thread_and_reloads_on_a_move() {
+            let src = include_str!("lib.rs");
+            let start = src.find(concat!("fn spawn_core_event_loop", "(")).expect("spawn_core_event_loop");
+            let body = &src[start..start + 3500];
+            assert!(body.contains("std::thread::Builder::new()"), "events must be handled on their own thread");
+            assert!(body.contains("do_restart_core(&app)") && body.contains("Ok(true)") && body.contains("location.reload()"));
+            let setup = src.find("spawn_core_event_loop(&handle)").expect("event loop wired in setup");
+            let first_start = src.find("handle.state::<CoreState>().start(").expect("initial start");
+            assert!(setup < first_start, "the sink must exist before the first Core starts");
         }
     }
 }
