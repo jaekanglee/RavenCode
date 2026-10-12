@@ -21,7 +21,8 @@ Vite dev server의 proxy 설정을 프로덕션에서도 동일하게 재현.
     IP 기반 신뢰는 없다.
   - 쿠키로 인증된 POST/PUT/PATCH/DELETE는 ``Origin``이 ``Host``와 같아야 한다 (CSRF).
   - 세션 쿠키는 업스트림에 보내지 않고, 클라이언트가 보낸 X-Forwarded-For/Forwarded/
-    X-Real-IP는 버린 뒤 실제 클라이언트 주소로 X-Forwarded-For를 새로 붙인다.
+    X-Real-IP(와 True-Client-IP 등 API 게이트가 아는 출처 헤더, #29)는 버린 뒤 실제 클라이언트
+    주소로 X-Forwarded-For를 새로 붙인다.
 
 Usage:
     python spa_server.py \\
@@ -114,7 +115,11 @@ def _content_length(value: str | None, limit: int | None = None) -> int | None:
     if limit is not None and n > limit:
         return None
     return n
-_STRIP_UPSTREAM = {"x-forwarded-for", "forwarded", "x-real-ip", "cookie", "authorization"}
+_STRIP_UPSTREAM = {
+    "x-forwarded-for", "forwarded", "x-real-ip", "cookie", "authorization",
+    # Issue #29: every other client-address header the API gate recognises.
+    "x-client-ip", "true-client-ip", "cf-connecting-ip", "fastly-client-ip", "x-cluster-client-ip",
+}
 _HOP_BY_HOP = {"host", "connection", "transfer-encoding", "keep-alive",
                "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
 

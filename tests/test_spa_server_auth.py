@@ -275,6 +275,12 @@ def test_proxy_strips_session_cookie_and_spoofed_forwarding_headers(tmp_path, mo
             "X-Forwarded-For": "127.0.0.1",
             "Forwarded": "for=127.0.0.1",
             "X-Real-IP": "127.0.0.1",
+            # Issue #29: every other client-address header the API gate recognises.
+            "X-Client-IP": "127.0.0.1",
+            "True-Client-IP": "127.0.0.1",
+            "CF-Connecting-IP": "127.0.0.1",
+            "Fastly-Client-IP": "127.0.0.1",
+            "X-Cluster-Client-IP": "127.0.0.1",
         })
         assert seen, "proxy did not forward"
         fwd = seen[-1]
@@ -283,6 +289,8 @@ def test_proxy_strips_session_cookie_and_spoofed_forwarding_headers(tmp_path, mo
         assert fwd.get("cookie") == "theme=dark"
         assert fwd.get("x-forwarded-for") == "127.0.0.1"  # the proxy's real client, not the spoof
         assert "forwarded" not in fwd and "x-real-ip" not in fwd
+        for name in ("x-client-ip", "true-client-ip", "cf-connecting-ip", "fastly-client-ip", "x-cluster-client-ip"):
+            assert name not in fwd, name
         # a cookie that is not a live session authenticates nothing
         status, _, _ = _req(port, "GET", "/api/vaults", {"Cookie": "raven_session=rvn_a"})
         assert status == 401
