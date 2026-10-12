@@ -141,7 +141,8 @@ def test_endpoint_is_gated_on_every_request(client, log_path, monkeypatch) -> No
     assert len(log_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
-INVISIBLE = ["\x7f", "\x85", "\x9b", "\u200e", "\u202e", "\u2066", "\u2028", "\u2029", "\ufeff", "\ud800", "\udfff"]
+INVISIBLE = ["\x7f", "\x85", "\x9b", "\u200e", "\u202e", "\u2066", "\u2028", "\u2029", "\ufeff", "\ud800", "\udfff",
+             "\U000e0067", "\U0001d173", "\U000e0001"]  # format characters above U+FFFF
 
 
 @pytest.mark.parametrize("ch", INVISIBLE)
@@ -184,3 +185,14 @@ def test_sendbeacon_style_blob_body_is_accepted(client, log_path, monkeypatch) -
     resp = client.post("/api/debug-log", content=json.dumps({"level": "error", "message": "m"}).encode(),
                        headers={"content-type": "application/json"})
     assert resp.status_code == 200
+
+
+def test_text_with_astral_format_characters_survives_a_round_trip(client, log_path, monkeypatch) -> None:
+    """The England flag is a black flag plus tag characters (U+E0067…U+E007F, category Cf)."""
+    monkeypatch.setenv("RAVEN_DEBUG_LOG", "1")
+    flag = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
+    text = f"flag {flag} ok"
+    client.post("/api/debug-log", content=json.dumps({"message": text}), headers={"content-type": "application/json"})
+    raw = log_path.read_text(encoding="utf-8")
+    assert json.loads(raw)["message"] == text
+    assert "\U000e0067" not in raw  # escaped, as a surrogate pair

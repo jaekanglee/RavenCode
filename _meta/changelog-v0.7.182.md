@@ -1458,8 +1458,8 @@ Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값�
   - 200 KB 요청 50회로 로그가 10,004,320바이트까지 커졌다. 상한도 회전도 없었다.
   - 원격 출처는 #24의 TokenGate가 이미 토큰을 요구하므로, 이 문제는 loopback 출처(이 PC의 프로세스·브라우저 페이지)에 해당한다.
 - **수정** (`raven/api/server.py`):
-  - **opt-in**: `RAVEN_DEBUG_LOG=1`(`true`/`yes`/`on`)일 때만 기록한다. 그 밖에는 **404**다. 값은 요청마다 읽는다. 본문을 읽기 전에 판정하므로 꺼진 endpoint는 깨진 본문에도 422가 아니라 404다(존재가 드러나지 않음). 어떤 실행기(`./raven.sh`, 데스크톱, Docker)도 기본으로 켜지 않는다 — `raven.sh`는 운영 인스턴스도 띄우므로 거기서 켜지 않았다.
-  - **기록 형식**: 항목 하나가 JSON 한 줄이다(`ts`, `level`, `source`, `message`, `url`, `vault`, `stack[]`). C0 제어문자는 JSON이 escape한다. JSON이 그대로 두는 보이지 않는 문자 — C1 제어문자(U+0085 줄바꿈, U+009B CSI 등), 서식 문자(bidi override 등), 줄·문단 구분자(U+2028/2029), 짝 없는 surrogate — 도 `\uXXXX`로 escape한다. `str.splitlines()` 기준으로도 항상 한 줄이고, `cat`한 터미널에 제어 시퀀스가 전달되지 않는다. 한글·이모지 등 보이는 문자는 그대로다.
+  - **opt-in**: `RAVEN_DEBUG_LOG=1`(`true`/`yes`/`on`)일 때만 기록한다. 그 밖에는 **404**다. 값은 요청마다 읽는다. 본문을 읽기 전에 판정하므로 꺼진 endpoint는 깨진 본문에도 422가 아니라 404다(존재가 드러나지 않음). 다른 origin 페이지가 켜진 endpoint에 쓰는 문제는 loopback 신뢰 경계 전체의 문제라 #28에서 다룬다. 어떤 실행기(`./raven.sh`, 데스크톱, Docker)도 기본으로 켜지 않는다 — `raven.sh`는 운영 인스턴스도 띄우므로 거기서 켜지 않았다.
+  - **기록 형식**: 항목 하나가 JSON 한 줄이다(`ts`, `level`, `source`, `message`, `url`, `vault`, `stack[]`). C0 제어문자는 JSON이 escape한다. JSON이 그대로 두는 보이지 않는 문자 — C1 제어문자(U+0085 줄바꿈, U+009B CSI 등), 서식 문자(bidi override 등), 줄·문단 구분자(U+2028/2029), 짝 없는 surrogate — 도 JSON 방식(`\uXXXX`, U+FFFF 위는 surrogate pair)으로 escape한다. `str.splitlines()` 기준으로도 항상 한 줄이고, `cat`한 터미널에 제어 시퀀스가 전달되지 않는다. 한글·이모지 등 보이는 문자는 그대로다.
   - 짝 없는 surrogate(브라우저가 이모지 중간을 자른 메시지)는 이전에는 UTF-8 인코딩 단계에서 500을 냈다. 이제 escape해서 기록한다(독립 리뷰).
   - **크기**: 필드마다 길이를 자른다(`message` 2000자, `url` 500, `vault` 128, `source` 64, `level` 16, `stack` 10줄 × 300자 — 필요한 만큼만 나눈다). 파일이 1 MiB를 넘게 되면 `.1`로 한 번 회전한다(이전 `.1`은 덮어씀). 디스크 사용은 약 2 MiB를 넘지 않는다. 회전과 기록은 lock 하나 안에서 해 동시 요청이 항목을 섞거나 상한을 넘지 않는다.
   - **경로**: `tmp/dashboard.log`는 `./raven.sh`가 vite 출력을 쓰는 파일이다. 다른 프로세스가 열어 둔 파일은 안전하게 회전할 수 없어 이 로그는 `tmp/dashboard-client.log`로 옮겼다.
@@ -1467,7 +1467,7 @@ Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값�
   - 대시보드의 오류 수집 자체는 그대로다. 꺼진 서버에서는 404가 조용히 무시된다.
 - **문서**: README 환경 변수 표에 `RAVEN_DEBUG_LOG`를 추가했다. `dashboard/src/main.tsx`·`lib/api.ts` 주석의 로그 위치를 바로잡았다.
 - **검증**:
-  - `tests/test_debug_log_endpoint.py` 47건 신규: opt-in이 아니면 404이고 파일을 만들지 않음(7가지 값) / 꺼진 상태는 깨진 본문에도 404, 켜진 상태는 깨진 본문에 422·파일 없음 / 켜면 기록·경로 미노출(4가지 값) / 개행·CR·VT/FF·FS/GS/RS·NEL·U+2028/2029·NUL/ESC·C1 CSI·bidi override·짝 없는 surrogate가 모든 필드에서 한 줄로 기록됨(11) / 보이지 않는 문자 11종이 원문 바이트 없이 escape되고 값은 보존됨 / 한글·이모지 유지 / 필드 상한 / 회전 후 두 파일 모두 상한 이하·회전이 항목을 자르지 않음 / 8 스레드 동시 기록에서 항목이 섞이지 않음 / 요청마다 게이트 적용 / sendBeacon 형태 본문. 기존 테스트 2건은 opt-in을 켜고 임시 경로를 쓰도록 바꿨다(이전에는 저장소 `tmp/`에 실제로 썼다).
+  - `tests/test_debug_log_endpoint.py` 51건 신규: opt-in이 아니면 404이고 파일을 만들지 않음(7가지 값) / 꺼진 상태는 깨진 본문에도 404, 켜진 상태는 깨진 본문에 422·파일 없음 / 켜면 기록·경로 미노출(4가지 값) / 개행·CR·VT/FF·FS/GS/RS·NEL·U+2028/2029·NUL/ESC·C1 CSI·bidi override·짝 없는 surrogate가 모든 필드에서 한 줄로 기록됨(11) / 보이지 않는 문자 14종(U+FFFF 위 서식 문자 포함)이 원문 바이트 없이 escape되고 값은 보존됨 / 잉글랜드 국기(태그 문자) 왕복 보존 / 한글·이모지 유지 / 필드 상한 / 회전 후 두 파일 모두 상한 이하·회전이 항목을 자르지 않음 / 8 스레드 동시 기록에서 항목이 섞이지 않음 / 요청마다 게이트 적용 / sendBeacon 형태 본문. 기존 테스트 2건은 opt-in을 켜고 임시 경로를 쓰도록 바꿨다(이전에는 저장소 `tmp/`에 실제로 썼다).
   - 변형 검사: 게이트 제거, 보이지 않는 문자 escape 제거, surrogate escape만 제거, 본문 파싱 뒤 게이트, JSON 대신 평문, 회전 제거, lock 제거, 필드 상한 제거 — 각각 신규 테스트가 실패한다.
-- **독립 리뷰**: blocker 없음. should-fix 1건(짝 없는 surrogate 500)과 nit 3건(꺼진 endpoint의 422 응답, C1·bidi 문자 원문 기록, 스택 전체 분할)을 반영했다.
+- **독립 리뷰**: blocker 없음. should-fix 2건(짝 없는 surrogate 500, 재검토에서 U+FFFF 위 문자 escape 오류)과 nit 3건(꺼진 endpoint의 422 응답, C1·bidi 문자 원문 기록, 스택 전체 분할)을 반영했다.
 - **잔여 위험**: 켜 둔 동안에는 loopback 출처 누구나 항목을 쓸 수 있다(최대 약 2 MiB, 위조 불가). 진단할 때만 켠다. 브라우저 페이지를 통한 loopback 신뢰 문제는 #28에서 다룬다.

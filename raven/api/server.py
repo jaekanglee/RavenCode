@@ -3015,7 +3015,9 @@ _LINE_BOUNDARY = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 def _escape_invisible(text: str) -> str:
     return "".join(
-        f"\\u{ord(ch):04x}" if ord(ch) > 0x7E and unicodedata.category(ch) in _INVISIBLE_CATEGORIES else ch
+        # json.dumps(ensure_ascii=True) spells it as JSON does: \\uXXXX, or a surrogate
+        # pair above U+FFFF (a bare 5-digit \\u escape would change the text).
+        json.dumps(ch)[1:-1] if ord(ch) > 0x7E and unicodedata.category(ch) in _INVISIBLE_CATEGORIES else ch
         for ch in text
     )
 
