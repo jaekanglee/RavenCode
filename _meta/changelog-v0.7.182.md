@@ -1471,3 +1471,30 @@ Desktop Core는 Tailscale 주소를 기동 시점에 한 번 정하고, 그 값�
   - 변형 검사: 게이트 제거, 보이지 않는 문자 escape 제거, surrogate escape만 제거, 본문 파싱 뒤 게이트, JSON 대신 평문, 회전 제거, lock 제거, 필드 상한 제거 — 각각 신규 테스트가 실패한다.
 - **독립 리뷰**: blocker 없음. should-fix 2건(짝 없는 surrogate 500, 재검토에서 U+FFFF 위 문자 escape 오류)과 nit 3건(꺼진 endpoint의 422 응답, C1·bidi 문자 원문 기록, 스택 전체 분할)을 반영했다.
 - **잔여 위험**: 켜 둔 동안에는 loopback 출처 누구나 항목을 쓸 수 있다(최대 약 2 MiB, 위조 불가). 진단할 때만 켠다. 브라우저 페이지를 통한 loopback 신뢰 문제는 #28에서 다룬다.
+
+## 62. loopback 프록시가 XFF와 다른 출처 헤더를 함께 보내면 토큰 요구 (Issue #29)
+
+launcher 모드(`python -m raven.api`, 데스크톱 API·MCP)의 게이트는 loopback peer가 보낸 `X-Forwarded-For`를 해석한다. `Forwarded`나 `X-Real-IP`만 오면 401이었다. 그러나 **XFF와 함께** 오면 XFF만 보고 판정했다(PR #27 리뷰에서 strict xfail로 기록).
+
+- **수정 전 재현** (실제 소켓, 격리 포트, 임시 vault, master `4e9b0e2`):
+  - nginx `proxy_set_header X-Real-IP $remote_addr;`만 쓴 구성을 흉내 낸 scratch 프록시를 LAN 주소에 띄웠다. 이 프록시는 클라이언트 헤더를 그대로 넘기고 X-Real-IP만 덧붙인다.
+  - LAN 클라이언트가 헤더 없이 요청하면 401이었다. `X-Forwarded-For: 127.0.0.1`을 넣으면 **토큰 없이 200**이었다.
+  - 직접 API에 `X-Forwarded-For: 127.0.0.1`과 `X-Real-IP: 192.168.1.50`을 함께 보내도 200이었다.
+- **수정** (`raven/core/access.py::effective_client`):
+  - launcher 모드에서 loopback peer라도 XFF 외의 출처 헤더가 하나라도 있으면 출처를 알 수 없음(`None`)으로 보고 토큰을 요구한다. 순서와 값은 무관하다. 둘 다 loopback이라고 해도 마찬가지다 — 서로 다른 관례가 섞인 요청은 사칭과 구분할 수 없다.
+  - 출처 헤더 목록을 넓혔다: `Forwarded`, `X-Real-IP`에 더해 `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Fastly-Client-IP`, `X-Cluster-Client-IP`. 이 헤더만 오는 경우도 기존 `Forwarded`·`X-Real-IP`와 같이 토큰을 요구한다(strict 모드에서도 같다).
+  - Core API(`TokenGate`)와 MCP(`LanTokenAuth`)는 같은 함수를 쓴다.
+  - `scripts/spa_server.py`도 새 헤더를 업스트림으로 넘기지 않는다(클라이언트 출처 헤더는 모두 버리고 XFF를 새로 쓴다).
+- **호환성** (실제 실행):
+  - vite dev 서버(대시보드와 같은 `changeOrigin`·`xfwd` 설정, scratch config로 격리 포트에 연결)가 보내는 헤더는 `X-Forwarded-For`, `X-Forwarded-Port`, `X-Forwarded-Proto`, `X-Forwarded-Host`뿐이다. 클라이언트가 보낸 X-Real-IP는 그대로 넘긴다.
+  - vite 경유 loopback 클라이언트는 수정 전후 모두 200, LAN 클라이언트는 401(XFF로 127.0.0.1을 넣어도 vite가 실제 주소를 덧붙여 401).
+  - 변경점: loopback 클라이언트가 vite를 거치며 직접 `X-Real-IP` 같은 헤더를 붙이면 이제 토큰이 필요하다. 브라우저와 대시보드는 이런 헤더를 보내지 않는다.
+  - `spa_server`: 기존 테스트 통과, 새 헤더도 업스트림에서 빠진다.
+- **수정 후 재현**: 같은 프록시 경로의 `X-Forwarded-For: 127.0.0.1` 요청이 401, 직접 API 조합 요청도 401.
+- **문서**: README 프록시 정책, ADR `adr-2026-10-08-core-api-access-gate`(개정 항목), `adr-2026-10-09-mcp-remote-token`, `raven/core/access.py` 모듈 docstring을 갱신했다.
+- **검증**:
+  - strict xfail `test_known_gap_xff_with_other_forwarding_header_from_loopback`을 일반 테스트로 바꿨다: 다른 출처 헤더 9종 × XFF 3종 × 두 게이트, 헤더 순서 반대도 401, `effective_client`는 `None`.
+  - parity 매트릭스(`HEADER_SETS`)에 조합 7가지를 더했다. 계약을 따로 적은 `_expected`도 새 헤더 목록을 쓴다. Core API와 MCP의 판정은 모든 경우 같다.
+  - 토큰이 있으면 어떤 헤더 조합이든 통과한다. vite 형태의 헤더(XFF + X-Forwarded-Port/-Proto/-Host)는 기존 판정 그대로다.
+  - `tests/test_mcp_forwarded_parity.py`·`test_core_api_forwarded.py`·`test_spa_server_auth.py` 1100 passed.
+- **잔여 위험 (변경 없음)**: 이 기기에서 도는 프록시가 **출처 헤더를 하나도 붙이지 않고** API를 LAN에 중계하면 직접 loopback 접속과 구분할 수 없다(승인된 잔여 위험, README). 목록에 없는 비표준 헤더만 쓰는 프록시도 같다.

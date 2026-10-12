@@ -27,7 +27,9 @@ X-Real-IP)는 서버 설정에 따라 다르게 다룬다 — PR #21 재리뷰 P
   소켓 peer이고 ``FORWARDED_ALLOW_IPS``는 무시된다. 이때 게이트가 X-Forwarded-For를 직접
   읽되 **loopback peer(이 기기의 프록시, 예: vite ``xfwd``)가 보낸 경우만**: 오른쪽부터
   loopback hop을 건너뛰고 처음 나오는 주소가 출처다. 해석할 수 없는 항목이 있으면 신뢰 ❌.
-  비루프백 peer의 프록시 헤더, X-Forwarded-For 없는 Forwarded/X-Real-IP는 신뢰 ❌.
+  비루프백 peer의 프록시 헤더, 그리고 X-Forwarded-For 외의 출처 헤더(Forwarded, X-Real-IP,
+  True-Client-IP 등 ``_FORWARDING_HEADERS``)가 하나라도 있는 요청은 — X-Forwarded-For와 함께여도 —
+  신뢰 ❌ (#29: 클라이언트의 XFF를 그대로 넘기고 실제 주소는 X-Real-IP에만 쓰는 프록시).
 
 통과한 요청의 ``scope["client"]``는 게이트가 본 실효 출처로 바뀐다(모르면 ``"unknown"``) —
 ``_require_loopback`` 같은 하위 가드도 같은 출처를 본다. 이 기기의 프록시가 X-Forwarded-For를
@@ -178,7 +180,19 @@ def is_trusted_client(host: str | None, *, allow_tailnet: bool = True) -> bool:
     return allow_tailnet and is_tailnet_peer(host)
 
 
-_FORWARDING_HEADERS = (b"x-forwarded-for", b"forwarded", b"x-real-ip")
+# Headers a proxy may use to name the original client. Only X-Forwarded-For is ever
+# read (launcher mode); any of the others means some proxy put the client there, so
+# the request's source cannot be told apart from the socket peer (Issue #29).
+_FORWARDING_HEADERS = (
+    b"x-forwarded-for",
+    b"forwarded",
+    b"x-real-ip",
+    b"x-client-ip",
+    b"true-client-ip",
+    b"cf-connecting-ip",
+    b"fastly-client-ip",
+    b"x-cluster-client-ip",
+)
 
 # True only while Raven's own launcher serves the app with ``proxy_headers=False``
 # (see ``serve_kwargs``) — then ``scope["client"]`` is the real socket peer.
@@ -227,7 +241,10 @@ def effective_client(scope) -> str | None:
         return peer
     if not _socket_peer:
         return None  # the server may already have rewritten the client from these headers
-    if not peer or not is_loopback_host(peer) or not xff:
+    # Issue #29: X-Forwarded-For is only believed alone. A proxy that also (or only)
+    # names the client in Forwarded / X-Real-IP / … may have passed the client's own
+    # X-Forwarded-For through untouched — e.g. nginx with just `X-Real-IP $remote_addr`.
+    if not peer or not is_loopback_host(peer) or not xff or other:
         return None
     entries = ",".join(xff).split(",")
     for entry in reversed(entries):

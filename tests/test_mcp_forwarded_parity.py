@@ -86,6 +86,14 @@ HEADER_SETS = [
     [("X-Real-IP", "127.0.0.1")],
     [("Host", "127.0.0.1"), ("Origin", "http://127.0.0.1")],
     [("Host", "localhost"), ("Origin", "tauri://localhost")],
+    # Issue #29: XFF together with another client-address header, and those headers alone.
+    [("X-Forwarded-For", "127.0.0.1"), ("X-Real-IP", "192.168.1.50")],
+    [("X-Forwarded-For", "127.0.0.1"), ("Forwarded", "for=192.168.1.50")],
+    [("X-Forwarded-For", "192.168.1.50"), ("X-Real-IP", "192.168.1.50")],
+    [("X-Forwarded-For", "127.0.0.1"), ("True-Client-IP", "192.168.1.50")],
+    [("X-Forwarded-For", "127.0.0.1"), ("CF-Connecting-IP", "192.168.1.50")],
+    [("True-Client-IP", "127.0.0.1")],
+    [("X-Client-IP", "192.168.1.50")],
 ]
 
 
@@ -103,7 +111,9 @@ def test_core_api_and_mcp_gates_agree(vaults_root, monkeypatch, mode, peer, head
 def _expected(mode, peer, headers):
     """The contract, spelled out independently of the implementation."""
     names = [k.lower() for k, _ in headers]
-    forwarding = [k for k in names if k in ("x-forwarded-for", "forwarded", "x-real-ip")]
+    client_headers = ("x-forwarded-for", "forwarded", "x-real-ip", "x-client-ip", "true-client-ip",
+                      "cf-connecting-ip", "fastly-client-ip", "x-cluster-client-ip")
+    forwarding = [k for k in names if k in client_headers]
     loop = access.is_loopback_client
     if not forwarding:
         return 200 if loop(peer) else 401
@@ -133,19 +143,55 @@ def test_mcp_gate_matches_the_written_contract(vaults_root, monkeypatch, mode, p
     assert _status(LanTokenAuth, peer, headers) == _expected(mode, peer, headers), (mode, peer, headers)
 
 
-# Known gap (reported in the PR #27 review, policy unchanged): when a loopback peer sends
-# X-Forwarded-For *and* Forwarded / X-Real-IP, the gate reads XFF only and ignores the
-# others. Exploitable only through an unofficial local proxy that passes the client's
-# own XFF through untouched while recording the real address elsewhere (e.g. nginx with
-# just `proxy_set_header X-Real-IP $remote_addr`) — the approved "unsupported proxy"
-# residual risk. Shipped proxies (vite xfwd appends, spa_server rewrites) never produce
-# this shape. strict xfail: flips to a failure when the gate fails closed here.
-@pytest.mark.xfail(strict=True, reason="XFF read alone when Forwarded/X-Real-IP also present (reported)")
+# Issue #29 (reported in the PR #27 review as a strict xfail): a loopback peer sending
+# X-Forwarded-For *and* another client-address header used to be judged by XFF alone —
+# an unofficial local proxy that passes the client's own XFF through untouched while
+# recording the real address elsewhere (e.g. nginx with just
+# `proxy_set_header X-Real-IP $remote_addr`) let `X-Forwarded-For: 127.0.0.1` through
+# without a token. Now the source is unknown and a token is required.
+OTHER_CLIENT_HEADERS = [
+    ("X-Real-IP", "192.168.1.50"),
+    ("Forwarded", "for=192.168.1.50"),
+    ("Forwarded", 'for="[2001:db8::1]:4711"'),
+    ("X-Client-IP", "192.168.1.50"),
+    ("True-Client-IP", "192.168.1.50"),
+    ("CF-Connecting-IP", "192.168.1.50"),
+    ("Fastly-Client-IP", "192.168.1.50"),
+    ("X-Cluster-Client-IP", "192.168.1.50"),
+    # Even when the other header also says loopback: two disagreeing conventions
+    # cannot be told apart from a spoof.
+    ("X-Real-IP", "127.0.0.1"),
+]
+
+
 @pytest.mark.parametrize("gate_cls", [TokenGate, LanTokenAuth])
-@pytest.mark.parametrize("other", [("X-Real-IP", "192.168.1.50"), ("Forwarded", "for=192.168.1.50")])
-def test_known_gap_xff_with_other_forwarding_header_from_loopback(vaults_root, monkeypatch, gate_cls, other):
+@pytest.mark.parametrize("other", OTHER_CLIENT_HEADERS)
+@pytest.mark.parametrize("xff", ["127.0.0.1", "127.0.0.1, 127.0.0.1", "::1"])
+def test_xff_with_another_client_header_from_loopback_needs_a_token(vaults_root, monkeypatch, gate_cls, other, xff):
     monkeypatch.setattr(access, "_socket_peer", True)
-    assert _status(gate_cls, "127.0.0.1", [("X-Forwarded-For", "127.0.0.1"), other]) == 401
+    assert _status(gate_cls, "127.0.0.1", [("X-Forwarded-For", xff), other]) == 401
+    assert _status(gate_cls, "127.0.0.1", [other, ("X-Forwarded-For", xff)]) == 401  # order does not matter
+    assert access.effective_client({"client": ("127.0.0.1", 1), "headers": [
+        (b"x-forwarded-for", xff.encode()), (other[0].lower().encode(), other[1].encode())]}) is None
+
+
+@pytest.mark.parametrize("gate_cls", [TokenGate, LanTokenAuth])
+def test_a_token_still_passes_with_any_forwarding_headers(vaults_root, monkeypatch, gate_cls):
+    monkeypatch.setattr(access, "_socket_peer", True)
+    token = mcp_tokens.add_token("issue29")
+    headers = [("X-Forwarded-For", "127.0.0.1"), ("X-Real-IP", "192.168.1.50"), ("Authorization", f"Bearer {token}")]
+    assert _status(gate_cls, "127.0.0.1", headers) == 200
+
+
+def test_the_xff_only_proxy_path_is_unchanged(vaults_root, monkeypatch):
+    """vite `xfwd` sends XFF plus X-Forwarded-Port/-Proto/-Host — none of those name a client."""
+    monkeypatch.setattr(access, "_socket_peer", True)
+    vite = [("X-Forwarded-For", "127.0.0.1"), ("X-Forwarded-Port", "5173"),
+            ("X-Forwarded-Proto", "http"), ("X-Forwarded-Host", "127.0.0.1:5173")]
+    for gate_cls in (TokenGate, LanTokenAuth):
+        assert _status(gate_cls, "127.0.0.1", vite) == 200
+        lan = [("X-Forwarded-For", "192.168.1.50")] + vite[1:]
+        assert _status(gate_cls, "127.0.0.1", lan) == 401
 
 
 def test_direct_loopback_client_cannot_gain_anything_from_xff(vaults_root, monkeypatch):
