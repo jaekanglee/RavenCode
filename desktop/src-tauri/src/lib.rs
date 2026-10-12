@@ -1,6 +1,6 @@
 mod core;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, PoisonError};
 use tauri::{command, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -24,24 +24,70 @@ fn show_and_recover(window: &WebviewWindow) {
     let _ = window.eval(RECOVER_IF_BLANK_JS);
 }
 
+/// The running Core, plus the start still waiting for readiness (Issue #43) so
+/// `stop` — app exit, restart — can abort it instead of leaving it behind.
 #[derive(Default)]
-struct CoreState(Mutex<Option<core::ManagedCore>>);
+struct CoreState(Mutex<Option<core::ManagedCore>>, Mutex<Option<Arc<core::PendingStart>>>);
 
 impl CoreState {
-    fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<(), String> {
-        let core = core::ManagedCore::start(mcp, resource_dir)?;
-        eprintln!("Raven Python Core ready at {}", core.endpoint);
-        if let Some(ref mcp_ep) = core.mcp_endpoint {
-            eprintln!("Raven MCP endpoint at {mcp_ep}");
+    fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<(), core::StartError> {
+        self.start_with(|pending| core::ManagedCore::start(mcp, resource_dir, pending))
+    }
+
+    fn start_with(
+        &self,
+        launch: impl FnOnce(&core::PendingStart) -> Result<core::ManagedCore, core::StartError>,
+    ) -> Result<(), core::StartError> {
+        let pending = Arc::new(core::PendingStart::default());
+        if let Some(previous) = self.pending().replace(Arc::clone(&pending)) {
+            previous.cancel();
         }
-        *self
-            .0
-            .lock()
-            .map_err(|_| "Python Core 상태 lock이 손상되었습니다".to_string())? = Some(core);
-        Ok(())
+        // Whatever started before this one goes, so two Cores never run side by side.
+        if let Some(mut previous) = self.0.lock().ok().and_then(|mut state| state.take()) {
+            previous.stop();
+        }
+        let result = match launch(&pending) {
+            // Cancelled after the child left the cancel slot (it was parsing the
+            // line, or timing out): the start failed, but nobody is waiting on it
+            // any more — app exit or a newer start took over. Not a failure to report.
+            Err(core::StartError::Failed(error)) if pending.is_cancelled() => {
+                eprintln!("[core] superseded start ended with: {error}");
+                Err(core::StartError::Cancelled)
+            }
+            other => other,
+        };
+        let result = result.and_then(|core| {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| core::StartError::Failed("Python Core 상태 lock이 손상되었습니다".into()))?;
+            // `stop` cancels before it takes the state lock, so a start that
+            // finished after it ran sees the flag here and drops (stops) its Core.
+            if pending.is_cancelled() {
+                return Err(core::StartError::Cancelled);
+            }
+            eprintln!("Raven Python Core ready at {}", core.endpoint);
+            if let Some(ref mcp_ep) = core.mcp_endpoint {
+                eprintln!("Raven MCP endpoint at {mcp_ep}");
+            }
+            *state = Some(core);
+            Ok(())
+        });
+        let mut slot = self.pending();
+        if slot.as_ref().is_some_and(|p| Arc::ptr_eq(p, &pending)) {
+            *slot = None;
+        }
+        result
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<Arc<core::PendingStart>>> {
+        self.1.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn stop(&self) {
+        if let Some(pending) = self.pending().take() {
+            pending.cancel();
+        }
         if let Ok(mut state) = self.0.lock() {
             if let Some(mut core) = state.take() {
                 core.stop();
@@ -172,13 +218,16 @@ fn do_restart_core(app: &tauri::AppHandle) -> Result<(), String> {
     state.stop();
     let resource_dir = app.path().resource_dir().ok();
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
-    state.start(mcp_enabled, resource_dir)
+    state.start(mcp_enabled, resource_dir).map_err(|e| e.to_string())
 }
 
 /// Restarts the Python Core on demand (invoked from the dashboard admin page).
+///
+/// Issue #43: async + blocking pool, so the readiness wait (up to 60 s) never
+/// freezes the main thread — Quit stays responsive and cancels the restart.
 #[command]
-fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
-    do_restart_core(&app)
+async fn restart_core(app: tauri::AppHandle) -> Result<(), String> {
+    off_runtime(move || do_restart_core(&app)).await
 }
 
 /// Resolves where an exported file should land inside `dir`.
@@ -288,9 +337,14 @@ pub fn run() {
             // unwind 불가)으로 처리하므로, 여기서 실패를 직접 흡수해 다이얼로그 후 종료한다.
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = handle.state::<CoreState>().start(mcp_enabled, resource_dir) {
-                    report_startup_failure_and_exit(&handle, &e);
+            // Issue #43: the readiness wait blocks (bounded by CORE_READINESS_TIMEOUT),
+            // so it runs on the blocking pool rather than an async runtime worker.
+            tauri::async_runtime::spawn_blocking(move || {
+                match handle.state::<CoreState>().start(mcp_enabled, resource_dir) {
+                    Ok(()) => {}
+                    // App exit or a tray/dashboard restart took over — not a failure.
+                    Err(core::StartError::Cancelled) => eprintln!("Raven Python Core start cancelled"),
+                    Err(core::StartError::Failed(e)) => report_startup_failure_and_exit(&handle, &e),
                 }
             });
 
@@ -316,9 +370,13 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "restart" => {
-                        if let Err(e) = do_restart_core(app) {
-                            eprintln!("Failed to restart core: {}", e);
-                        }
+                        // Off the main thread (Issue #43), like the dashboard's restart.
+                        let app = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(e) = do_restart_core(&app) {
+                                eprintln!("Failed to restart core: {}", e);
+                            }
+                        });
                     }
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -833,5 +891,149 @@ mod tests {
         let at = src.find(arm).expect("Reopen 처리부가 사라졌다");
         let before = src[..at].trim_end().lines().last().unwrap_or("").trim();
         assert_eq!(before, "#[cfg(target_os = \"macos\")]");
+    }
+
+    /// Issue #43: a start still waiting for readiness belongs to `CoreState` too.
+    #[cfg(unix)]
+    mod pending_start {
+        use super::super::{core, CoreState};
+        use core::{ManagedCore, StartError};
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        const READY: &str = r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}"#;
+
+        fn sh(name: &str, script: &str) -> (Command, std::path::PathBuf) {
+            let pidfile = std::env::temp_dir().join(format!("raven43-lib-{}-{name}.pid", std::process::id()));
+            let _ = std::fs::remove_file(&pidfile);
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(script).env("PIDFILE", &pidfile);
+            (cmd, pidfile)
+        }
+
+        fn pid(pidfile: &std::path::Path) -> String {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(text) = std::fs::read_to_string(pidfile).ok().filter(|t| !t.trim().is_empty()) {
+                    return text.trim().to_string();
+                }
+                assert!(Instant::now() < deadline, "no pid in {pidfile:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// Whether `pid` still exists a moment from now (killing races the check by microseconds).
+        fn alive(pid: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while exists(pid) {
+                if Instant::now() >= deadline {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        fn exists(pid: &str) -> bool {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+
+        #[test]
+        fn stop_kills_a_start_that_is_still_waiting() {
+            let state = Arc::new(CoreState::default());
+            let (cmd, pidfile) = sh("stop", "echo $$ > \"$PIDFILE\"; exec sleep 30");
+            let s2 = Arc::clone(&state);
+            let waiter = std::thread::spawn(move || {
+                s2.start_with(|p| ManagedCore::launch(cmd, Duration::from_secs(20), p))
+            });
+            let pid = pid(&pidfile);
+            state.stop(); // app exit / restart
+            assert!(!alive(&pid), "stop must not leave the pending Core running");
+            assert!(matches!(waiter.join().unwrap(), Err(StartError::Cancelled)));
+            assert!(state.0.lock().unwrap().is_none());
+            assert!(state.1.lock().unwrap().is_none());
+        }
+
+        #[test]
+        fn a_start_that_finishes_after_stop_does_not_survive() {
+            let state = CoreState::default();
+            let (cmd, _) = sh("race", &format!("echo '{READY}'; exec sleep 30"));
+            let mut started_pid = 0;
+            let result = state.start_with(|p| {
+                let core = ManagedCore::launch(cmd, Duration::from_secs(10), p)?;
+                started_pid = core.pid();
+                state.stop(); // lands between readiness and storing the Core
+                Ok(core)
+            });
+            assert!(matches!(result, Err(StartError::Cancelled)));
+            assert!(state.0.lock().unwrap().is_none());
+            assert!(!alive(&started_pid.to_string()), "the late Core must be stopped");
+        }
+
+        #[test]
+        fn a_newer_start_replaces_the_pending_one() {
+            let state = Arc::new(CoreState::default());
+            let (slow, pidfile) = sh("older", "echo $$ > \"$PIDFILE\"; exec sleep 30");
+            let s2 = Arc::clone(&state);
+            let older = std::thread::spawn(move || {
+                s2.start_with(|p| ManagedCore::launch(slow, Duration::from_secs(20), p))
+            });
+            let older_pid = pid(&pidfile);
+            let (fast, _) = sh("newer", &format!("echo '{READY}'; exec sleep 30"));
+            state
+                .start_with(|p| ManagedCore::launch(fast, Duration::from_secs(10), p))
+                .unwrap();
+            assert!(matches!(older.join().unwrap(), Err(StartError::Cancelled)));
+            assert!(!alive(&older_pid));
+            assert!(state.0.lock().unwrap().as_mut().unwrap().is_alive());
+            state.stop();
+        }
+
+        #[test]
+        fn a_superseded_start_that_then_fails_is_not_reported_as_a_failure() {
+            // Restart cancels the initial start after its child left the cancel
+            // slot; the initial start then fails on its own (here: bad JSON).
+            // Reporting that would show the failure dialog and exit the app.
+            let state = CoreState::default();
+            let (cmd, _) = sh("superseded", "echo not-json; exec sleep 30");
+            let result = state.start_with(|p| {
+                p.cancel();
+                ManagedCore::launch(cmd, Duration::from_secs(10), &core::PendingStart::default())
+            });
+            assert!(matches!(result, Err(StartError::Cancelled)), "{result:?}");
+        }
+
+        #[test]
+        fn a_new_start_stops_the_core_already_running() {
+            let state = CoreState::default();
+            let (first, _) = sh("first", &format!("echo '{READY}'; exec sleep 30"));
+            state.start_with(|p| ManagedCore::launch(first, Duration::from_secs(10), p)).unwrap();
+            let first_pid = state.0.lock().unwrap().as_ref().unwrap().pid().to_string();
+            let (second, _) = sh("second", "exit 1");
+            let _ = state.start_with(|p| ManagedCore::launch(second, Duration::from_secs(10), p));
+            assert!(!alive(&first_pid), "two Cores must not run side by side");
+        }
+
+        #[test]
+        fn a_retry_after_failed_starts_is_stored() {
+            let state = CoreState::default();
+            for (name, script) in [("f1", "exec sleep 30"), ("f2", "exit 2")] {
+                let (cmd, _) = sh(name, script);
+                let result = state.start_with(|p| ManagedCore::launch(cmd, Duration::from_millis(300), p));
+                assert!(matches!(result, Err(StartError::Failed(_))));
+                assert!(state.0.lock().unwrap().is_none());
+            }
+            let (cmd, _) = sh("ok", &format!("echo '{READY}'; exec sleep 30"));
+            state.start_with(|p| ManagedCore::launch(cmd, Duration::from_secs(10), p)).unwrap();
+            assert_eq!(state.0.lock().unwrap().as_ref().unwrap().endpoint, "http://127.0.0.1:41000");
+            assert!(state.1.lock().unwrap().is_none());
+            state.stop();
+        }
     }
 }

@@ -17,6 +17,11 @@ Readiness protocol:
 The Tauri shell reads this line, then exposes the endpoint(s) to the webview
 via the ``core_endpoint`` / ``mcp_endpoint`` commands.
 
+  Issue #43: the shell waits at most 60 s for this line
+  (``CORE_READINESS_TIMEOUT`` in desktop/src-tauri/src/core.rs), then kills the
+  Core. Startup work before readiness — imports, the uvicorn and MCP deadlines
+  below, the identity probes — must stay well inside that budget.
+
 External access (Tailscale) — opt-in (Issue #14):
   ``--host 0.0.0.0`` binds all interfaces (same pattern as ``python -m raven.api``),
   but only when ``RAVEN_ALLOW_REMOTE=1`` is set. The API app carries its own
@@ -381,7 +386,8 @@ def _stop_mcp(server, thread: threading.Thread, socks: list[socket.socket], port
     startup would leave it listening with nobody accepting. asyncio never took
     the socket over in that case, so it is closed first — a startup stuck in
     the app's lifespan never reaches the join below. The join stays short so
-    a stuck MCP cannot push readiness past the shell's 15s limit. Returns
+    a stuck MCP cannot eat into the shell's readiness budget (60 s, see the
+    module docstring). Returns
     False (and says so) if the thread did not stop: that is not a clean yield.
     """
     server.should_exit = True

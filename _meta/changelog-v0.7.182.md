@@ -1300,3 +1300,30 @@ readiness는 실제 bind와 무관하게 항상 `{"host": "127.0.0.1"}`을 보�
   - 실행 중 Tailscale IP 변화(#58).
   - 셸이 Core 자식을 종료하는 거부 경로는 단위 테스트로 직접 검증하지 못했다(실제 Tauri GUI 실행은 **UNKNOWN**).
   - 특정 IP bind 테스트는 비-loopback 주소가 없는 환경에서 건너뛴다.
+
+## 58. Desktop 셸의 Core readiness 대기에 상한 — 출력 없이 살아 있는 Core가 셸을 붙잡지 않게 (Issue #43)
+
+셸은 Python Core의 readiness 줄(stdout 첫 줄)을 타임아웃 없는 blocking `read_line`으로 기다렸다. 격리 재현(master `305fc97`): 출력 없이 살아 있는 가짜 Core와, import 단계에서 멈춘 실제 venv Python(`sitecustomize`에서 sleep) 모두 `ManagedCore::start`가 20초 넘게 반환하지 않았고 자식은 살아 있었다. 같은 재현에서 readiness 전에 stderr를 파이프 버퍼(64 KiB) 넘게 쓰는 Core도 무기한 멈췄다 — readiness 전까지 아무도 stderr를 읽지 않아 Core 쪽 write가 막혔다.
+
+- **상한** (`desktop/src-tauri/src/core.rs`): `CORE_READINESS_TIMEOUT` 60초.
+  - 정상 기동은 2초 미만(macOS 실측 0.4–0.7초, bytecode 캐시가 없을 때 약 2초, 셸 경로 MCP 포함 1.15초).
+  - Core 자체 deadline은 정상적으로 그보다 길어질 수 있다 — uvicorn 10초, MCP 10초(넘으면 API만), #22 정체성 확인 수 초씩, #50 MCP 정지 2초. import 이후만 약 30초이고 import 자체에는 deadline이 없다. 60초는 이 경로보다 길어 느리지만 정상인 Core를 죽이지 않는다.
+  - 웹뷰 계약은 그대로다: `core_endpoint`/`mcp_endpoint`는 15초 뒤 `Err`, dashboard는 다시 묻는다(최대 30회).
+- **대기 방식**: 첫 줄은 reader 스레드가 읽어 채널로 넘기고(이후 같은 스레드가 stdout 중계를 계속), 대기 스레드는 50ms마다 자식 종료·취소·deadline을 확인한다. 정상 readiness 외의 모든 출구에서 자식을 kill·wait한 뒤 `Err`로 기존 실패 안내(대화상자 → 종료) 경로를 탄다.
+  - 구분되는 실패: timeout / readiness 전 종료(exit status 포함) / 살아 있는 채 stdout 닫힘 / 읽기 오류 / 형식 오류(`bind_host` 누락 포함, #16) / readiness 직후 종료 / 불일치 readiness(#16) / 실행 파일 없음.
+  - 손자 프로세스가 파이프를 잡고 있어 EOF가 오지 않아도 Core 종료를 따로 감지한다. 실패 메시지용 stderr 수집도 1초로 묶여 오류 경로가 멈추지 않는다.
+  - stderr는 spawn 직후부터 중계하고 마지막 8 KiB를 실패 메시지에 붙인다. 파이프 버퍼를 넘는 기동 로그로 멈추던 경로가 사라졌다.
+- **취소**: 대기 중인 자식은 `PendingStart`에 둔다. `CoreState::stop`(앱 종료, 재시작)이 그 자식을 직접 kill한다 — 이전에는 기동 중 앱이 끝나면 Core가 남을 수 있었다. readiness와 저장 사이에 stop이 끼어도 그 Core는 저장되지 않고 종료된다. 새 기동은 이전 대기 기동을 취소한다. 취소는 실패 대화상자를 띄우지 않는다.
+- **런타임 워커·메인 스레드**: 최초 기동을 `async_runtime::spawn`에서 `spawn_blocking`으로 옮겨 대기가 async 워커를 점유하지 않는다. `restart_core` 커맨드와 트레이 "Restart Backend"는 메인 스레드에서 동기로 돌던 것을 blocking pool로 옮겼다 — 재시작 대기 중에도 UI와 종료가 응답하고, 종료가 대기 중인 재시작을 취소한다. `restart_core`의 호출 방식과 반환은 그대로다.
+- **기동 교체**: 새 기동은 이미 실행 중인 Core도 먼저 멈춘다(두 Core 동시 실행 방지). 취소된 기동이 그 뒤 스스로 실패해도(형식 오류·timeout 등) 실패로 보고하지 않는다 — 초기 기동 중 재시작을 누르면 실패 대화상자로 앱이 꺼지던 경로를 막았다(독립 리뷰).
+- **바뀌지 않은 것**: readiness 프로토콜(첫 줄 JSON), `core_endpoint`/`mcp_endpoint` 15초 계약, `restart_core`의 `Result<(), String>` 반환, 신규 의존성 없음. Python 쪽은 docstring에 셸의 대기 상한만 적었다.
+- **검증**:
+  - 재현(위)과 수정 후: 출력 없는 가짜 Core는 timeout 뒤 종료, import에서 멈춘 실제 Python Core는 60.01초에 kill·reap. 실제 Core 정상 기동은 셸 경로로 0.62–1.15초(MCP 포함), drop 후 프로세스 없음.
+  - `core.rs` 15건 추가: 정상 readiness와 drop 정리, 출력 없는 Core timeout과 kill, deadline 직후 readiness는 timeout·직전은 수용, 형식 오류, `bind_host` 없는 readiness(#16), 불일치 readiness(#16), 살아 있는 채 stdout 닫힘, 조기 종료(status·stderr), 손자가 파이프를 잡은 조기 종료, readiness 전 stderr 256 KiB, 대기 중 취소, spawn 전 취소, 연속 실패 뒤 재시도, 실행 파일 없음.
+  - `lib.rs` 6건 추가: stop이 대기 중 기동을 kill, readiness와 저장 사이의 stop, 새 기동이 대기 기동을 대체, 취소 뒤 실패를 실패로 보고하지 않음, 새 기동이 실행 중 Core를 멈춤, 실패 뒤 재시도 저장. 마지막 리뷰 보완 2건은 수정을 되돌리면 실패함을 확인했다.
+  - `cargo test --lib` macOS 56 passed(5회 반복 안정), Linux Docker(rust:1-bookworm, 전체 crate) 56 passed. `cargo clippy` 신규 경고 없음.
+  - Python: `tests/test_desktop_runtime.py` 80 passed(#16·#22·#23·#49·#50·#54 회귀 포함). 전체 pytest 2202 passed, 2 failed — `test_desktop_core_survives_closed_stderr_pipe`(master에서도 3/3 실패)와 `test_no_candidates_is_not_an_error`(기존 실패), 이번 변경과 무관.
+- **잔여 위험**:
+  - `kill`은 Core 프로세스만 종료한다. 기동 전에 Core가 띄운 손자가 파이프를 잡고 있으면 손자와 셸의 relay 스레드 2개가 남는다(기동 실패마다). 현재 Core는 readiness 전에 오래 사는 하위 프로세스를 만들지 않는다.
+  - 셸이 대기 중 비정상 종료(crash, SIGKILL)하면 readiness 전 Core의 정리는 #23 부모 감시에 달려 있고, 그 감시는 readiness 뒤에 시작한다 — 멈춘 Core는 남을 수 있다.
+  - Windows 런타임, 실제 Tauri GUI에서의 대화상자·재시작 동작은 **UNKNOWN**(단위 테스트는 `sh`를 쓰는 unix 전용).
