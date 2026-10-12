@@ -1129,6 +1129,43 @@ mod tests {
         );
     }
 
+    /// Issue #17: the webview has a CSP, and scripts never get inline or eval.
+    #[test]
+    fn webview_csp_is_set_and_scripts_stay_self_only() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let security = &conf["app"]["security"];
+        let csp = security["csp"].as_object().expect("csp must be set (not null)");
+        let script = csp["script-src"].as_str().unwrap();
+        assert_eq!(script, "'self'", "script-src must stay 'self' only");
+        for (directive, value) in csp {
+            let value = value.as_str().unwrap();
+            assert!(!value.contains("unsafe-eval"), "{directive}: {value}");
+            assert!(!value.contains('*'), "{directive} must not use a wildcard: {value}");
+            if value.contains("'unsafe-inline'") {
+                assert_eq!(directive, "style-src", "only style-src may allow inline (runtime <style> injection)");
+            }
+        }
+        for (directive, expected) in [("object-src", "'none'"), ("frame-src", "'none'"), ("base-uri", "'self'"), ("form-action", "'none'")] {
+            assert_eq!(csp[directive].as_str(), Some(expected), "{directive}");
+        }
+        // Tauri must not add hashes to style-src: they would switch 'unsafe-inline' off.
+        assert_eq!(security["dangerousDisableAssetCspModification"], serde_json::json!(["style-src"]));
+        // The bundled page has no inline script that would need one.
+        let index = include_str!("../../../dashboard/index.html");
+        assert!(!index.contains("<script>"), "inline <script> in dashboard/index.html");
+    }
+
+    /// Issue #17: no app-wide ATS exception — plain HTTP only to local networks and MagicDNS.
+    #[test]
+    fn ats_allows_local_networking_not_arbitrary_loads() {
+        let plist = include_str!("../Info.plist");
+        for key in ["NSAllowsArbitraryLoads", "NSAllowsArbitraryLoadsInWebContent", "NSAllowsArbitraryLoadsForMedia"] {
+            assert!(!plist.contains(&format!("<key>{key}</key>")), "{key} is back");
+        }
+        assert!(plist.contains("<key>NSAllowsLocalNetworking</key>\n\t\t<true/>"));
+        assert!(plist.contains("<key>ts.net</key>"));
+    }
+
     #[test]
     fn default_capability_allows_backup_dialogs() {
         // 백업 내보내기/가져오기 대화상자. 권한이 빠지면 invoke가 조용히 거부된다

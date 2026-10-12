@@ -1,4 +1,5 @@
 import MDEditor from "@uiw/react-md-editor";
+import { SAFE_MARKDOWN_PROPS } from "../lib/markdown-safety";
 import { useEffect, useState, type FC } from "react";
 import { preprocessWikilinks } from "../lib/wikilink";
 
@@ -45,6 +46,7 @@ export const MarkdownView: FC<MarkdownViewProps> = ({ content, vault }) => {
     return (
         <div className="raven-md-view" data-color-mode={colorMode}>
             <MDEditor.Markdown
+                {...SAFE_MARKDOWN_PROPS}
                 source={processed}
                 style={{
                     backgroundColor: "transparent",

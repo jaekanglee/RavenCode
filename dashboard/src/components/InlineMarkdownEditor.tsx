@@ -27,6 +27,7 @@
   */
  import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
  import MDEditor from "@uiw/react-md-editor";
+import { SAFE_MARKDOWN_PROPS } from "../lib/markdown-safety";
  import { useNavigate } from "react-router-dom";
  import { deletePage, draftStorageKey, legacyDraftStorageKey, updatePage } from "../lib/api";
  import { preprocessWikilinks } from "../lib/wikilink";
@@ -669,6 +670,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
          {mode === "view" ? (
            <div ref={viewBodyRef}>
              <MDEditor.Markdown
+                 {...SAFE_MARKDOWN_PROPS}
                source={displayContent ?? ""}
                style={{
                  backgroundColor: "transparent",
@@ -853,6 +855,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
                    }}
                  >
                    <MDEditor.Markdown
+                       {...SAFE_MARKDOWN_PROPS}
                      source={previewSource}
                      style={{
                        backgroundColor: "transparent",

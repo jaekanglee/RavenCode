@@ -20,16 +20,8 @@
       React 마운트 전에도 보이는 정적 로더를 둔다. 테마는 마운트 전이라
       localStorage를 동기적으로 읽어 맞춰준다(다크 유저에게 흰 배경 노출 방지).
     -->
-    <script>
-      (function () {
-        var dark = false;
-        try {
-          var t = localStorage.getItem("theme");
-          dark = t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches);
-        } catch (e) {}
-        document.documentElement.style.background = dark ? "#0f172a" : "#f8fafc";
-      })();
-    </script>
+    <!-- Issue #17: external, so the desktop CSP can keep script-src to 'self'. -->
+    <script src="/boot-theme.js"></script>
     <div
       id="boot-loader"
       style="

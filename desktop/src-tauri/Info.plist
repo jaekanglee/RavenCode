@@ -2,10 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!--
+	  Issue #17: was NSAllowsArbitraryLoads (plain HTTP to any host). Raven's Core and
+	  the other Raven hosts a user registers are reached over plain HTTP on loopback,
+	  the LAN and the tailnet: NSAllowsLocalNetworking covers loopback, IP addresses,
+	  unqualified names and .local; ts.net covers Tailscale MagicDNS names. Any other
+	  host needs HTTPS.
+	-->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>ts.net</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 </dict>
 </plist>
