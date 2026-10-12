@@ -5,7 +5,7 @@ import os
 import json
 import sqlite3
 from typing import Any, List, Dict, Optional
-from .gemini_client import generate_content
+from .gemini_client import gemini_api_key, generate_content
 from .vault import Vault
 
 def get_contradiction_pairs(vault: Vault) -> list[dict[str, Any]]:
@@ -107,7 +107,7 @@ def check_contradictions(vault: Vault) -> dict[str, Any]:
     if not context:
         return {"ok": True, "contradictions": [], "used_llm": False}
         
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    api_key = gemini_api_key()
     contradictions = []
     used_llm = False
     
