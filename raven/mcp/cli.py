@@ -580,6 +580,8 @@ def build_http_app(mode: str, host: str):
     # (mcp/server/transport_security.py). 그 탓에 Tailscale IP·LAN IP로 붙는
     # 원격 클라이언트가 uvicorn 바인딩과 무관하게 421 "Invalid Host header"를
     # 맞았다. DNS-rebinding 보호는 끄고, 출처 판단은 소켓 주소를 보는 게이트에 맡긴다.
+    # Issue #28: 게이트(LanTokenAuth)가 토큰 없는 loopback 요청에만 loopback Host·Origin을
+    # 요구한다 — 원격 Bearer 클라이언트의 Host(tailnet·LAN IP)는 검사하지 않는다.
     return LanTokenAuth(mcp.streamable_http_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         host=host,

@@ -75,8 +75,10 @@ def test_origin_header_checked_on_loopback(tmp_path, monkeypatch):
             headers={"Origin": origin},
         )
 
-    assert export("http://evil.example", "e1.zip").status_code == 403
-    assert export("http://192.168.0.5:5173", "e2.zip").status_code == 403
+    # Issue #28: a foreign Origin gets no tokenless loopback trust — refused by the gate.
+    assert export("http://evil.example", "e1.zip").status_code == 401
+    assert export("http://192.168.0.5:5173", "e2.zip").status_code == 401
+    assert not (tmp_path / "e1.zip").exists() and not (tmp_path / "e2.zip").exists()
     assert export("tauri://localhost", "e3.zip").status_code == 200
     assert export("http://tauri.localhost", "e4.zip").status_code == 200
     assert export("http://localhost:5173", "e5.zip").status_code == 200

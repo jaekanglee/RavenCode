@@ -53,7 +53,7 @@ def _call(method, path, peer, headers=None, **kw):
     transport = httpx.ASGITransport(app=app, client=(peer, 44444))
 
     async def go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.request(method, path, headers=headers or {}, **kw)
 
     return asyncio.run(go())
@@ -159,7 +159,7 @@ def test_mcp_also_requires_a_token_from_the_tailnet(vaults_root):
 
     async def go(peer):
         transport = httpx.ASGITransport(app=app, client=(peer, 1))
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.post("/mcp")
 
     assert asyncio.run(go("100.101.1.2")).status_code == 401

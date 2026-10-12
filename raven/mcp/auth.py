@@ -16,7 +16,7 @@ tailnet 무인증 통과(ADR 2026-09-30)는 #26에서 없앴다. 라우트 판�
 요청마다 다시 읽어 revoke가 재시작 없이 반영된다.
 
 출처 판단은 소켓 주소(ASGI ``scope["client"]``)와, Raven 실행기(``serve_kwargs``)로 뜰 때
-loopback 프록시가 붙인 X-Forwarded-For만 쓴다. Host·Origin은 보지 않는다.
+loopback 프록시가 붙인 X-Forwarded-For만 쓴다. 토큰 없는 loopback 통과에는 loopback Host·Origin이 필요하다(#28, ``access.is_local_browser_context``).
 stdio 전송은 네트워크 리스너가 아니라 범위 밖이다.
 
 한계: 평문 HTTP라 같은 망에서 트래픽을 엿보면 토큰이 보인다 (tailnet 구간은 WireGuard).
@@ -34,6 +34,8 @@ class LanTokenAuth(TokenGate):
     realm = "raven-mcp"
     # Issue #26: like the Core API (#24), tailnet is not trusted without a token.
     trust_tailnet = False
+    # Issue #28: MCP serves no pages — a cross-site navigation gets no exemption.
+    page_navigation_ok = False
     detail = (
         "원격 MCP 접근(tailnet·내부망 포함)에는 Authorization: Bearer <token>이 필요합니다 "
         "(raven mcp token add <name>)."

@@ -47,7 +47,7 @@ def _request(client_ip: str, headers: dict[str, str] | None = None) -> httpx.Res
     transport = httpx.ASGITransport(app=LanTokenAuth(_inner_app()), client=(client_ip, 50000))
 
     async def go() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://raven") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
             return await c.post("/mcp", headers=headers or {})
 
     return asyncio.run(go())

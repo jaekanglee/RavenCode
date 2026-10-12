@@ -14,7 +14,12 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 - 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
   통과. 발급된 토큰이 없으면 전부 401 (fail-closed). 경로 예외는 없다 — health 포함.
 
-Host / Origin 헤더는 판정에 쓰지 않는다. 프록시 헤더(X-Forwarded-For / Forwarded /
+Host / Origin 헤더는 출처를 정하는 데 쓰지 않는다. 다만 #28부터 **토큰 없는 loopback 통과**에는
+Host가 loopback 이름(``localhost``, ``127.x``, ``[::1]``, 포트 무관)이고 Origin이 없거나 loopback
+페이지·데스크톱 webview(``tauri://localhost``, ``http(s)://tauri.localhost``)여야 한다
+(``is_local_browser_context``). 브라우저가 다른 사이트를 대신해 보내는 loopback 요청 — 다른 origin의
+페이지, 또는 이름이 127.0.0.1로 해석되게 만든 사이트(DNS rebinding) — 은 그래서 토큰이 필요하다.
+Bearer 토큰 판정에는 영향이 없다. 프록시 헤더(X-Forwarded-For / Forwarded /
 X-Real-IP)는 서버 설정에 따라 다르게 다룬다 — PR #21 재리뷰 P0:
 
 - **strict 모드 (기본)**: 게이트가 uvicorn 설정을 모르는 경우(``uvicorn raven.api:app`` 직접
@@ -256,6 +261,102 @@ def effective_client(scope) -> str | None:
     return LOOPBACK_HOST
 
 
+# Issue #28: origins of pages that may use loopback trust without a token — the
+# dashboard itself (served on loopback by vite or the Core) and the desktop webview.
+_WEBVIEW_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+
+
+def _loopback_name(host: str) -> bool:
+    """``localhost`` or a loopback IP literal (port and IPv6 brackets already removed)."""
+    host = host.strip().rstrip(".").lower()
+    if host == "localhost":
+        return True
+    addr = _parse_ip(host)
+    return addr is not None and addr.is_loopback
+
+
+def _host_part(authority: str) -> str | None:
+    """The host of a ``host[:port]`` / ``[v6][:port]`` authority, or None if malformed."""
+    authority = authority.strip()
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end == -1 or (authority[end + 1:] and not authority[end + 1:].startswith(":")):
+            return None
+        return authority[1:end]
+    if authority.count(":") > 1:
+        return None  # an unbracketed IPv6 literal is not a valid Host
+    host, _, port = authority.partition(":")
+    if port and not port.isdigit():
+        return None
+    return host
+
+
+def _is_local_origin(origin: str) -> bool:
+    origin = origin.strip().lower()
+    if origin in _WEBVIEW_ORIGINS:
+        return True
+    scheme, sep, rest = origin.partition("://")
+    if not sep or scheme not in ("http", "https") or "/" in rest or "@" in rest:
+        return False
+    host = _host_part(rest)
+    return host is not None and _loopback_name(host)
+
+
+def is_local_browser_context(scope, *, page_navigation_ok: bool = False) -> bool:
+    """Whether a request's Host and Origin say it was meant for this machine (Issue #28).
+
+    Loopback trust (no token) is for programs on this machine and for the dashboard
+    pages it serves. A browser also sends loopback requests on behalf of other sites:
+    a page on another origin (its ``Origin`` names that site), or a site whose name
+    was made to resolve to 127.0.0.1 (DNS rebinding — its ``Host`` names that site).
+    So a tokenless loopback request must carry, if anything, a loopback ``Host``
+    (``localhost``, ``127.x.x.x``, ``[::1]``, any port) and an ``Origin`` that is a
+    loopback page or the desktop webview. Programs that send neither still pass.
+    A Bearer token is checked separately and is not affected.
+
+    A browser leaves Origin out of plain cross-site loads (``<img>``, ``<script src>``,
+    a link or GET form from another site), which still run. It marks them with
+    ``Sec-Fetch-Site: cross-site`` / ``same-site``; without an Origin to judge, those
+    are refused too. A URL typed by the user (``none``) and same-origin loads pass.
+    ``page_navigation_ok`` (Core API only) still lets a link from another site open a
+    dashboard page — a top-level GET/HEAD navigation outside ``/api``, which returns the
+    static app and no data. Every ``/api`` call still needs a local context or a token.
+    """
+    hosts: list[str] = []
+    origins: list[str] = []
+    fetch_sites: list[str] = []
+    for key, value in scope.get("headers", []):
+        if key == b"host":
+            hosts.append(value.decode("latin-1"))
+        elif key == b"origin":
+            origins.append(value.decode("latin-1"))
+        elif key == b"sec-fetch-site":
+            fetch_sites.append(value.decode("latin-1").strip().lower())
+    if len(hosts) > 1 or len(origins) > 1:
+        return False
+    if not origins and any(site in ("cross-site", "same-site") for site in fetch_sites):
+        return page_navigation_ok and _is_page_navigation(scope)
+    if hosts:
+        host = _host_part(hosts[0])
+        if host is None or not _loopback_name(host):
+            return False
+    if origins and not _is_local_origin(origins[0]):
+        return False
+    return True
+
+
+def _is_page_navigation(scope) -> bool:
+    """A browser opening a page (not an API call): top-level GET/HEAD outside /api."""
+    if scope.get("type") != "http" or scope.get("method") not in ("GET", "HEAD"):
+        return False
+    path = scope.get("path", "")
+    if path == "/api" or path.startswith("/api/"):
+        return False
+    modes = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-mode"]
+    dests = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-dest"]
+    return modes == ["navigate"] and dests in ([], ["document"])
+
+
 def has_valid_bearer(scope) -> bool:
     for key, value in scope.get("headers", []):
         if key == b"authorization":
@@ -272,6 +373,9 @@ class TokenGate:
     """
 
     realm = "raven"
+    # The Core API also serves the dashboard's static pages (#28 review): a link to them
+    # from another site may open them. MCP serves no pages and turns this off.
+    page_navigation_ok = True
     # Issue #24 (Core API) / #26 (MCP): loopback only — a tailnet source needs a token
     # like any other. The route check behind ``is_tailnet_peer`` is an inference,
     # not proof of the connection's WireGuard authentication. No gate opts back in.
@@ -289,7 +393,10 @@ class TokenGate:
             await self.app(scope, receive, send)
             return
         source = effective_client(scope)
-        if is_trusted_client(source, allow_tailnet=self.trust_tailnet) or has_valid_bearer(scope):
+        trusted = is_trusted_client(source, allow_tailnet=self.trust_tailnet)
+        # Issue #28: tokenless trust also needs a local Host/Origin (see is_local_browser_context).
+        local = trusted and is_local_browser_context(scope, page_navigation_ok=self.page_navigation_ok)
+        if local or has_valid_bearer(scope):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
                 port = client[1] if client else 0
@@ -299,8 +406,14 @@ class TokenGate:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
+        detail = self.detail
+        if trusted and not local:
+            detail = (
+                "이 PC 밖의 사이트(Host/Origin)에서 온 요청은 loopback이어도 토큰 없이 허용하지 않습니다 "
+                "— Authorization: Bearer <token> (raven mcp token add <name>)."
+            )
         body = json.dumps(
-            {"ok": False, "error": "unauthorized", "detail": self.detail},
+            {"ok": False, "error": "unauthorized", "detail": detail},
             ensure_ascii=False,
         ).encode("utf-8")
         await send({

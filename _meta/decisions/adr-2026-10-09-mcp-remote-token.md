@@ -32,7 +32,7 @@ status: accepted
 
 - **게이트**: `raven/mcp/auth.py::LanTokenAuth.trust_tailnet = False`. Core API의 `TokenGate`와 같은 판정이다.
 - **단일 앱 빌더**: `raven.mcp.cli.build_http_app(mode, host)`가 MCP Starlette 앱 전체를 게이트로 감싼다. 데스크톱 런타임(`_build_mcp_app`)과 standalone `main()`이 모두 이 함수를 쓴다. 그래서 `initialize`, `tools/list`, `tools/call`, GET 스트림, 세션 DELETE가 모두 게이트를 먼저 지난다. 경로 예외(health 등)는 없다.
-- **프록시 정책**: standalone도 Core API처럼 `serve_kwargs()`(`proxy_headers=False`)로 뜬다. `scope["client"]`는 실제 소켓 peer다. X-Forwarded-For는 loopback peer가 보낸 것만 게이트가 해석한다. 다른 출처 헤더(Forwarded, X-Real-IP 등)가 함께 오면 해석하지 않고 토큰을 요구한다(#29, Core API와 같은 판정). Host·Origin은 보지 않는다.
+- **프록시 정책**: standalone도 Core API처럼 `serve_kwargs()`(`proxy_headers=False`)로 뜬다. `scope["client"]`는 실제 소켓 peer다. X-Forwarded-For는 loopback peer가 보낸 것만 게이트가 해석한다. 다른 출처 헤더(Forwarded, X-Real-IP 등)가 함께 오면 해석하지 않고 토큰을 요구한다(#29, Core API와 같은 판정). Host·Origin은 출처 판정에 쓰지 않지만, 토큰 없는 loopback 통과에는 loopback Host·Origin이 필요하다([[adr-2026-10-12-loopback-browser-context]], #28).
 - **opt-out 없음**: 이전 동작으로 돌아가는 플래그를 두지 않는다. 인증 예외를 새로 만들지 않는다는 원칙 때문이다.
 - **범위 밖**: stdio 전송. 네트워크 리스너가 아니다.
 

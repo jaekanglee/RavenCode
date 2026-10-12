@@ -4,7 +4,7 @@ Issue #14: ``raven.api.app`` now carries an access gate (raven/core/access.py)
 that judges the request by its socket address. Starlette's ``TestClient``
 reports the peer as the literal string ``"testclient"`` — not an IP, so the gate
 correctly refuses it. In-process API tests model the local Dashboard, so they
-default to a loopback peer here. Tests that exercise remote sources pass
+default to a loopback peer — and, since #28, a loopback Host — here. Tests that exercise remote sources pass
 ``client=(...)`` explicitly and are unaffected.
 """
 from __future__ import annotations
@@ -23,6 +23,10 @@ _original_init = TestClient.__init__
 
 def _init_with_loopback_peer(self, *args, **kwargs):
     kwargs.setdefault("client", _LOCAL_PEER)
+    # Issue #28: tokenless loopback trust also needs a loopback Host — the local
+    # Dashboard dials 127.0.0.1, not TestClient's default "testserver".
+    if len(args) < 2:
+        kwargs.setdefault("base_url", "http://127.0.0.1")
     _original_init(self, *args, **kwargs)
 
 
