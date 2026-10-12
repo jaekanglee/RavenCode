@@ -1,8 +1,14 @@
 """Desktop Python Core — starts the real Raven API on a random loopback port.
 
 Readiness protocol:
-  stdout line 1 → {"host": "127.0.0.1", "port": <int>}
+  stdout line 1 → {"host": "<dialable>", "port": <int>, "bind_host": "<actual bind>"}
   With --mcp:    → {..., "mcp_port": <int>, "mcp_host": "<dialable address>"}
+
+  Issue #16: ``bind_host`` is the address the API socket really listens on
+  (``127.0.0.1``, ``0.0.0.0`` or one specific IPv4 address). ``host`` is where
+  the local webview should connect: loopback for a loopback or wildcard bind
+  (both serve 127.0.0.1, checked below), the address itself for a specific bind
+  (nothing listens on loopback then). Never ``0.0.0.0`` — that is not dialable.
 
   ``mcp_host`` is not normalised to loopback like ``host`` — the shell shows it
   so the operator can see where external agents should point. A 0.0.0.0 bind is
@@ -18,8 +24,7 @@ External access (Tailscale) — opt-in (Issue #14):
   ``python -m raven.api``) — loopback clients pass, every other source (tailnet
   included, #24) needs a Bearer token from ``raven mcp token add``. Anything else —
   unset, blank, malformed, wildcard, or a named address — falls back to
-  loopback. The readiness JSON always reports 127.0.0.1 so the local webview
-  keeps working.
+  loopback. IPv6 binds are refused: the Core's sockets are IPv4 only (#16).
 
   MCP binds separately (--mcp-host). v0.7.182 §31: when the API binds 0.0.0.0,
   MCP binds 0.0.0.0 too, behind ``raven.mcp.auth.LanTokenAuth`` (the same gated
@@ -47,6 +52,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
+import ipaddress
 import json
 import os
 import select
@@ -341,6 +347,14 @@ def _endpoint_is_self(
     return responder.seen.wait(timeout=1)
 
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 def _bind_mcp_socket(host: str, port: int, advertised: str) -> socket.socket | None:
     """Claim the MCP port only if this process would own every address agents dial.
 
@@ -473,7 +487,27 @@ def main() -> int:
             # No tailnet is not an excuse to fall back to every interface.
             bind_host = LOOPBACK_HOST
 
-    api_sock = _bind_api_socket(bind_host)
+    # Issue #16: readiness reports bind_host and the shell parses it as an IP, so
+    # a host name (kept by safe_bind_host under opt-in) is bound by its address.
+    if not _is_ip(bind_host) and ":" not in bind_host:
+        try:
+            bind_host = socket.gethostbyname(bind_host)
+        except OSError as exc:
+            print(f"Python Core: cannot resolve bind host {bind_host!r}: {exc}", file=sys.stderr)
+            return 1
+    # The Core's sockets are AF_INET; say so instead of a socket traceback.
+    if ":" in bind_host:
+        print(
+            f"Python Core: IPv6 bind ({bind_host}) is not supported by the Desktop Core — "
+            "use 0.0.0.0 or an IPv4 address",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        api_sock = _bind_api_socket(bind_host)
+    except OSError as exc:
+        print(f"Python Core: cannot serve the API on {bind_host}: {exc}", file=sys.stderr)
+        return 1
     api_port = api_sock.getsockname()[1]
     api_socks = [api_sock]
     if bind_host == "0.0.0.0":
@@ -655,31 +689,32 @@ def main() -> int:
             _stop_mcp(mcp_server, mcp_thread, mcp_socks, args.mcp_port)
             mcp_ready = False
 
+    # Issue #16: the webview dials loopback when this process serves it (loopback or
+    # wildcard bind); a specific address bind serves only that address.
+    endpoint_host = LOOPBACK_HOST if bind_host in ("0.0.0.0", LOOPBACK_HOST) else bind_host
     # Issue #22: never hand the webview an endpoint some other server answers.
-    # A specific non-loopback bind (e.g. the Tailscale IP) is not on loopback at
-    # all, so the readiness address cannot be ours there — that is #16.
-    if bind_host in ("0.0.0.0", LOOPBACK_HOST):
-        if not _endpoint_is_self(api_target, probe_nonce, api_port):
-            print(
-                f"Python Core: {LOOPBACK_HOST}:{api_port} is answered by another process — "
-                "refusing to report it as ready",
-                file=sys.stderr,
-            )
-            api_server.should_exit = True
-            if mcp_server is not None:
-                mcp_server.should_exit = True
-            api_thread.join(timeout=5)
-            if mcp_thread is not None:
-                mcp_thread.join(timeout=5)
-            return 1
-    else:
+    if not _endpoint_is_self(api_target, probe_nonce, api_port, endpoint_host):
         print(
-            f"⚠️  [Desktop Core] API bound to {bind_host} only — the loopback readiness "
-            f"endpoint {LOOPBACK_HOST}:{api_port} is not served by this process (#16)",
+            f"Python Core: {endpoint_host}:{api_port} is answered by another process — "
+            "refusing to report it as ready",
+            file=sys.stderr,
+        )
+        api_server.should_exit = True
+        if mcp_server is not None:
+            mcp_server.should_exit = True
+        api_thread.join(timeout=5)
+        if mcp_thread is not None:
+            mcp_thread.join(timeout=5)
+        return 1
+    if endpoint_host != LOOPBACK_HOST:
+        print(
+            f"⚠️  [Desktop Core] API bound to {bind_host} only — nothing listens on loopback, so "
+            "the webview connects there and is not a loopback client: it will ask for a Bearer "
+            "token (raven mcp token add). Use 0.0.0.0 to serve this PC without a token as well.",
             file=sys.stderr,
         )
 
-    ready = {"host": LOOPBACK_HOST, "port": api_port}
+    ready = {"host": endpoint_host, "port": api_port, "bind_host": bind_host}
     if mcp_ready:
         ready["mcp_port"] = args.mcp_port
         ready["mcp_host"] = mcp_advertised

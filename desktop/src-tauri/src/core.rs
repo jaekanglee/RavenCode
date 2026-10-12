@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::env;
 use std::io::{BufRead, BufReader, Read};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -92,16 +93,64 @@ pub(crate) fn runtime_launch_spec(
     RuntimeLaunchSpec { program, args, env }
 }
 
+/// Readiness line from `raven/desktop/runtime.py`.
+///
+/// Issue #16: `bind_host` is the address the API really listens on; `host` is
+/// where this shell's webview connects (loopback for a loopback/wildcard bind,
+/// the address itself for a specific bind). They used to be one constant.
 #[derive(Deserialize)]
-struct ReadyMessage {
+pub(crate) struct ReadyMessage {
     host: String,
     port: u16,
+    bind_host: String,
     #[serde(default)]
     mcp_port: Option<u16>,
     /// MCP는 API와 다른 주소에 바인딩된다 (API는 LAN 전체, MCP는 tailnet/loopback).
     /// 따라서 `host`처럼 loopback으로 정규화하지 않고 실제 바인딩을 그대로 받는다.
     #[serde(default)]
     mcp_host: Option<String>,
+}
+
+/// Turn a readiness message into the API and MCP endpoints, or refuse it.
+///
+/// The API endpoint must be one the reported bind actually serves: loopback for
+/// a loopback or wildcard (`0.0.0.0`) bind, the bound address itself otherwise.
+/// A wildcard is never used as a URL. An unusable MCP address only drops MCP —
+/// MCP is best-effort, the API is not.
+pub(crate) fn ready_endpoints(ready: &ReadyMessage) -> Result<(String, Option<String>), String> {
+    let bind: IpAddr = ready.bind_host.parse().map_err(|_| {
+        format!("Python Core가 해석할 수 없는 bind 주소를 보고했습니다: {:?}", ready.bind_host)
+    })?;
+    let host: IpAddr = ready.host.parse().map_err(|_| {
+        format!("Python Core가 해석할 수 없는 접속 주소를 보고했습니다: {:?}", ready.host)
+    })?;
+    if ready.port == 0 || host.is_unspecified() {
+        return Err(format!(
+            "Python Core가 접속할 수 없는 endpoint를 보고했습니다 ({}:{})",
+            ready.host, ready.port
+        ));
+    }
+    let served = if bind.is_loopback() || bind.is_unspecified() {
+        host.is_loopback()
+    } else {
+        host == bind
+    };
+    if !served {
+        return Err(format!(
+            "Python Core readiness가 일관되지 않습니다: {bind}에 bind했는데 {host}로 접속하라고 보고했습니다"
+        ));
+    }
+    let mcp_endpoint = ready.mcp_port.and_then(|p| {
+        let raw = ready.mcp_host.as_deref().unwrap_or(&ready.host);
+        match raw.parse::<IpAddr>() {
+            Ok(ip) if p != 0 && !ip.is_unspecified() => Some(format!("http://{}/mcp", SocketAddr::new(ip, p))),
+            _ => {
+                eprintln!("[core] ignoring unusable MCP endpoint {raw:?}:{p}");
+                None
+            }
+        }
+    });
+    Ok((format!("http://{}", SocketAddr::new(host, ready.port)), mcp_endpoint))
 }
 
 pub(crate) struct ManagedCore {
@@ -153,6 +202,11 @@ impl ManagedCore {
         let ready: ReadyMessage = match serde_json::from_str(&line) {
             Ok(msg) => msg,
             Err(error) => {
+                // A Core that is still running (e.g. a version that omits a
+                // required field) would never close stderr — stop it first so
+                // reading the rest cannot block the shell forever.
+                let _ = child.kill();
+                let _ = child.wait();
                 let mut err_msg = String::new();
                 if let Some(err_stream) = stderr {
                     let mut stderr_reader = BufReader::new(err_stream);
@@ -170,9 +224,16 @@ impl ManagedCore {
             }
         };
 
-        if ready.host != "127.0.0.1" || ready.port == 0 {
-            return Err("Python Core가 유효한 loopback endpoint를 보고하지 않았습니다".to_string());
-        }
+        let (endpoint, mcp_endpoint) = match ready_endpoints(&ready) {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                // The Core already reported ready and is listening; refusing it
+                // must not leave it running behind the error dialog.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
 
         // Keep draining both pipes for the life of the child. Dropping the
         // handles here closed the read ends, so every later `sys.stderr.write`
@@ -183,14 +244,9 @@ impl ManagedCore {
             forward_pipe("core:stderr", BufReader::new(err_stream));
         }
 
-        let mcp_endpoint = ready.mcp_port.map(|p| {
-            let host = ready.mcp_host.as_deref().unwrap_or(&ready.host);
-            format!("http://{host}:{p}/mcp")
-        });
-
         Ok(Self {
             child,
-            endpoint: format!("http://{}:{}", ready.host, ready.port),
+            endpoint,
             mcp_endpoint,
         })
     }
@@ -297,5 +353,78 @@ fn safe_workspace(bundled: bool) -> PathBuf {
         } else {
             dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ready_endpoints, ReadyMessage};
+
+    fn endpoints(line: &str) -> Result<(String, Option<String>), String> {
+        let ready: ReadyMessage = serde_json::from_str(line).expect("valid readiness JSON");
+        ready_endpoints(&ready)
+    }
+
+    #[test]
+    fn loopback_bind_uses_the_loopback_endpoint() {
+        let (api, mcp) = endpoints(r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1"}"#).unwrap();
+        assert_eq!(api, "http://127.0.0.1:41000");
+        assert_eq!(mcp, None);
+    }
+
+    #[test]
+    fn wildcard_bind_is_served_on_loopback_and_never_used_as_a_url() {
+        let (api, mcp) = endpoints(
+            r#"{"host":"127.0.0.1","port":41000,"bind_host":"0.0.0.0","mcp_port":8766,"mcp_host":"100.64.1.2"}"#,
+        )
+        .unwrap();
+        assert_eq!(api, "http://127.0.0.1:41000");
+        assert_eq!(mcp.as_deref(), Some("http://100.64.1.2:8766/mcp"));
+        assert!(endpoints(r#"{"host":"0.0.0.0","port":41000,"bind_host":"0.0.0.0"}"#).is_err());
+    }
+
+    #[test]
+    fn specific_bind_uses_that_address() {
+        let (api, _) = endpoints(r#"{"host":"192.168.0.52","port":41000,"bind_host":"192.168.0.52"}"#).unwrap();
+        assert_eq!(api, "http://192.168.0.52:41000");
+    }
+
+    #[test]
+    fn inconsistent_or_unusable_readiness_is_refused() {
+        for line in [
+            // Issue #16: the old constant — loopback reported while only 192.168.0.52 listens.
+            r#"{"host":"127.0.0.1","port":41000,"bind_host":"192.168.0.52"}"#,
+            r#"{"host":"192.168.0.9","port":41000,"bind_host":"192.168.0.52"}"#,
+            r#"{"host":"192.168.0.52","port":41000,"bind_host":"127.0.0.1"}"#,
+            r#"{"host":"192.168.0.52","port":41000,"bind_host":"0.0.0.0"}"#,
+            r#"{"host":"127.0.0.1","port":0,"bind_host":"127.0.0.1"}"#,
+            r#"{"host":"localhost","port":41000,"bind_host":"127.0.0.1"}"#,
+            r#"{"host":"127.0.0.1","port":41000,"bind_host":"evil.example"}"#,
+        ] {
+            assert!(endpoints(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn readiness_without_bind_host_is_a_format_error() {
+        assert!(serde_json::from_str::<ReadyMessage>(r#"{"host":"127.0.0.1","port":41000}"#).is_err());
+    }
+
+    #[test]
+    fn unusable_mcp_address_drops_only_mcp() {
+        for mcp_host in ["0.0.0.0", "not-an-ip"] {
+            let line = format!(
+                r#"{{"host":"127.0.0.1","port":41000,"bind_host":"0.0.0.0","mcp_port":8766,"mcp_host":"{mcp_host}"}}"#
+            );
+            let (api, mcp) = endpoints(&line).unwrap();
+            assert_eq!(api, "http://127.0.0.1:41000");
+            assert_eq!(mcp, None, "{mcp_host}");
+        }
+    }
+
+    #[test]
+    fn mcp_without_its_own_host_follows_the_api_host() {
+        let (_, mcp) = endpoints(r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1","mcp_port":8766}"#).unwrap();
+        assert_eq!(mcp.as_deref(), Some("http://127.0.0.1:8766/mcp"));
     }
 }

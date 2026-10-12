@@ -4,6 +4,7 @@ import { Button } from "../components/ui/Button";
 import { UpdatePanel } from "../components/UpdatePanel";
 import { BackupPanel } from "../components/BackupPanel";
 import { useAppUpdater } from "../lib/useAppUpdater";
+import { describeBindExposure } from "../lib/bind-exposure";
 import {
   fetchLinkCheck, runExport, repairVault, cloneVault,
   fetchLocks, releaseLock, apiFetch, formatApiError,
@@ -45,6 +46,7 @@ export function VaultManage() {
   // ── 복사 피드백 상태 ──
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
+  const bindExposure = describeBindExposure(sysInfo?.bind_host);
 
   useEffect(() => {
     fetchSystemInfo().then((info) => {
@@ -724,12 +726,10 @@ export function VaultManage() {
               <div>
                 <span style={{ color: "var(--color-muted)" }}>네트워크 수신:</span>{" "}
                 <span style={{ color: "var(--color-ink)", fontWeight: 600, fontFamily: "monospace" }}>
-                  {sysInfo?.bind_host || "127.0.0.1"}
+                  {bindExposure.host}
                 </span>{" "}
                 <span style={{ color: "var(--color-muted)" }}>
-                  {sysInfo?.bind_host && sysInfo.bind_host !== "127.0.0.1"
-                    ? "(같은 PC만 토큰 없이 · tailnet 포함 그 외 출처는 토큰 필요)"
-                    : "(loopback 전용)"}
+                  ({bindExposure.label} · {bindExposure.detail})
                 </span>
               </div>
               <div>

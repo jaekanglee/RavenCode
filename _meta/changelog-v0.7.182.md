@@ -1273,3 +1273,30 @@ Gemini를 호출하는 5개 기능(태그 추천 `tagger`, RAG 답변 `rag`, AI 
   - Origin 검사는 `tauri://` 스킴이면 호스트를 보지 않는다(브라우저가 이 스킴을 위조할 수 없어 실제 피해 없음).
   - Origin이 없는 비브라우저 요청은 소켓·프록시 판정만으로 통과한다 — 앞단 로컬 프록시가 X-Forwarded-For를 붙여야 한다(`access.py`에 문서화된 기존 전제).
   - Dashboard의 archive 정리는 403일 때 상태 코드만 보여 준다(문구 표시는 Dashboard 변경이라 범위 밖).
+
+## 57. Desktop Core readiness가 실제 bind를 보고하고 셸이 실측값으로 판정 (Issue #16)
+
+readiness는 실제 bind와 무관하게 항상 `{"host": "127.0.0.1"}`을 보고했고, Rust 셸은 그 값이 `127.0.0.1`인지만 비교했다(상수 비교라 항상 통과). 격리 재현(master `bf2f866`): `--host 0.0.0.0`은 모든 인터페이스에 열려 있는데 readiness는 loopback, 특정 IP(`192.168.0.52`) bind는 loopback에 아무것도 없는데도 readiness가 `127.0.0.1`을 보고해 셸이 죽은 주소를 webview에 넘겼다. `::`와 해석 불가 host는 소켓 traceback으로 종료됐다.
+
+- **readiness 계약** (`raven/desktop/runtime.py`): `{"host": <webview가 접속할 주소>, "port", "bind_host": <실제 bind>, "mcp_port"?, "mcp_host"?}`.
+  - loopback bind → `host` `127.0.0.1`, `bind_host` `127.0.0.1`
+  - `0.0.0.0` bind → `host` `127.0.0.1`(wildcard와 #49 guard가 loopback을 받음), `bind_host` `0.0.0.0`
+  - 특정 IPv4 bind → 둘 다 그 주소. `0.0.0.0`은 접속 주소로 보고하지 않는다.
+  - #22의 정체성 확인(nonce probe)을 그 접속 주소로 수행한다 — 특정 IP bind에서 건너뛰던 공백을 메웠다.
+  - 이름 host(opt-in 하에 `safe_bind_host`가 남기는 값)는 IPv4로 해석해 그 주소로 bind·보고한다. 해석 실패, IPv6(`::` 등 — Core 소켓은 IPv4 전용), bind 실패는 원인을 밝히고 readiness 없이 exit 1.
+- **Rust 셸** (`desktop/src-tauri/src/core.rs`): 상수 비교를 `ready_endpoints()`로 교체했다.
+  - `bind_host`(필수)와 `host`를 IP로 해석, port 0·wildcard 접속 주소 거부, loopback·wildcard bind면 접속 주소가 loopback이어야 하고 특정 bind면 같은 주소여야 한다. 어긋나면 시작 실패.
+  - MCP 주소가 쓸 수 없는 값(wildcard·해석 불가)이면 MCP만 끄고 API는 계속.
+  - 거부할 때(그리고 readiness 형식 오류일 때) 이미 떠 있는 Core 자식 프로세스를 종료한다 — 이전에는 이 경로가 사실상 도달 불가였다. 형식 오류 시 stderr를 끝까지 읽느라 셸이 멈추던 가능성도 함께 막았다(독립 리뷰).
+- **관리 화면** (`dashboard`): `describeBindExposure()`로 `GET /api/system/info`의 실제 `bind_host`를 세 가지로 표시한다 — loopback 전용 / 모든 네트워크 인터페이스(같은 PC만 토큰 없이) / 특정 주소에서만 수신(loopback 미수신, 같은 PC여도 토큰 필요). 이전에는 특정 주소도 "같은 PC만 토큰 없이"로 표시했다.
+- **호환성**: 기본 loopback 실행과 `0.0.0.0` 원격 실행은 접속 주소가 그대로다. 특정 IP bind(`--host tailscale` 포함)에서는 webview가 그 주소로 접속하므로 loopback 클라이언트가 아니어서 토큰 입력창이 뜬다(이전에는 연결 자체가 안 됐다) — 같은 PC를 토큰 없이 쓰려면 `0.0.0.0`. 인증 정책(TokenGate, MCP LanTokenAuth)은 바뀌지 않았다. 셸과 runtime은 같은 번들로 배포되며, `bind_host`가 없는 readiness는 형식 오류로 거부된다.
+- **Tailscale 경계**: 기동 시점의 tailnet 유무는 정확히 반영된다(tailnet 없으면 `--host tailscale`이 loopback으로 낮아지고 readiness·관리 화면도 loopback). 실행 중 IP가 생기거나 바뀌면 특정 IP bind·셸 endpoint·MCP 광고·MCP guard가 기동 시점 값에 고정된다 — 런타임 재바인딩/재시작 설계가 필요해 #58로 분리했다. 운영 Tailscale 설정은 건드리지 않았다.
+- **검증**:
+  - 격리 재현(macOS): loopback·`localhost`·`0.0.0.0`·특정 LAN IP 모두 readiness가 실제 listen과 일치, 특정 IP는 토큰 없이 401·토큰으로 200·loopback 미수신. `::`·`999.1.1.1`·로컬에 없는 IP는 원인 메시지와 exit 1.
+  - `tests/test_desktop_runtime.py` 12건 추가(loopback 3·wildcard·특정 IP·정체성 확인 범위·실패 3·wildcard 미보고·이름 host 해석·해석 실패). #54 테스트의 readiness 키 고정 단언에 `bind_host` 추가.
+  - Rust `core.rs` 7건 추가(loopback/wildcard/특정 bind, 불일치·쓸 수 없는 readiness 7종 거부, `bind_host` 누락 형식 오류, MCP 주소 처리 2). `cargo test` 35 passed.
+  - dashboard `bind-exposure.test.ts` 3건, `tsc -b` 통과, vitest 526 passed.
+- **잔여 위험**:
+  - 실행 중 Tailscale IP 변화(#58).
+  - 셸이 Core 자식을 종료하는 거부 경로는 단위 테스트로 직접 검증하지 못했다(실제 Tauri GUI 실행은 **UNKNOWN**).
+  - 특정 IP bind 테스트는 비-loopback 주소가 없는 환경에서 건너뛴다.

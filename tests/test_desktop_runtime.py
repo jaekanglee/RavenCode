@@ -1631,7 +1631,7 @@ def test_runtime_goes_api_only_and_releases_everything_on_another_guard_errno(tm
     core = _run_core(tmp_path, _MCP_GUARD_ERRNO, str(mcp_port), ip)
     try:
         ready = _wait_for_ready(core)
-        assert set(ready) == {"host", "port"}
+        assert set(ready) == {"host", "port", "bind_host"}
         for host in ("127.0.0.1", ip):
             with pytest.raises(ConnectionRefusedError):
                 socket.create_connection((host, mcp_port), timeout=1).close()
@@ -1647,7 +1647,7 @@ def test_runtime_goes_api_only_when_the_advertised_address_is_not_local(tmp_path
     core = _run_core(tmp_path, _MCP_ADVERTISES, str(mcp_port), "192.0.2.1")
     try:
         ready = _wait_for_ready(core)
-        assert set(ready) == {"host", "port"}
+        assert set(ready) == {"host", "port", "bind_host"}
         with pytest.raises(ConnectionRefusedError):
             socket.create_connection(("127.0.0.1", mcp_port), timeout=1).close()
     finally:
@@ -1678,7 +1678,7 @@ def test_runtime_releases_every_mcp_socket_when_mcp_startup_fails(tmp_path: Path
     core = _run_core(tmp_path, _MCP_STARTUP_FAILS_ADVERTISED, str(mcp_port), ip)
     try:
         ready = _wait_for_ready(core)
-        assert set(ready) == {"host", "port"}
+        assert set(ready) == {"host", "port", "bind_host"}
         for host in ("127.0.0.1", ip):
             with pytest.raises(ConnectionRefusedError):
                 socket.create_connection((host, mcp_port), timeout=1).close()
@@ -1695,7 +1695,7 @@ def test_sigterm_releases_every_mcp_socket(tmp_path: Path) -> None:
     core = _run_core(tmp_path, _MCP_ADVERTISES, str(mcp_port), ip)
     try:
         ready = _wait_for_ready(core)
-        assert set(ready) == {"host", "port", "mcp_port", "mcp_host"}
+        assert set(ready) == {"host", "port", "bind_host", "mcp_port", "mcp_host"}
         core.terminate()
         assert core.wait(timeout=15) == 0
         for host in ("127.0.0.1", ip):
@@ -1705,3 +1705,172 @@ def test_sigterm_releases_every_mcp_socket(tmp_path: Path) -> None:
         if core.poll() is None:
             core.kill()
             core.wait(timeout=10)
+
+
+# Issue #16: readiness reports the real bind, and `host` is always dialable.
+
+def _start_core(tmp_path: Path, *argv: str, remote: bool = True, extra_env: dict | None = None):
+    env = _isolated_env(tmp_path, "desktop")
+    env["PORT_API"] = str(_free_port())
+    if remote:
+        env["RAVEN_ALLOW_REMOTE"] = "1"
+    env.update(extra_env or {})
+    return subprocess.Popen(
+        [sys.executable, "-m", "raven.desktop.runtime", *argv],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def _status(url: str, token: str | None = None) -> int:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with urlopen(Request(url, headers=headers), timeout=5) as response:
+            return response.status
+    except HTTPError as exc:
+        return exc.code
+
+
+@pytest.mark.parametrize("argv, remote", [((), False), (("--host", "127.0.0.1"), True), (("--host", "localhost"), True)])
+def test_loopback_readiness_reports_a_loopback_bind(tmp_path, argv, remote) -> None:
+    core = _start_core(tmp_path, *argv, remote=remote)
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["host"], ready["bind_host"]) == ("127.0.0.1", "127.0.0.1")
+        assert _status(f"http://127.0.0.1:{ready['port']}/api/vaults") == 200
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_wildcard_readiness_reports_the_wildcard_bind_and_a_loopback_endpoint(tmp_path) -> None:
+    """Before #16 readiness said 127.0.0.1 and hid that the API listened on every interface."""
+    core = _start_core(tmp_path, "--host", "0.0.0.0")
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["host"], ready["bind_host"]) == ("127.0.0.1", "0.0.0.0")
+        base = f"http://127.0.0.1:{ready['port']}"
+        assert _status(f"{base}/api/vaults") == 200
+        with urlopen(f"{base}/api/system/info", timeout=5) as response:
+            assert json.load(response)["bind_host"] == "0.0.0.0"  # what the admin screen shows
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_specific_address_readiness_points_at_that_address(tmp_path) -> None:
+    """Before #16 readiness said 127.0.0.1 although nothing listened there."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    env = _isolated_env(tmp_path, "tok")
+    token = subprocess.run(
+        [sys.executable, "-c", "from raven.core import mcp_tokens; print(mcp_tokens.add_token('t'))"],
+        cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    core = _start_core(tmp_path, "--host", ip, extra_env={"WIKI_VAULTS_DIR": env["WIKI_VAULTS_DIR"]})
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["host"], ready["bind_host"]) == (ip, ip)
+        base = f"http://{ip}:{ready['port']}"
+        assert _status(f"{base}/api/vaults") == 401  # not a loopback client — token required
+        assert _status(f"{base}/api/vaults", token) == 200
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", ready["port"]), timeout=1).close()
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+_RECORD_IDENTITY_PROBE = r"""
+import sys
+import raven.desktop.runtime as r
+real = r._endpoint_is_self
+def probe(responder, nonce, port, host=r.LOOPBACK_HOST):
+    print(f"PROBE {host}", file=sys.stderr, flush=True)
+    return real(responder, nonce, port, host)
+r._endpoint_is_self = probe
+sys.argv = ["runtime", "--host", sys.argv[1]]
+raise SystemExit(r.main())
+"""
+
+
+def test_identity_check_covers_a_specific_address_bind(tmp_path) -> None:
+    """#22's "is the endpoint really ours" check used to be skipped for a specific bind."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(PORT_API=str(_free_port()), RAVEN_ALLOW_REMOTE="1")
+    core = subprocess.Popen(
+        [sys.executable, "-c", _RECORD_IDENTITY_PROBE, ip],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert _wait_for_ready(core)["host"] == ip
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+    assert f"PROBE {ip}" in core.stderr.read()
+
+
+@pytest.mark.parametrize(
+    "host, message",
+    [
+        ("::", "IPv6 bind (::) is not supported"),
+        ("999.1.1.1", "cannot resolve bind host '999.1.1.1'"),
+        ("192.0.2.1", "cannot serve the API on 192.0.2.1"),  # a valid IP that is not on this host
+    ],
+)
+def test_unusable_bind_host_fails_without_readiness(tmp_path, host, message) -> None:
+    core = _start_core(tmp_path, "--host", host)
+    out, err = core.communicate(timeout=30)
+    assert core.returncode == 1
+    assert out == ""
+    assert message in err
+
+
+def test_readiness_never_reports_a_wildcard_as_the_endpoint(tmp_path) -> None:
+    core = _start_core(tmp_path, "--host", "0.0.0.0", "--mcp", "--mcp-port", str(_free_port()))
+    try:
+        ready = _wait_for_ready(core)
+        assert ready["host"] != "0.0.0.0" and ready.get("mcp_host") != "0.0.0.0"
+        assert set(ready) <= {"host", "port", "bind_host", "mcp_port", "mcp_host"}
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+_NAMED_HOST = r"""
+import socket, sys
+import raven.desktop.runtime as r
+ip, real = sys.argv[1], socket.gethostbyname
+socket.gethostbyname = lambda name: ip if name == "core.test" else real(name)
+sys.argv = ["runtime", "--host", sys.argv[2]]
+raise SystemExit(r.main())
+"""
+
+
+def test_named_bind_host_is_bound_and_reported_by_its_address(tmp_path) -> None:
+    """The shell parses bind_host as an IP; a name used to be reported verbatim (or as loopback)."""
+    ip = _local_non_loopback_ip()
+    if ip is None:
+        pytest.skip("needs a non-loopback address")
+    env = _isolated_env(tmp_path, "desktop")
+    env.update(PORT_API=str(_free_port()), RAVEN_ALLOW_REMOTE="1")
+    core = subprocess.Popen(
+        [sys.executable, "-c", _NAMED_HOST, ip, "core.test"],
+        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        assert (ready["host"], ready["bind_host"]) == (ip, ip)
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_unresolvable_bind_host_fails_without_readiness(tmp_path) -> None:
+    core = _start_core(tmp_path, "--host", "no-such-host.invalid")
+    out, err = core.communicate(timeout=30)
+    assert core.returncode == 1 and out == ""
+    assert "cannot resolve bind host 'no-such-host.invalid'" in err
