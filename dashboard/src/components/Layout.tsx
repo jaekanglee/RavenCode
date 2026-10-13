@@ -347,7 +347,8 @@ export function Layout() {
                   gap: 6,
                 }}
               >
-                <span aria-hidden style={{ fontSize: 18 }}>🐦</span>
+                {/* Issue #3 C-3: Raven(까마귀)인데 참새(🐦)가 매일 보이는 자리에 있었다. */}
+                <span aria-hidden style={{ fontSize: 18 }}>🐦‍⬛</span>
                 <span>Raven</span>
               </Link>
             </div>
