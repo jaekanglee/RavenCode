@@ -1600,3 +1600,31 @@ Core API와 MCP는 직접 loopback 요청을 토큰 없이 통과시킨다. 이 
   - `style-src 'unsafe-inline'`은 남는다(스크립트 실행은 아니고 스타일 주입). `connect-src http:`는 넓다 — 임의의 사용자 호스트 때문이다.
   - Windows·Linux webview의 CSP 동작은 **UNKNOWN**(macOS WKWebView만 실측). 정화는 플랫폼과 무관하다.
   - 업데이트 서명 등 배포 번들 경로는 검증하지 않았다(scratch 번들은 `createUpdaterArtifacts: false`, 미서명).
+
+## 65. loopback에도 Bearer를 요구하는 opt-in 강화 모드 (Issue #67, PR #69)
+
+macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스트 loopback으로 넘긴다. Core·MCP에는 peer `127.0.0.1`로 보이고, 컨테이너가 `Host: 127.0.0.1:<port>`를 보내면 #28의 토큰 없는 loopback 통과를 받는다(실측: master `ffe72d2`에서 Core `/api/vaults`·MCP `initialize` 모두 토큰 없이 200, 잘못된 토큰을 보내도 200). Host/Origin과 소켓 주소로는 같은 PC의 프로세스와 컨테이너를 구분할 수 없다.
+
+- **변경** (`raven/core/access.py`):
+  - `RAVEN_REQUIRE_LOOPBACK_TOKEN`이 참(`1`·`true`·`yes`·`on`, 대소문자·앞뒤 공백 무시 — `require_loopback_token_from_env`)이면 `TokenGate`가 loopback을 포함한 모든 HTTP·WebSocket 요청에 유효한 Bearer를 요구한다. Core API와 MCP(`LanTokenAuth`)가 같은 게이트를 쓴다. WebSocket은 close 1008. URL query의 토큰은 읽지 않는다.
+  - 기본값(미설정·그 밖의 값)은 바뀌지 않는다 — 직접 loopback 연결은 지금처럼 토큰 없이 통과한다. 그래서 **이 변경만으로 #67은 닫히지 않는다**.
+  - 401 안내는 출처에 맞춘다: loopback 출처는 "loopback 요청에도 토큰 필요", LAN·tailnet·프록시가 알려 준 원격 출처는 기존 원격 접근 문구, 출처를 알 수 없는 요청(#29의 모호한 프록시 헤더)은 일반 Bearer 문구. (첫 버전은 강화 모드의 모든 401에 loopback 문구를 써서 LAN 요청에도 사실과 다른 안내가 나갔다 — 리뷰에서 고침.)
+- **적용 범위와 제약** (README "loopback과 Docker Desktop", `docs/issues/docker-desktop-loopback-토큰-우회.md`):
+  - 프로세스 환경에서만 읽는다. `./raven.sh`는 `.env`를 읽으므로 거기에 쓰면 된다. Finder·Dock으로 연 Raven.app은 셸 환경을 받지 않아 적용되지 않는다(`launchctl setenv` 또는 터미널 실행).
+  - 대시보드(vite·데스크톱)는 401에서 토큰 입력 창을 띄우고, 입력 후 모든 요청에 토큰을 붙인다. 토큰은 sessionStorage에만 있어 앱·창마다 다시 입력해야 한다.
+  - Docker compose healthcheck는 토큰을 보내지 않는다 — 컨테이너에서 강화 모드를 켜면 API healthcheck는 실패하고 MCP healthcheck는 401을 성공으로 친다.
+  - Core가 서빙하는 정적 페이지도 토큰이 필요해진다. 토큰 없이 API를 부르는 `scripts/restart-all.sh`·`scripts/smoke-desktop.sh`는 실패로 보고한다.
+  - 테스트: `tests/conftest.py`가 이 변수를 지운다(`launchctl setenv`로 넣은 값이 터미널과 pytest에 들어오면 기본 정책 테스트가 깨진다). 강화 모드 테스트는 스스로 켠다.
+- **실측** (격리 포트·임시 토큰 저장소, 실제 Docker Desktop 컨테이너 `curlimages/curl` → `host.docker.internal`, 서버 로그의 peer 26건 모두 `127.0.0.1`):
+
+  | 요청 | 기본 Core / MCP | 강화 Core / MCP |
+  |---|---|---|
+  | 토큰 없음, 기본 Host | 401 / 401 | 401 / 401 |
+  | 토큰 없음, `Host: 127.0.0.1:P` | **200 / 200** | 401 / 401 |
+  | 토큰 없음, Host·Origin 모두 loopback | 200 / – | 401 / – |
+  | 잘못된 토큰, Host 위조 | 200 / 200 | 401 / 401 |
+  | 유효 토큰(기본 Host·위조 Host) | 200 / 200 | 200 / 200 |
+
+  강화 모드에서 vite 프록시(토큰 없음 401 + `WWW-Authenticate: Bearer`, 토큰 200), standalone Core·MCP(토큰으로 initialize·tools/list 25개), 격리 빌드한 데스크톱 앱(readiness 통과, 토큰 입력 후 vault 목록·페이지·내보내기·Core 재시작 정상, 입력 후 토큰 없는 `/api` 요청 0건)을 확인했다.
+- **검증**: `tests/test_issue67_loopback_token.py` 47건(참값·그 밖의 값 해석, 환경변수의 대소문자·공백, WebSocket 무토큰·잘못된 토큰 1008과 유효 토큰 accept — Core·MCP 게이트, 기본 모드 WebSocket 유지, 잘못된 토큰·Host/Origin 위조 401, query 토큰 401, 출처별 401 문구 5종·launcher 모드 2종과 기본 모드 문구 유지, 실제 소켓 standalone MCP: 무토큰·위조·잘못된·회수된 토큰·query 토큰 401과 SDK initialize·tools/list 성공). 변이 검사: 강화 모드 무시 시 21건, 대소문자 구분 해석 시 4건, 원격에도 loopback 문구 시 2건 실패. 전체 pytest(셸에 `RAVEN_REQUIRE_LOOPBACK_TOKEN=1`을 export한 채로): 2789 passed, 2 failed, 3 skipped — 실패 2건(`closed_stderr_pipe`, `test_no_candidates_is_not_an_error`)은 master에서도 같은 원인으로 실패한다(#68).
+- **독립 리뷰**: blocker 없음. should-fix 3건 반영 — conftest가 이 변수를 지우게 함(export된 채로 돌리면 기존 테스트 9건이 깨졌다), changelog의 빠진 전체 테스트 결과, 이슈 문서를 `docs/issues/`(한국어·frontmatter)로 이동. nit 반영 — 모듈·게이트 docstring, 함수 위치, compose 주석·로컬 스크립트 언급, 테스트 import 정리·fixture 이름, launcher 모드(vite xfwd) 401 문구 테스트 2건, 실소켓 테스트의 stderr.
