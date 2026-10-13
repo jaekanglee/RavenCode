@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import select
 import socket
 import subprocess
@@ -16,6 +17,37 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Issue #67: the Core API needs a Bearer from every source, loopback included. The Tauri
+# shell hands its Core a per-launch session credential on stdin (RAVEN_DESKTOP_SESSION_STDIN)
+# and the webview sends it as a Bearer. Real-socket tests launch the runtime the same way.
+SESSION_TOKEN = "rvs_runtime_test_" + secrets.token_hex(16)
+AUTH = {"Authorization": f"Bearer {SESSION_TOKEN}"}
+
+
+def _popen_core(argv: list[str], *, env: dict[str, str] | None = None, **kwargs) -> subprocess.Popen:
+    """``subprocess.Popen`` for the runtime, with the session credential on stdin like the shell."""
+    env = dict(os.environ if env is None else env)
+    env["RAVEN_DESKTOP_SESSION_STDIN"] = "1"
+    kwargs.setdefault("cwd", REPO_ROOT)
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, **kwargs)
+    line = SESSION_TOKEN + "\n"
+    proc.stdin.write(line if kwargs.get("text") else line.encode())
+    proc.stdin.close()
+    proc.stdin = None  # communicate() would flush the closed pipe (ValueError on Python 3.12)
+    return proc
+
+
+def _authed(url: str, *, data: bytes | None = None, headers: dict | None = None, method: str | None = None) -> Request:
+    return Request(url, data=data, headers={**AUTH, **(headers or {})}, method=method)
+
+
+def _issue_token(env: dict[str, str], name: str = "t") -> str:
+    """An MCP/API token issued into ``env``'s (temp) WIKI_VAULTS_DIR."""
+    return subprocess.run(
+        [sys.executable, "-c", f"from raven.core import mcp_tokens; print(mcp_tokens.add_token({name!r}))"],
+        cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
+    ).stdout.strip()
 
 
 def _wait_for_ready(process: subprocess.Popen[str], timeout: float = 15.0) -> dict:
@@ -34,9 +66,8 @@ def _wait_for_ready(process: subprocess.Popen[str], timeout: float = 15.0) -> di
 
 
 def test_desktop_core_starts_real_api_and_stops_cleanly() -> None:
-    process = subprocess.Popen(
+    process = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime"],
-        cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -48,7 +79,7 @@ def test_desktop_core_starts_real_api_and_stops_cleanly() -> None:
 
         # The real Raven API should respond on /api/vaults
         url = f"http://{ready['host']}:{ready['port']}/api/vaults"
-        with urlopen(url, timeout=5) as response:
+        with urlopen(_authed(url), timeout=5) as response:
             assert response.status == 200
             data = json.load(response)
             assert data["ok"] is True
@@ -67,12 +98,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_desktop_core_with_mcp_starts_mcp_listener() -> None:
+def test_desktop_core_with_mcp_starts_mcp_listener(tmp_path: Path) -> None:
     """--mcp flag starts an MCP HTTP listener alongside the API."""
     mcp_port = _free_port()
-    process = subprocess.Popen(
+    env = _isolated_env(tmp_path, "desktop")
+    token = _issue_token(env)  # MCP takes issued tokens only — agents, not the webview (#67)
+    process = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime", "--mcp", "--mcp-port", str(mcp_port)],
-        cwd=REPO_ROOT,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -102,6 +135,7 @@ def test_desktop_core_with_mcp_starts_mcp_listener() -> None:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {token}",
             },
         )
         with urlopen(req, timeout=10) as response:
@@ -118,11 +152,11 @@ def test_desktop_core_with_mcp_starts_mcp_listener() -> None:
 
 def _pick_resolvable_vault(base: str) -> str:
     """First registered vault whose path resolves (stale pytest tmp vaults 409)."""
-    with urlopen(f"{base}/api/vaults", timeout=5) as response:
+    with urlopen(_authed(f"{base}/api/vaults"), timeout=5) as response:
         vaults = json.load(response)["vaults"]
     for v in vaults:
         try:
-            with urlopen(f"{base}/api/vaults/{v['name']}/search?q=a", timeout=10):
+            with urlopen(_authed(f"{base}/api/vaults/{v['name']}/search?q=a"), timeout=10):
                 return v["name"]
         except HTTPError:
             continue
@@ -152,9 +186,8 @@ def test_desktop_core_survives_closed_stderr_pipe() -> None:
     BrokenPipeError inside the request handler → 500 on /hybrid-search and
     /rag/query while the plain /search kept working.
     """
-    process = subprocess.Popen(
+    process = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime"],
-        cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -172,7 +205,7 @@ def test_desktop_core_survives_closed_stderr_pipe() -> None:
         for method, path, body in _STDERR_WRITING_ENDPOINTS:
             url = f"{base}/api/vaults/{name}{path}"
             data = json.dumps(body).encode() if body is not None else None
-            req = Request(url, data=data, method=method,
+            req = _authed(url, data=data, method=method,
                           headers={"Content-Type": "application/json"})
             try:
                 with urlopen(req, timeout=60) as response:
@@ -257,9 +290,8 @@ def _spawn_core(
     argv = [sys.executable, "-m", "raven.desktop.runtime"]
     if host_arg is not None:
         argv += ["--host", host_arg]
-    return subprocess.Popen(
+    return _popen_core(
         argv,
-        cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -389,7 +421,7 @@ def test_no_automatic_wildcard_cors() -> None:
         base = f"http://{ready['host']}:{ready['port']}"
         req = Request(f"{base}/api/vaults", headers={"Origin": "https://evil.example.com"})
         status, allow = _cors_answer(req)
-        # Issue #28: a page of another site gets no tokenless loopback access at all.
+        # No token → 401 from every source, loopback included (#67).
         assert status == 401
         assert allow != "*", "wildcard CORS enabled automatically"
         assert allow != "https://evil.example.com", "arbitrary origin allowed"
@@ -404,7 +436,7 @@ def test_desktop_origin_still_allowed_by_cors() -> None:
     try:
         ready = _wait_for_ready(process)
         base = f"http://{ready['host']}:{ready['port']}"
-        req = Request(f"{base}/api/vaults", headers={"Origin": "http://tauri.localhost"})
+        req = _authed(f"{base}/api/vaults", headers={"Origin": "http://tauri.localhost"})
         with urlopen(req, timeout=5) as response:
             allow = response.headers.get("access-control-allow-origin")
         assert allow == "http://tauri.localhost", f"desktop origin rejected: {allow!r}"
@@ -492,13 +524,20 @@ def test_remote_bind_serves_api_behind_its_own_token_gate() -> None:
     for local in ("127.0.0.1", "::1", "localhost"):
         assert _is_loopback_host(local), local
 
-    async def call(client_ip: str) -> httpx.Response:
+    from raven.core.access import set_session_token
+
+    async def call(client_ip: str, headers: dict | None = None) -> httpx.Response:
         transport = httpx.ASGITransport(app=api_app, client=(client_ip, 44444))
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
-            return await c.get("/api/vaults")
+            return await c.get("/api/vaults", headers=headers or {})
 
+    set_session_token(SESSION_TOKEN)  # conftest resets it after the test
     assert asyncio.run(call("192.168.1.50")).status_code == 401
-    assert asyncio.run(call("127.0.0.1")).status_code == 200
+    # Issue #67: loopback is no exemption — the webview's session credential is what passes.
+    assert asyncio.run(call("127.0.0.1")).status_code == 401
+    assert asyncio.run(call("127.0.0.1", AUTH)).status_code == 200
+    # ... and only from this PC: a copied session credential is useless from the LAN.
+    assert asyncio.run(call("192.168.1.50", AUTH)).status_code == 401
 
 def test_wildcard_cors_switch_cannot_open_the_api() -> None:
     """Issue #14 acceptance: the default must not answer `Access-Control-Allow-Origin: *`.
@@ -747,16 +786,16 @@ def test_remote_core_never_hands_the_webview_another_servers_vault(tmp_path: Pat
 
         core_env = _isolated_env(tmp_path, "desktop")
         core_env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(port))
-        core = subprocess.Popen(
+        core = _popen_core(
             [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0"],
-            cwd=REPO_ROOT, env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         ready = _wait_for_ready(core)
         assert ready["host"] == "127.0.0.1"
         assert ready["port"] != port
 
         body = json.dumps({"slug": "content/i22", "title": "i22", "content": "x"}).encode()
-        req = Request(
+        req = _authed(
             f"http://127.0.0.1:{ready['port']}/api/vaults/shared/pages",
             data=body, headers={"Content-Type": "application/json"}, method="POST",
         )
@@ -797,9 +836,11 @@ def test_watched_parent_pid_requires_the_actual_parent(monkeypatch) -> None:
 
 _SHELL_STANDIN = r"""
 import os, subprocess, sys, time
-env = dict(os.environ, RAVEN_DESKTOP_PARENT_PID=str(os.getpid()))
-core = subprocess.Popen([sys.executable, "-m", "raven.desktop.runtime"], env=env,
+env = dict(os.environ, RAVEN_DESKTOP_PARENT_PID=str(os.getpid()), RAVEN_DESKTOP_SESSION_STDIN="1")
+core = subprocess.Popen([sys.executable, "-m", "raven.desktop.runtime"], env=env, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+core.stdin.write(sys.argv[1] + "\n")
+core.stdin.close()
 print(core.pid, core.stdout.readline().strip(), flush=True)
 time.sleep(120)
 """
@@ -825,7 +866,7 @@ def test_core_exits_and_frees_its_port_when_the_shell_is_terminated(tmp_path: Pa
     env.update(HOME=str(tmp_path / "home"), WIKI_VAULTS_DIR=str(tmp_path / "reg"), PORT_API=str(_free_port()))
     (tmp_path / "home").mkdir()
     shell = subprocess.Popen(
-        [sys.executable, "-c", _SHELL_STANDIN], cwd=REPO_ROOT, env=env,
+        [sys.executable, "-c", _SHELL_STANDIN, SESSION_TOKEN], cwd=REPO_ROOT, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     core_pid = None
@@ -835,7 +876,7 @@ def test_core_exits_and_frees_its_port_when_the_shell_is_terminated(tmp_path: Pa
         port = json.loads(first[1])["port"]
 
         time.sleep(1.0)  # parent alive → the Core keeps serving
-        with urlopen(f"http://127.0.0.1:{port}/api/vaults", timeout=5) as response:
+        with urlopen(_authed(f"http://127.0.0.1:{port}/api/vaults"), timeout=5) as response:
             assert response.status == 200
 
         shell.send_signal(signal.SIGTERM)
@@ -1058,9 +1099,9 @@ def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path:
     """Issue #49 end to end: Core on 0.0.0.0 reports ready, then another Raven API tries 127.0.0.1:P."""
     core_env = _isolated_env(tmp_path, "desktop")
     core_env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
-    core = subprocess.Popen(
+    core = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0"],
-        cwd=REPO_ROOT, env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=core_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     other = None
     try:
@@ -1076,7 +1117,7 @@ def test_remote_core_still_serves_loopback_after_another_server_starts(tmp_path:
             pass
 
         body = json.dumps({"slug": "content/i49", "title": "i49", "content": "x"}).encode()
-        req = Request(
+        req = _authed(
             f"http://127.0.0.1:{port}/api/vaults/shared/pages",
             data=body, headers={"Content-Type": "application/json"}, method="POST",
         )
@@ -1147,14 +1188,14 @@ def test_runtime_runs_api_only_when_the_mcp_port_is_answered_by_another_server(t
     mcp_port = other.getsockname()[1]
     env = _isolated_env(tmp_path, "desktop")
     env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
-    core = subprocess.Popen(
+    core = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime", "--host", "0.0.0.0", "--mcp", "--mcp-port", str(mcp_port)],
-        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
         ready = _wait_for_ready(core)
         assert "mcp_port" not in ready
-        with urlopen(f"http://127.0.0.1:{ready['port']}/api/vaults", timeout=5) as response:
+        with urlopen(_authed(f"http://127.0.0.1:{ready['port']}/api/vaults"), timeout=5) as response:
             assert response.status == 200
     finally:
         core.terminate()
@@ -1350,9 +1391,10 @@ raise SystemExit(r.main())
 """
 
 
-def _mcp_status(host: str, port: int) -> int:
+def _mcp_status(host: str, port: int, token: str | None = None) -> int:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        with urlopen(Request(f"http://{host}:{port}/mcp"), timeout=5) as response:
+        with urlopen(Request(f"http://{host}:{port}/mcp", headers=headers), timeout=5) as response:
             return response.status
     except HTTPError as exc:
         return exc.code
@@ -1367,9 +1409,10 @@ def test_no_process_can_take_an_mcp_address_after_readiness(tmp_path: Path, opts
     mcp_port = _free_port()
     env = _isolated_env(tmp_path, "desktop")
     env.update(RAVEN_ALLOW_REMOTE="1", PORT_API=str(_free_port()))
-    core = subprocess.Popen(
+    token = _issue_token(env)
+    core = _popen_core(
         [sys.executable, "-c", _MCP_ADVERTISES, str(mcp_port), ip],
-        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
         ready = _wait_for_ready(core)
@@ -1383,9 +1426,10 @@ def test_no_process_can_take_an_mcp_address_after_readiness(tmp_path: Path, opts
                     intruder.bind((host, mcp_port))
             finally:
                 intruder.close()
-        # Still our gated MCP: loopback passes the gate, the advertised IP needs a token.
-        assert _mcp_status("127.0.0.1", mcp_port) != 401
-        assert _mcp_status(ip, mcp_port) == 401
+        # Still our gated MCP on both addresses: no token → 401, our issued token → past the gate.
+        for host in ("127.0.0.1", ip):
+            assert _mcp_status(host, mcp_port) == 401
+            assert _mcp_status(host, mcp_port, token) != 401
     finally:
         core.terminate()
         core.wait(timeout=10)
@@ -1726,9 +1770,9 @@ def _start_core(tmp_path: Path, *argv: str, remote: bool = True, extra_env: dict
     if remote:
         env["RAVEN_ALLOW_REMOTE"] = "1"
     env.update(extra_env or {})
-    return subprocess.Popen(
+    return _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime", *argv],
-        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
 
 
@@ -1747,7 +1791,8 @@ def test_loopback_readiness_reports_a_loopback_bind(tmp_path, argv, remote) -> N
     try:
         ready = _wait_for_ready(core)
         assert (ready["host"], ready["bind_host"]) == ("127.0.0.1", "127.0.0.1")
-        assert _status(f"http://127.0.0.1:{ready['port']}/api/vaults") == 200
+        assert _status(f"http://127.0.0.1:{ready['port']}/api/vaults") == 401  # loopback too (#67)
+        assert _status(f"http://127.0.0.1:{ready['port']}/api/vaults", SESSION_TOKEN) == 200
     finally:
         core.terminate()
         core.wait(timeout=10)
@@ -1760,8 +1805,8 @@ def test_wildcard_readiness_reports_the_wildcard_bind_and_a_loopback_endpoint(tm
         ready = _wait_for_ready(core)
         assert (ready["host"], ready["bind_host"]) == ("127.0.0.1", "0.0.0.0")
         base = f"http://127.0.0.1:{ready['port']}"
-        assert _status(f"{base}/api/vaults") == 200
-        with urlopen(f"{base}/api/system/info", timeout=5) as response:
+        assert _status(f"{base}/api/vaults", SESSION_TOKEN) == 200
+        with urlopen(_authed(f"{base}/api/system/info"), timeout=5) as response:
             assert json.load(response)["bind_host"] == "0.0.0.0"  # what the admin screen shows
     finally:
         core.terminate()
@@ -1784,6 +1829,7 @@ def test_specific_address_readiness_points_at_that_address(tmp_path) -> None:
         assert (ready["host"], ready["bind_host"]) == (ip, ip)
         base = f"http://{ip}:{ready['port']}"
         assert _status(f"{base}/api/vaults") == 401  # not a loopback client — token required
+        assert _status(f"{base}/api/vaults", SESSION_TOKEN) == 401  # the webview's credential is this-PC only
         assert _status(f"{base}/api/vaults", token) == 200
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", ready["port"]), timeout=1).close()
@@ -1885,3 +1931,93 @@ def test_unresolvable_bind_host_fails_without_readiness(tmp_path) -> None:
     out, err = core.communicate(timeout=30)
     assert core.returncode == 1 and out == ""
     assert "cannot resolve bind host 'no-such-host.invalid'" in err
+
+
+# ─── Issue #67: the shell's session credential (stdin) is the webview's only pass ───
+
+_MCP_INIT = json.dumps({
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "t67", "version": "0"}},
+}).encode()
+
+
+def test_session_credential_from_stdin_is_required_on_loopback(tmp_path) -> None:
+    core = _start_core(tmp_path, remote=False)
+    try:
+        ready = _wait_for_ready(core)
+        url = f"http://127.0.0.1:{ready['port']}/api/vaults"
+        assert _status(url) == 401
+        assert _status(url, "rvs_wrong_" + SESSION_TOKEN[-8:]) == 401
+        assert _status(url, SESSION_TOKEN) == 200
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_session_credential_is_not_accepted_by_the_mcp_listener(tmp_path) -> None:
+    env = _isolated_env(tmp_path, "desktop")
+    env["PORT_API"] = str(_free_port())
+    token = _issue_token(env)
+    core = _popen_core(
+        [sys.executable, "-m", "raven.desktop.runtime", "--mcp", "--mcp-port", str(_free_port())],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_ready(core)
+        mcp_url = f"http://127.0.0.1:{ready['mcp_port']}/mcp"
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+        def init(auth: str | None) -> int:
+            h = dict(headers, **({"Authorization": f"Bearer {auth}"} if auth else {}))
+            try:
+                with urlopen(Request(mcp_url, data=_MCP_INIT, headers=h), timeout=10) as response:
+                    return response.status
+            except HTTPError as exc:
+                return exc.code
+
+        assert init(None) == 401
+        assert init(SESSION_TOKEN) == 401  # the webview's credential is Core-API only
+        assert init(token) == 200
+        # ... while the same credential does open the Core API of the same process.
+        assert _status(f"http://127.0.0.1:{ready['port']}/api/vaults", SESSION_TOKEN) == 200
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+
+
+def test_without_the_env_the_runtime_never_reads_stdin(tmp_path) -> None:
+    """Launched without RAVEN_DESKTOP_SESSION_STDIN, an open stdin that never closes must not
+    stall start-up, and whatever it carries is not a credential."""
+    env = _isolated_env(tmp_path, "desktop")
+    env["PORT_API"] = str(_free_port())
+    core = subprocess.Popen(
+        [sys.executable, "-m", "raven.desktop.runtime"], cwd=REPO_ROOT, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        core.stdin.write(SESSION_TOKEN + "\n")
+        core.stdin.flush()  # left open on purpose
+        ready = _wait_for_ready(core, timeout=20)
+        url = f"http://127.0.0.1:{ready['port']}/api/vaults"
+        assert _status(url) == 401
+        assert _status(url, SESSION_TOKEN) == 401
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+        core.stdin.close()
+
+
+def test_session_credential_never_appears_on_stdout_or_stderr(tmp_path) -> None:
+    core = _start_core(tmp_path, "--host", "0.0.0.0")  # remote mode prints the most to stderr
+    try:
+        ready = _wait_for_ready(core)
+        assert SESSION_TOKEN not in json.dumps(ready)
+        base = f"http://127.0.0.1:{ready['port']}"
+        assert _status(f"{base}/api/vaults", SESSION_TOKEN) == 200
+        assert _status(f"{base}/api/vaults", "rvs_wrong_token") == 401  # a refusal must not echo either
+    finally:
+        core.terminate()
+        core.wait(timeout=10)
+    out, err = core.stdout.read(), core.stderr.read()
+    assert SESSION_TOKEN not in out and SESSION_TOKEN not in err

@@ -82,7 +82,7 @@ export function AuthTokenDialog({ onVerified = () => window.location.reload() }:
           접근 토큰이 필요합니다
         </h2>
         <p style={{ fontSize: 13, color: "var(--color-muted)", margin: 0 }}>
-          {base ? <code>{base}</code> : "이 호스트"}는 같은 PC가 아닌 곳(tailnet·내부망)에서의 접근에 토큰을 요구합니다.
+          {base ? <code>{base}</code> : "이 호스트"}는 API 접근에 토큰을 요구합니다(같은 PC에서도).
           호스트 PC에서 <code>raven mcp token add &lt;이름&gt;</code>으로 발급하세요. 토큰은 이 창을 닫으면 지워집니다.
         </p>
         <TextField

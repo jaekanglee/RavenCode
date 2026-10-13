@@ -40,6 +40,10 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    // Issue #67 review: the desktop dev webview (devUrl 127.0.0.1:5173) may read the shell's
+    // session credential over IPC. If vite silently moved to 5174, whatever else holds 5173
+    // would be loaded as the app. Fail instead.
+    strictPort: true,
     // RAVEN_DASHBOARD_HOST (repo-root .env, raven.sh가 source): 미설정 시 localhost만.
     host: process.env.RAVEN_DASHBOARD_HOST || "127.0.0.1",
     proxy: {

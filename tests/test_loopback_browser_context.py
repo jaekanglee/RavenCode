@@ -1,10 +1,20 @@
-"""Issue #28: tokenless loopback trust needs a loopback Host and a local Origin.
+"""Issue #67 (replaces #28's Host/Origin rule): loopback is no exemption from the token.
 
-A request on the loopback socket is not necessarily from a program on this machine:
-a browser also sends them for pages of other sites. Those carry the other site's
-name in Host or Origin. The Core API gate (TokenGate) and the MCP gate (LanTokenAuth)
-must refuse them without a token, keep accepting local programs, the dashboard and
-the desktop webview, and leave Bearer-authenticated requests alone.
+#28 let a tokenless request on the loopback socket through when its Host was a loopback
+name and its Origin (if any) a local page or the desktop webview. That rule judged
+headers the client chooses: macOS Docker Desktop forwards a container's
+``host.docker.internal`` connection to the host's loopback, and the container can send
+``Host: 127.0.0.1`` and any Origin. So now the Core API gate (TokenGate) and the MCP gate
+(LanTokenAuth) require a Bearer token from every source:
+
+  1. no token → 401 (WebSocket: close 1008), whatever Host, Origin or Sec-Fetch-* say —
+     loopback Host, ``tauri://localhost``, the vite dashboard shape, page navigations;
+  2. a valid token → 200, whatever Host or Origin say (Docker ``spa_server`` rewrites Host,
+     remote dashboards send their own Origin);
+  3. a wrong or revoked token → 401;
+  4. the Core API's dashboard *files* stay public (no vault data) — see
+     ``raven/api/server.py::_is_public_static``; ``/api`` never is. MCP has no public path
+     besides ``GET /healthz``.
 """
 from __future__ import annotations
 
@@ -18,7 +28,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 
 from raven.core import access, mcp_tokens
-from raven.core.access import TokenGate, is_local_browser_context
+from raven.core.access import TokenGate
 from raven.mcp.auth import LanTokenAuth
 
 
@@ -65,6 +75,7 @@ def _status(gate_cls, headers: list[tuple[str, str]], peer: str = "127.0.0.1", m
 
 
 GATES = [TokenGate, LanTokenAuth]
+LOOPBACK_PEERS = ["127.0.0.1", "127.5.6.7", "::1", "::ffff:127.0.0.1"]
 
 LOCAL_HOSTS = ["127.0.0.1:8765", "127.0.0.1", "localhost:8766", "LOCALHOST:8765", "localhost.", "[::1]:8765",
                "[::1]", "127.5.6.7:8765"]
@@ -79,50 +90,87 @@ FOREIGN_ORIGINS = ["https://evil.example", "http://evil.example:8765", "null", "
                    "http://tauri.localhost.evil.example", "http://127.0.0.1:5173/path", ""]
 
 
-@pytest.mark.parametrize("gate_cls", GATES)
-@pytest.mark.parametrize("host", LOCAL_HOSTS)
-def test_local_programs_and_pages_still_pass_without_a_token(vaults_root, gate_cls, host) -> None:
-    assert _status(gate_cls, [("host", host)]) == 200
-    for origin in LOCAL_ORIGINS:
-        assert _status(gate_cls, [("host", host), ("origin", origin)]) == 200, origin
+# ─── 1. no token → 401 from loopback, whatever the headers ───
 
 
 @pytest.mark.parametrize("gate_cls", GATES)
-def test_a_client_that_sends_no_host_still_passes(vaults_root, gate_cls) -> None:
-    """HTTP/1.0 tools may omit Host; a browser never does."""
-    assert _status(gate_cls, []) == 200
+@pytest.mark.parametrize("peer", LOOPBACK_PEERS)
+@pytest.mark.parametrize("host", LOCAL_HOSTS + FOREIGN_HOSTS)
+def test_no_host_or_origin_lets_a_tokenless_loopback_request_through(vaults_root, gate_cls, peer, host) -> None:
+    assert _status(gate_cls, [("host", host)], peer=peer) == 401
+    for origin in LOCAL_ORIGINS + FOREIGN_ORIGINS:
+        assert _status(gate_cls, [("host", host), ("origin", origin)], peer=peer) == 401, origin
 
 
 @pytest.mark.parametrize("gate_cls", GATES)
-@pytest.mark.parametrize("host", FOREIGN_HOSTS)
-def test_a_foreign_host_needs_a_token_on_loopback(vaults_root, gate_cls, host) -> None:
-    assert _status(gate_cls, [("host", host)]) == 401
-
-
-@pytest.mark.parametrize("gate_cls", GATES)
-@pytest.mark.parametrize("origin", FOREIGN_ORIGINS)
-def test_a_foreign_origin_needs_a_token_on_loopback(vaults_root, gate_cls, origin) -> None:
-    assert _status(gate_cls, [("host", "127.0.0.1:8765"), ("origin", origin)]) == 401
-
-
-@pytest.mark.parametrize("gate_cls", GATES)
-def test_repeated_host_or_origin_headers_need_a_token(vaults_root, gate_cls) -> None:
-    assert _status(gate_cls, [("host", "127.0.0.1:8765"), ("host", "evil.example")]) == 401
-    assert _status(gate_cls, [("host", "127.0.0.1"), ("origin", "tauri://localhost"), ("origin", "https://evil.example")]) == 401
+def test_a_client_that_sends_no_host_needs_a_token_too(vaults_root, gate_cls) -> None:
+    """HTTP/1.0 tools may omit Host — no exemption for that either."""
+    assert _status(gate_cls, []) == 401
 
 
 @pytest.mark.parametrize("gate_cls", GATES)
 @pytest.mark.parametrize("headers", [
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "none")],  # typed in the address bar
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "same-origin")],
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("origin", "tauri://localhost")],  # desktop webview
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site")],
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "same-site")],
+])
+def test_fetch_metadata_never_stands_in_for_a_token(vaults_root, gate_cls, headers) -> None:
+    assert _status(gate_cls, headers) == 401
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+def test_the_vite_dashboard_shape_needs_a_token(vaults_root, monkeypatch, gate_cls) -> None:
+    """vite (changeOrigin + xfwd): Host rewritten to the API, XFF 127.0.0.1, page Origin kept."""
+    monkeypatch.setattr(access, "_socket_peer", True)
+    vite = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "127.0.0.1"), ("x-forwarded-host", "localhost:5173"),
+            ("x-forwarded-proto", "http"), ("x-forwarded-port", "5173")]
+    for extra in ([("origin", "http://localhost:5173")], [("origin", "http://127.0.0.1:5173"), ("sec-fetch-site", "same-origin")],
+                  [("origin", "https://evil.example")], []):
+        assert _status(gate_cls, vite + extra) == 401, extra
+    token = mcp_tokens.add_token("vite")
+    assert _status(gate_cls, vite + [("origin", "http://localhost:5173"), ("authorization", f"Bearer {token}")]) == 200
+    # a LAN browser through vite needs it just the same
+    lan = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "192.168.1.50"), ("origin", "http://192.168.0.52:5173")]
+    assert _status(gate_cls, lan) == 401
+    assert _status(gate_cls, lan + [("authorization", f"Bearer {token}")]) == 200
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+def test_the_refusal_says_why(vaults_root, gate_cls) -> None:
+    async def go():
+        transport = httpx.ASGITransport(app=gate_cls(_inner()), client=("127.0.0.1", 40000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765") as c:
+            return await c.get("/x", headers={"Origin": "tauri://localhost"})
+
+    res = asyncio.run(go())
+    assert res.status_code == 401
+    assert "loopback" in res.json()["detail"] and "Bearer" in res.json()["detail"]
+    assert res.headers["www-authenticate"].startswith("Bearer")
+
+
+# ─── 2–3. a valid token passes whatever Host/Origin say; a wrong or revoked one does not ───
+
+
+@pytest.mark.parametrize("gate_cls", GATES)
+@pytest.mark.parametrize("headers", [
+    [],
     [("host", "evil.example:8765")],
     [("host", "127.0.0.1:8765"), ("origin", "https://evil.example")],
+    [("host", "localhost"), ("origin", "tauri://localhost")],
     [("host", "api:8765")],  # Docker spa_server rewrites Host and sends the user's token
     [("host", "100.101.1.2:8766"), ("origin", "http://100.101.1.2:5173")],  # remote dashboard
+    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site")],
 ])
 def test_a_bearer_token_is_not_affected_by_host_or_origin(vaults_root, gate_cls, headers) -> None:
-    token = mcp_tokens.add_token("t28")
+    token = mcp_tokens.add_token("t67")
     auth = [("authorization", f"Bearer {token}")]
     assert _status(gate_cls, headers + auth) == 200
     assert _status(gate_cls, headers + auth, peer="192.168.1.50") == 200
+    assert _status(gate_cls, headers + [("authorization", "Bearer rvn_wrong_token")]) == 401
+    mcp_tokens.revoke_token("t67")
+    assert _status(gate_cls, headers + auth) == 401
 
 
 @pytest.mark.parametrize("gate_cls", GATES)
@@ -132,20 +180,19 @@ def test_remote_sources_are_unchanged(vaults_root, gate_cls) -> None:
         assert _status(gate_cls, [("host", host)], peer="192.168.1.50") == 401
 
 
-@pytest.mark.parametrize("gate_cls", GATES)
-def test_the_refusal_says_why(vaults_root, gate_cls) -> None:
-    async def go():
-        transport = httpx.ASGITransport(app=gate_cls(_inner()), client=("127.0.0.1", 40000))
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765") as c:
-            return await c.get("/x", headers={"Origin": "https://evil.example"})
-
-    res = asyncio.run(go())
-    assert res.status_code == 401
-    assert "Host/Origin" in res.json()["detail"]
-    assert res.headers["www-authenticate"].startswith("Bearer")
+def test_core_api_and_mcp_agree_on_every_combination(vaults_root, monkeypatch) -> None:
+    for launcher in (True, False):
+        monkeypatch.setattr(access, "_socket_peer", launcher)
+        for host in LOCAL_HOSTS + FOREIGN_HOSTS:
+            for origin in [None] + LOCAL_ORIGINS + FOREIGN_ORIGINS:
+                headers = [("host", host)] + ([("origin", origin)] if origin is not None else [])
+                assert _status(TokenGate, headers) == _status(LanTokenAuth, headers) == 401, headers
 
 
-def _websocket(gate_cls, origin: str | None) -> str:
+# ─── WebSocket ───
+
+
+def _websocket(gate_cls, headers: list[tuple[bytes, bytes]], peer: str = "127.0.0.1") -> str:
     events: list[dict] = []
     incoming = [{"type": "websocket.connect"}]
 
@@ -155,41 +202,29 @@ def _websocket(gate_cls, origin: str | None) -> str:
     async def send(message):
         events.append(message)
 
-    headers = [(b"host", b"127.0.0.1:8765")] + ([(b"origin", origin.encode())] if origin else [])
-    scope = {"type": "websocket", "path": "/ws", "raw_path": b"/ws", "query_string": b"", "headers": headers,
-             "client": ("127.0.0.1", 40000), "server": ("127.0.0.1", 8765), "scheme": "ws", "root_path": "",
+    scope = {"type": "websocket", "path": "/ws", "raw_path": b"/ws", "query_string": b"",
+             "headers": [(b"host", b"127.0.0.1:8765")] + headers,
+             "client": (peer, 40000), "server": ("127.0.0.1", 8765), "scheme": "ws", "root_path": "",
              "subprotocols": []}
     asyncio.run(gate_cls(_inner())(scope, receive, send))
     return events[0]["type"] + (f":{events[0].get('code')}" if events[0]["type"] == "websocket.close" else "")
 
 
 @pytest.mark.parametrize("gate_cls", GATES)
-def test_websockets_follow_the_same_rule(vaults_root, gate_cls) -> None:
-    assert _websocket(gate_cls, "https://evil.example") == "websocket.close:1008"
-    assert _websocket(gate_cls, "tauri://localhost") == "websocket.accept"
-    assert _websocket(gate_cls, None) == "websocket.accept"
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
+def test_websockets_follow_the_same_rule(vaults_root, gate_cls, peer) -> None:
+    for origin in (None, b"tauri://localhost", b"http://localhost:5173", b"https://evil.example"):
+        headers = [(b"origin", origin)] if origin else []
+        assert _websocket(gate_cls, headers, peer) == "websocket.close:1008", origin
+    assert _websocket(gate_cls, [(b"authorization", b"Bearer rvn_wrong")], peer) == "websocket.close:1008"
+    token = mcp_tokens.add_token("ws")
+    assert _websocket(gate_cls, [(b"authorization", f"Bearer {token}".encode())], peer) == "websocket.accept"
 
 
-def test_the_rule_on_its_own() -> None:
-    def ctx(*headers):
-        return is_local_browser_context({"headers": [(k.encode(), v.encode()) for k, v in headers]})
-
-    assert ctx()
-    assert ctx(("host", "localhost:1"), ("origin", "http://localhost:2"))
-    assert not ctx(("host", "evil.example"))
-    assert not ctx(("origin", "null"))
+# ─── real apps ───
 
 
-def test_core_api_and_mcp_agree_on_every_combination(vaults_root, monkeypatch) -> None:
-    for launcher in (True, False):
-        monkeypatch.setattr(access, "_socket_peer", launcher)
-        for host in LOCAL_HOSTS + FOREIGN_HOSTS:
-            for origin in [None] + LOCAL_ORIGINS + FOREIGN_ORIGINS:
-                headers = [("host", host)] + ([("origin", origin)] if origin is not None else [])
-                assert _status(TokenGate, headers) == _status(LanTokenAuth, headers), headers
-
-
-def test_the_real_mcp_app_refuses_a_foreign_host_before_any_mcp_handling(vaults_root) -> None:
+def test_the_real_mcp_app_refuses_tokenless_loopback_before_any_mcp_handling(vaults_root) -> None:
     from raven.mcp.cli import build_http_app
 
     app = build_http_app("admin", "127.0.0.1")
@@ -204,84 +239,55 @@ def test_the_real_mcp_app_refuses_a_foreign_host_before_any_mcp_handling(vaults_
 
     async def go():
         # The gate answers before the MCP app (or its lifespan) is involved.
-        foreign = await call("http://evil.example:8766", {})
-        cross = await call("http://127.0.0.1:8766", {"origin": "https://evil.example"})
-        return foreign, cross
+        return [await call("http://evil.example:8766", {}),
+                await call("http://127.0.0.1:8766", {"origin": "https://evil.example"}),
+                await call("http://127.0.0.1:8766", {}),
+                await call("http://localhost:8766", {"origin": "tauri://localhost"})]
 
-    foreign, cross = asyncio.run(go())
-    assert foreign.status_code == 401 and foreign.json()["error"] == "unauthorized"
-    assert cross.status_code == 401
-
-
-
-@pytest.mark.parametrize("gate_cls", GATES)
-@pytest.mark.parametrize("site", ["cross-site", "same-site", "Cross-Site"])
-def test_a_cross_site_load_without_origin_needs_a_token(vaults_root, gate_cls, site) -> None:
-    """<img src>, <script src>, a link from another site: no Origin, but marked cross-site."""
-    assert _status(gate_cls, [("host", "127.0.0.1:8765"), ("sec-fetch-site", site)]) == 401
+    for res in asyncio.run(go()):
+        assert res.status_code == 401 and res.json()["error"] == "unauthorized"
 
 
-@pytest.mark.parametrize("gate_cls", GATES)
-@pytest.mark.parametrize("headers", [
-    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "none")],  # typed in the address bar
-    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "same-origin")],
-    # the desktop webview fetching the Core is cross-site, but it sends its Origin
-    [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("origin", "tauri://localhost")],
-])
-def test_fetch_metadata_does_not_block_local_use(vaults_root, gate_cls, headers) -> None:
-    assert _status(gate_cls, headers) == 200
-
-
-@pytest.mark.parametrize("gate_cls", GATES)
-def test_the_vite_dashboard_shape_in_launcher_mode(vaults_root, monkeypatch, gate_cls) -> None:
-    """vite (changeOrigin + xfwd): Host rewritten to the API, XFF 127.0.0.1, page Origin kept."""
-    monkeypatch.setattr(access, "_socket_peer", True)
-    vite = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "127.0.0.1"), ("x-forwarded-host", "localhost:5173"),
-            ("x-forwarded-proto", "http"), ("x-forwarded-port", "5173")]
-    assert _status(gate_cls, vite + [("origin", "http://localhost:5173")]) == 200
-    assert _status(gate_cls, vite + [("origin", "http://127.0.0.1:5173"), ("sec-fetch-site", "same-origin")]) == 200
-    assert _status(gate_cls, vite + [("origin", "https://evil.example")]) == 401
-    assert _status(gate_cls, vite + [("sec-fetch-site", "cross-site")]) == 401
-    # a LAN browser through vite: XFF names it — a token is needed, as before
-    lan = [("host", "127.0.0.1:8765"), ("x-forwarded-for", "192.168.1.50"), ("origin", "http://192.168.0.52:5173")]
-    assert _status(gate_cls, lan) == 401
-
-
-def test_the_real_api_app_serves_the_desktop_webview_origin(vaults_root) -> None:
+def test_the_real_api_app_serves_the_desktop_webview_only_with_a_credential(vaults_root) -> None:
     from fastapi.testclient import TestClient
 
     from raven.api.server import app
 
+    tokenless = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8765", headers={"Authorization": ""})
+    assert tokenless.get("/api/vaults", headers={"Origin": "tauri://localhost", "Sec-Fetch-Site": "cross-site"}).status_code == 401
+    # conftest's TestClient carries the test session credential, like the desktop webview's
     client = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8765")
     ok = client.get("/api/vaults", headers={"Origin": "tauri://localhost", "Sec-Fetch-Site": "cross-site"})
     assert ok.status_code == 200
     assert ok.headers.get("access-control-allow-origin") == "tauri://localhost"
-    assert client.get("/api/vaults", headers={"Origin": "tauri://evil"}).status_code == 401
 
 
 NAV = [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")]
 
 
-def test_a_link_from_another_site_can_open_a_dashboard_page_but_not_the_api(vaults_root) -> None:
-    """#28 review: the Core also serves the dashboard; following a link to it shows the app (no data)."""
-    assert _status(TokenGate, NAV, path="/page/v/x") == 200
-    assert _status(TokenGate, NAV, path="/page/v/x", method="HEAD") == 200
-    assert _status(TokenGate, NAV + [], path="/", ) in (200, 404)  # served or not routed — never 401
-    for path in ("/api/vaults", "/api"):
-        assert _status(TokenGate, NAV, path=path) == 401, path
-    # not a navigation: a POST, an <img>/<script> load, or an iframe document
-    assert _status(TokenGate, NAV, path="/page/v/x", method="POST") == 401
-    sub = [("host", "127.0.0.1:8765"), ("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "image")]
-    assert _status(TokenGate, sub, path="/page/v/x") == 401
-    frame = [h for h in NAV if h[0] != "sec-fetch-dest"] + [("sec-fetch-dest", "iframe")]
-    assert _status(TokenGate, frame, path="/page/v/x") == 401
-
-
-def test_mcp_gives_no_navigation_exemption(vaults_root) -> None:
-    assert _status(LanTokenAuth, NAV, path="/mcp") == 401
-    assert _status(LanTokenAuth, NAV, path="/page/v/x") == 401
-
-
 @pytest.mark.parametrize("gate_cls", GATES)
-def test_any_cross_site_fetch_metadata_value_counts(vaults_root, gate_cls) -> None:
-    assert _status(gate_cls, [("host", "127.0.0.1"), ("sec-fetch-site", "none"), ("sec-fetch-site", "cross-site")]) == 401
+def test_a_bare_gate_gives_no_navigation_exemption(vaults_root, gate_cls) -> None:
+    """#28's page-navigation exemption is gone; only an explicit ``public`` predicate opens a path."""
+    for path in ("/page/v/x", "/", "/api/vaults", "/mcp"):
+        assert _status(gate_cls, NAV, path=path) == 401, path
+
+
+def test_the_core_serves_dashboard_files_but_not_the_api_to_a_link_from_another_site(vaults_root, monkeypatch, tmp_path) -> None:
+    """The Core's dashboard build is public (no vault data); the API behind it is not."""
+    import raven.api.server as server
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>raven</html>", encoding="utf-8")
+    monkeypatch.setattr(server, "_DASHBOARD_DIST", dist)
+
+    async def go(method, path):
+        transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 40000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765") as c:
+            return await c.request(method, path, headers=dict(NAV[1:]))
+
+    for method, path in (("GET", "/api/vaults"), ("GET", "/api"), ("POST", "/page/v/x"), ("GET", "/docs"), ("GET", "/openapi.json")):
+        assert asyncio.run(go(method, path)).status_code == 401, (method, path)
+    # The public predicate lets GET /page/... through the gate; whether the SPA fallback
+    # route exists depends on a build at import time, so only "not refused" is asserted.
+    assert asyncio.run(go("GET", "/page/v/x")).status_code != 401

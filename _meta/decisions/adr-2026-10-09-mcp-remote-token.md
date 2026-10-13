@@ -9,6 +9,8 @@ status: accepted
 
 # MCP Remote Token
 
+> ⚠️ **2026-10-13 일부 대체 (#67):** "loopback은 토큰 없이 통과"는 [[adr-2026-10-13-loopback-token-required]]로 대체됐다. 이제 같은 PC(loopback)를 포함한 모든 출처에 토큰이 필요하다(macOS Docker Desktop 컨테이너가 loopback으로 보이기 때문). 나머지 내용은 유효하다.
+
 > **결정:** 모든 MCP HTTP 리스너는 직접 loopback만 토큰 없이 받는다. tailnet을 포함한 그 밖의 모든 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 필요하다. 대상은 데스크톱 런타임, `./raven.sh start`, team launchd 인스턴스, Docker `mcp-http`다. 인증 opt-out은 없다. 이 결정은 [[adr-2026-09-30-mcp-lan-token-auth]]의 tailnet 무인증 통과와 "standalone은 범위 밖"을 대체한다 (Issue #26). Core API의 같은 결정은 [[adr-2026-10-08-core-api-tailnet-token]]이다.
 
 ## 맥락

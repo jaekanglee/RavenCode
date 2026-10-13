@@ -9,6 +9,8 @@ status: accepted
 
 # Core API Access Gate
 
+> ⚠️ **2026-10-13 일부 대체 (#67):** "loopback은 토큰 없이 통과"는 [[adr-2026-10-13-loopback-token-required]]로 대체됐다. 이제 같은 PC(loopback)를 포함한 모든 출처에 토큰이 필요하다(macOS Docker Desktop 컨테이너가 loopback으로 보이기 때문). 나머지 내용은 유효하다.
+
 > **결정:** Core API 접근 게이트를 실행기가 아니라 앱(`raven.api.app`) 자체에 붙인다. loopback·tailnet 출처는 통과하고, 그 밖의 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 통과한다. 프록시 헤더로는 신뢰 출처를 만들 수 없고, Docker 대역도 신뢰하지 않는다.
 
 ## 맥락

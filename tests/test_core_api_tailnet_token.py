@@ -1,17 +1,17 @@
-"""Issue #24 — the Core API requires a Bearer token from every non-loopback source, tailnet included.
+"""Issue #24 — the Core API requires a Bearer token from the tailnet (and, since #67, from loopback too).
 
 PR #21 trusted tailnet sources judged by a route inference (`is_tailnet_peer`), which
 does not prove the accepted connection's WireGuard authentication. #24 removes that
 trust for the Core API:
 
-  1. loopback (127.0.0.0/8, ::1, IPv4-mapped) → no token, unchanged.
+  1. loopback (127.0.0.0/8, ::1, IPv4-mapped) → since Issue #67 also needs a token
+     (macOS Docker Desktop's host.docker.internal looks like loopback).
   2. every other source — tailnet IPv4/IPv6 included, even when the route check
      says "tailnet" — needs a valid `Authorization: Bearer` token; missing/invalid
      → 401 before any handler runs, on every method and on WebSocket handshakes.
-  3. XFF from a local proxy cannot turn a tailnet/LAN client into a trusted one;
+  3. XFF from a local proxy cannot turn a tailnet/LAN client into a loopback source;
      only loopback XFF hops are honoured (launcher mode), unchanged.
-  4. MCP follows the same policy since Issue #26 (`LanTokenAuth.trust_tailnet = False`,
-     tests/test_mcp_remote_auth.py).
+  4. MCP follows the same policy since Issue #26 (tests/test_mcp_remote_auth.py).
 
 In-process tests run with conftest's fake tailnet, i.e. the route check *does*
 answer "tailnet" — so a 401 here proves the policy, not a failed route lookup.
@@ -75,8 +75,11 @@ def test_tailnet_wrong_and_valid_tokens(vaults_root, peer):
 
 
 @pytest.mark.parametrize("peer", ["127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"])
-def test_loopback_still_needs_no_token(vaults_root, peer):
-    assert _call("GET", "/api/vaults", peer).status_code == 200
+def test_loopback_needs_a_token_too(vaults_root, peer):
+    """Issue #67 — loopback lost its tokenless pass; a valid token works like from the tailnet."""
+    assert _call("GET", "/api/vaults", peer).status_code == 401
+    token = mcp_tokens.add_token("local")
+    assert _call("GET", "/api/vaults", peer, {"Authorization": f"Bearer {token}"}).status_code == 200
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -113,7 +116,9 @@ def test_local_proxy_xff_tailnet_source_needs_token(vaults_root, monkeypatch):
     """vite xfwd: a tailnet browser via the local dev proxy arrives as loopback + XFF tailnet."""
     monkeypatch.setattr(access, "_socket_peer", True)
     assert _call("GET", "/api/vaults", "127.0.0.1", {"X-Forwarded-For": "100.101.1.2"}).status_code == 401
-    assert _call("GET", "/api/vaults", "127.0.0.1", {"X-Forwarded-For": "127.0.0.1"}).status_code == 200
+    assert _call("GET", "/api/vaults", "127.0.0.1", {"X-Forwarded-For": "127.0.0.1"}).status_code == 401  # #67
+    scope = {"client": ("127.0.0.1", 1), "headers": [(b"x-forwarded-for", b"100.101.1.2")]}
+    assert access.effective_client(scope) == "100.101.1.2"  # never "this PC" downstream (#15)
     token = mcp_tokens.add_token("vite-remote")
     assert _call("GET", "/api/vaults", "127.0.0.1",
                  {"X-Forwarded-For": "100.101.1.2", "Authorization": f"Bearer {token}"}).status_code == 200
@@ -138,10 +143,12 @@ def test_websocket_handshake_from_tailnet_is_refused(vaults_root):
 
 
 def test_api_gate_and_mcp_gate_share_the_tailnet_policy():
+    """One gate: MCP subclasses the Core API's and adds no source exemption (#26, #67)."""
     from raven.mcp.auth import LanTokenAuth
 
-    assert access.TokenGate.trust_tailnet is False
-    assert LanTokenAuth.trust_tailnet is False  # Issue #26
+    assert issubclass(LanTokenAuth, access.TokenGate)
+    assert LanTokenAuth.__call__ is access.TokenGate.__call__
+    assert not hasattr(access.TokenGate, "trust_tailnet")  # no flag left that could re-open the tailnet
 
 
 def test_mcp_also_requires_a_token_from_the_tailnet(vaults_root):
@@ -164,7 +171,7 @@ def test_mcp_also_requires_a_token_from_the_tailnet(vaults_root):
 
     assert asyncio.run(go("100.101.1.2")).status_code == 401
     assert asyncio.run(go("192.168.1.50")).status_code == 401
-    assert asyncio.run(go("127.0.0.1")).status_code == 200
+    assert asyncio.run(go("127.0.0.1")).status_code == 401  # #67: loopback too
 
 
 # ─── real sockets ───
@@ -222,7 +229,8 @@ def test_real_socket_own_tailscale_ip_needs_token(vaults_root):
         assert (vaults_root / "alpha").exists()
         token = mcp_tokens.add_token("ts-self")
         assert _status(f"{base}/api/vaults", {"Authorization": f"Bearer {token}"}) == 200
-        assert _status(f"http://127.0.0.1:{port}/api/vaults") == 200
+        assert _status(f"http://127.0.0.1:{port}/api/vaults") == 401  # #67
+        assert _status(f"http://127.0.0.1:{port}/api/vaults", {"Authorization": f"Bearer {token}"}) == 200
     finally:
         proc.terminate()
         proc.wait(timeout=8)

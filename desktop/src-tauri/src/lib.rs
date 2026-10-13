@@ -148,6 +148,16 @@ async fn core_endpoint(app: tauri::AppHandle) -> Result<String, String> {
     .await
 }
 
+/// Gives the webview this app launch's Core API credential (Issue #67).
+///
+/// The Core API needs `Authorization: Bearer` from every source, loopback included. The
+/// dashboard keeps this value in memory (never storage, never a URL) and sends it only to
+/// this app's own Core. Only the app's own window can call it (capabilities/default.json).
+#[command]
+fn core_session_token() -> String {
+    core::session_token().to_string()
+}
+
 /// Exposes the MCP HTTP endpoint to the webview (waits until core is ready; empty string if MCP
 /// is off, an error if the Core isn't ready in time).
 #[command]
@@ -611,6 +621,7 @@ pub fn run() {
         .manage(CoreState::default())
         .invoke_handler(tauri::generate_handler![
             core_endpoint,
+            core_session_token,
             mcp_endpoint,
             app_version,
             core_status,

@@ -137,8 +137,8 @@ def main(argv=None) -> int:
 
     if not is_loopback_host(bind_host):
         print(
-            f"🔐 [raven-api] bound to {bind_host} — loopback only without a token; every other "
-            "source, tailnet included, needs a Bearer token (raven mcp token add <name>).",
+            f"🔐 [raven-api] bound to {bind_host} — every source, this PC included, needs a "
+            "Bearer token (raven mcp token add <name>).",
             file=sys.stderr,
         )
 

@@ -1628,3 +1628,50 @@ macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스�
   강화 모드에서 vite 프록시(토큰 없음 401 + `WWW-Authenticate: Bearer`, 토큰 200), standalone Core·MCP(토큰으로 initialize·tools/list 25개), 격리 빌드한 데스크톱 앱(readiness 통과, 토큰 입력 후 vault 목록·페이지·내보내기·Core 재시작 정상, 입력 후 토큰 없는 `/api` 요청 0건)을 확인했다.
 - **검증**: `tests/test_issue67_loopback_token.py` 47건(참값·그 밖의 값 해석, 환경변수의 대소문자·공백, WebSocket 무토큰·잘못된 토큰 1008과 유효 토큰 accept — Core·MCP 게이트, 기본 모드 WebSocket 유지, 잘못된 토큰·Host/Origin 위조 401, query 토큰 401, 출처별 401 문구 5종·launcher 모드 2종과 기본 모드 문구 유지, 실제 소켓 standalone MCP: 무토큰·위조·잘못된·회수된 토큰·query 토큰 401과 SDK initialize·tools/list 성공). 변이 검사: 강화 모드 무시 시 21건, 대소문자 구분 해석 시 4건, 원격에도 loopback 문구 시 2건 실패. 전체 pytest(셸에 `RAVEN_REQUIRE_LOOPBACK_TOKEN=1`을 export한 채로): 2789 passed, 2 failed, 3 skipped — 실패 2건(`closed_stderr_pipe`, `test_no_candidates_is_not_an_error`)은 master에서도 같은 원인으로 실패한다(#68).
 - **독립 리뷰**: blocker 없음. should-fix 3건 반영 — conftest가 이 변수를 지우게 함(export된 채로 돌리면 기존 테스트 9건이 깨졌다), changelog의 빠진 전체 테스트 결과, 이슈 문서를 `docs/issues/`(한국어·frontmatter)로 이동. nit 반영 — 모듈·게이트 docstring, 함수 위치, compose 주석·로컬 스크립트 언급, 테스트 import 정리·fixture 이름, launcher 모드(vite xfwd) 401 문구 테스트 2건, 실소켓 테스트의 stderr.
+
+## 66. Core API·MCP는 같은 PC(loopback)에도 토큰을 요구한다 — 데스크톱 세션 자격 증명·`/healthz`·정적 파일 분리 (Issue #67)
+
+§65(PR #69)의 opt-in 강화 모드를 기본 동작으로 바꿨다. 기본 설치는 macOS Docker Desktop의 컨테이너가 `host.docker.internal` → 호스트 loopback으로 들어와 `Host: 127.0.0.1:<port>`만 붙이면 Core API와 admin MCP를 토큰 없이 쓸 수 있었다. 결정: [`_meta/decisions/adr-2026-10-13-loopback-token-required.md`](decisions/adr-2026-10-13-loopback-token-required.md) — [[adr-2026-10-12-loopback-browser-context]]를 대체하고 이전 ADR 3개의 "loopback은 토큰 없이 통과"를 대체한다.
+
+- **게이트** (`raven/core/access.py::TokenGate`, MCP `LanTokenAuth`): 모든 출처에 유효한 Bearer. 토큰 없는 loopback 통과, #28의 Host/Origin 조건(`is_local_browser_context`), `trust_tailnet`, `RAVEN_REQUIRE_LOOPBACK_TOKEN`(§65)을 없앴다. 잘못된·회수된 토큰과 URL query의 토큰은 401, WebSocket은 1008. 출처는 #15 이 PC 전용 API와 401 문구(같은 PC / 원격 / 출처 미상)에만 쓴다.
+- **예외 두 가지**:
+  - `GET /healthz` — 게이트가 직접 `200 {"ok":true}`(앱 코드에 닿지 않음, Core·MCP 공통). 정확히 그 경로·메서드만.
+  - Core가 서빙하는 대시보드 정적 파일(`raven/api/server.py::_is_public_static`): `GET`/`HEAD`, `/api`·`/api/...`·API 문서(`/docs`, `/redoc`, `/openapi.json`) 제외. 경로는 라우터가 매칭하는 경로(`access.route_path` — `root_path`를 뗀 경로)로 판정한다.
+  - SPA fallback이 빌드 폴더 밖 파일을 서빙하던 경로 탈출을 막았다(`//etc/passwd` → `full_path` "/etc/passwd", `..`). 정적 경로가 무인증이 되면서 필요해진 수정이다. `/%00` 같은 잘못된 경로는 500 대신 `index.html`.
+- **데스크톱 앱 — 실행별 세션 자격 증명** (후보 A: Rust IPC 중개, B: 로컬 인증 프록시, C: 세션 자격 증명 비교 후 C — ADR 참고):
+  - 셸(`desktop/src-tauri/src/core.rs::session_token`)이 앱 실행마다 `rvs_` + 32바이트(Unix `/dev/urandom`, 그 밖에는 OS 시드 `RandomState`) 비밀을 만든다. Core에는 stdin 한 줄(`RAVEN_DESKTOP_SESSION_STDIN=1`, `launch_inner`), webview에는 IPC `core_session_token`(앱 `main` 창만, `permissions/default.toml`)으로 준다. argv·환경 변수·파일·로그·readiness 줄·URL에는 넣지 않는다. Core 재시작·포트 이동 때 같은 값을 다시 넘긴다.
+  - Core(`raven/desktop/runtime.py::_read_session_token` → `access.set_session_token`)는 SHA-256만 메모리에 둔다. Core API에서만, 실효 출처가 같은 PC일 때만 받는다 — MCP와 LAN/tailnet(vite 중계 포함)에서는 401.
+  - 대시보드(`dashboard/src/lib/host-auth.ts::setSessionCredential`, `main.tsx`)는 메모리에만 두고 데스크톱 Core의 정확한 origin에만 붙인다. 거절되면 지우고 토큰 입력창으로 넘어간다.
+- **vite 대시보드**: 프록시는 토큰을 대신 붙이지 않는다(붙이면 vite에 닿는 컨테이너·tailnet 기기가 모두 인증된 셈). 같은 PC에서도 첫 401에서 토큰 입력창이 뜬다. `strictPort: true` — 데스크톱 dev webview(`devUrl` 5173)가 다른 프로세스의 페이지를 앱으로 띄워 IPC 자격 증명을 내주지 않게(리뷰 should-fix).
+- **compose healthcheck**: API·MCP 모두 `curl -fsS http://127.0.0.1:<port>/healthz`. 예전 MCP 검사(`curl -sS -o /dev/null /mcp`)는 401도 성공으로 쳤다.
+- **스크립트·문구**: `scripts/restart-all.sh` 헬스체크 → `/healthz`, `scripts/smoke-desktop.sh`는 `RAVEN_SMOKE_TOKEN`(헤더는 600 임시 파일로, argv에 안 남김). 토큰 입력창·호스트 추가 도움말·CLI 도움말·기동 배너의 "loopback은 토큰 없이" 문구 정정. 대시보드 오류 보고(`/api/debug-log`, #19)는 `sendBeacon`이 토큰을 못 실어 `lib/client-debug-log.ts`로 옮겨 인증 fetch로 보낸다(자기 요청의 실패는 보고하지 않음 — 리뷰가 찾은 무한 반복 방지).
+- **호환성 변경**: 토큰 없이 같은 PC에서 `/api`·MCP를 부르던 클라이언트(로컬 MCP 클라이언트 `http://127.0.0.1:8766/mcp`, curl·스크립트, vite 대시보드)는 토큰이 필요하다. 데스크톱 webview, Docker 대시보드(`spa_server` 로그인), 원격 토큰 클라이언트는 그대로다.
+- **실측 — Docker Desktop 공격** (실제 `curlimages/curl` 컨테이너 → `host.docker.internal`, 서버 로그의 peer 44건 모두 `127.0.0.1`, 격리 포트·임시 토큰):
+
+  | 요청 | 수정 전 master `f11285f` Core / MCP | 수정 후 Core / MCP |
+  |---|---|---|
+  | 토큰 없음, 기본 Host | 401 / 401 | 401 / 401 |
+  | 토큰 없음, `Host: 127.0.0.1` | **200 / 200** | 401 / 401 |
+  | 토큰 없음, Host·Origin loopback(`tauri://` 포함) | **200 / 200** | 401 / 401 |
+  | 잘못된 토큰, Host 위조 | **200 / 200** | 401 / 401 |
+  | 회수된 토큰 / URL query 토큰만 | 401 / 401 | 401 / 401 |
+  | 유효 토큰 | 200 / initialize + tools/list 14개 | 200 / initialize + tools/list 14개 |
+  | WebSocket upgrade, 토큰 없음 | 403 / 403 | 403 / 403 |
+  | `/healthz` | 401 / 401 | 200 / 200 |
+
+  IPv6 `[::1]`(uvicorn `--host ::1`, MCP `--host ::1`): 토큰 없음·Host/Origin 위조 401, 토큰 200. `uvicorn --root-path /x`: `GET /api/vaults` 401(리뷰 BLOCKER 수정 전에는 정적 경로로 오판될 수 있었다).
+- **실측 — 실제 macOS 앱** (격리 빌드, 임시 HOME·vault·포트): 첫 실행에 토큰 입력창 없이 vault 목록·페이지·내보내기, 관리 화면 Core 재시작, 포트 이동 후 자동 리로드까지 인증 유지. 앱 밖(Mac의 curl, Docker 컨테이너)의 토큰 없는 요청 401. 세션 자격 증명은 sessionStorage·localStorage·쿠키·URL·앱 로그 어디에도 없음(`rvs_` 0회). 세션 자격 증명으로 MCP 401, 발급 토큰으로 initialize·tools/list 25개. 일부러 거절시키면 토큰 입력창 → 발급 토큰으로 복구. 앱 코드 CSP 위반 0, 종료 시 Core 3개 모두 정리.
+- **실측 — Docker compose** (`docker compose -p audit67`, 격리 포트): api·mcp-http `healthy`(`/healthz`), `/api/vaults`를 healthcheck로 쓰면 `unhealthy`(401 = 실패). 호스트·컨테이너 안 loopback·같은 망의 다른 컨테이너에서 토큰 없이 401(Host/Origin 위조 포함). 발급 토큰으로 API 200, MCP initialize·tools/list. `spa_server` 로그인 → `/api` 200.
+- **실측 — vite**: 토큰 없음 401 + `WWW-Authenticate: Bearer`, 토큰 200, 잘못된 토큰 401, 위조 Origin·XFF 401, Docker → vite 403/401(200 없음). vite가 Authorization을 붙이지 않음을 중간 hop 로그로 확인.
+- **검증**:
+  - pytest 전체: 3191 passed, 2 failed, 3 skipped — 실패 2건(`closed_stderr_pipe`, `test_no_candidates_is_not_an_error`)은 master와 같은 원인(#68). `tests/conftest.py`는 모든 테스트에 테스트용 세션 자격 증명을 주고 TestClient가 보내게 한다(`no_auto_auth` 마커로 끔). 이전 정책을 단언하던 보안 테스트 11개 파일을 새 계약으로 옮겼다(tokenless loopback 401 + 토큰 200, 출처 판정은 `effective_client`·#15 결과로 확인). `tests/test_issue67_loopback_token.py` 신규 계약 테스트(loopback 4종 × 위조 헤더 7종 × Core·MCP, 세션 자격 증명 범위, WebSocket, `/healthz` 정확성, 401 문구, 실제 서버의 정적 파일·경로 탈출 18종·`root_path`, SDK 실소켓 MCP). 데스크톱 runtime 테스트는 셸처럼 stdin으로 자격 증명을 넘긴다(신규: stdin 없으면 읽지 않음, readiness·stderr에 비밀 없음, MCP는 세션 자격 증명 거부).
+  - 변이 검사: 토큰 없는 loopback 복원·세션 자격 증명 출처 제한 제거·느슨한 `/healthz`·fallback 경로 검사 제거·느슨한 정적 판정·`root_path` 미적용·대시보드 origin 제한 제거·오류 보고 반복 방지 제거 — 모두 테스트가 실패(또는 멈춤)로 잡았다.
+  - Rust: `cargo test` 84 passed(macOS·Linux Docker; 신규 4 — stdin으로 한 줄 뒤 EOF, stdin을 안 읽는 Core도 기동, 토큰 형식·실행 내 고정, `start`가 argv·env에 넣지 않음).
+  - dashboard: vitest 579 passed(신규 `DesktopSessionCredential` 8, `ClientDebugLog` 3), `tsc -b` 통과.
+  - Linux Docker pytest(보안·데스크톱 5개 파일): Python 3.12에서만 나던 테스트 헬퍼 회귀(`communicate()`가 닫힌 stdin을 flush)를 고친 뒤 614 passed, 1 failed(#68).
+- **독립 보안 리뷰**: BLOCKER 1건 — `root_path`가 있으면 정적 판정이 라우터와 다른 경로를 봐 `/api`가 공개로 오판(이 PR이 만든 회귀) → `route_path`로 수정, 실소켓 확인. should-fix 2건 — vite `strictPort`, debug-log 401 → 반영. 재리뷰에서 debug-log 수정이 만든 무한 반복(BLOCKER, 보안 아님)을 고쳤다. nit 반영: NUL 경로 500, `pythonw`의 `stdin=None`, revoke와 세션 자격 증명의 관계 문서화, 테스트 이름.
+- **잔여 위험·UNKNOWN**:
+  - 토큰을 가진 macOS Docker Desktop 컨테이너는 같은 PC로 보여 #15 이 PC 전용 API도 쓸 수 있다.
+  - webview에서 스크립트가 실행되면(XSS) IPC로 세션 자격 증명을 얻어 앱이 켜져 있는 동안 같은 PC에서 Core API를 쓸 수 있다 — webview 스크립트는 원래 Core를 부를 수 있으므로 새 권한은 아니다. 같은 사용자의 다른 프로세스가 값을 얻으면 같은 PC에서 쓸 수 있다(운영체제 사용자 경계 밖은 범위 밖).
+  - Windows의 비밀 생성은 `RandomState` 대체 경로다. `getrandom` 직접 의존성은 사용자 승인이 필요해 넣지 않았다.
+  - OrbStack·Colima·Podman(이 Mac에 없음), Windows·Linux webview 실측은 UNKNOWN.

@@ -185,7 +185,8 @@ check_http() {
     fi
 }
 
-check_http "api"       "http://127.0.0.1:${RAVEN_API_PORT:-8765}/api/vaults" "200"
+# Issue #67: /api needs a token from loopback too — /healthz is the token-free liveness check.
+check_http "api"       "http://127.0.0.1:${RAVEN_API_PORT:-8765}/healthz" "200"
 check_http "dashboard" "http://${RAVEN_DASHBOARD_HOST:-localhost}:${RAVEN_DASHBOARD_PORT:-5173}/"          "200"
 echo
 

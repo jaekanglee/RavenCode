@@ -135,6 +135,24 @@ def _watched_parent_pid() -> int | None:
     return pid
 
 
+# Issue #67: the shell's per-launch session credential for its own webview arrives on
+# stdin (one line, then EOF) — never in argv, the environment, a file or the readiness
+# line. Only a process the shell started with this variable reads stdin at all.
+SESSION_STDIN_ENV = "RAVEN_DESKTOP_SESSION_STDIN"
+
+
+def _read_session_token() -> str | None:
+    """The shell's session credential from stdin, or None when not launched that way."""
+    if os.environ.get(SESSION_STDIN_ENV, "").strip() != "1":
+        return None
+    try:
+        line = sys.stdin.readline(4096)
+    except (OSError, ValueError, AttributeError):  # AttributeError: no stdin at all (pythonw)
+        return None
+    token = line.strip()
+    return token or None
+
+
 class _PipeSafeStream:
     """Wrap stdout/stderr so a closed pipe never becomes a request failure.
 
@@ -487,6 +505,12 @@ def main() -> int:
     # which also catches a shell that died during API/MCP start-up.
     parent_pid = _watched_parent_pid()
 
+    # Issue #67: Core API requests need a Bearer token from every source, loopback too.
+    # The webview authenticates with the credential its shell passed us here.
+    from raven.core.access import set_session_token
+
+    set_session_token(_read_session_token())
+
     import uvicorn
 
     # 우선순위: --host > RAVEN_HOST > loopback (standalone `raven.api.main`과 동일).
@@ -577,8 +601,8 @@ def main() -> int:
     if not _is_loopback_host(bind_host):
         print(
             "🔐 [Desktop Core] API bound to "
-            f"{bind_host} — loopback only without a token; LAN and tailnet need a Bearer token "
-            "(raven mcp token add <name>)",
+            f"{bind_host} — every source needs a Bearer token (raven mcp token add <name>); "
+            "this app's webview uses its session credential",
             file=sys.stderr,
         )
     # Issue #22: a per-start nonce lets the readiness check confirm that the
@@ -605,8 +629,8 @@ def main() -> int:
         mcp_host = _resolve_mcp_host(args.mcp_host, bind_host)
         if mcp_host == "0.0.0.0":
             print(
-                "🔐 [Desktop Core] MCP bound to 0.0.0.0 — loopback only without a token; "
-                "tailnet/LAN need a Bearer token (raven mcp token add <name>)",
+                "🔐 [Desktop Core] MCP bound to 0.0.0.0 — every source, this PC included, needs "
+                "a Bearer token (raven mcp token add <name>)",
                 file=sys.stderr,
             )
         mcp_advertised = _advertised_mcp_host(mcp_host)
@@ -740,8 +764,9 @@ def main() -> int:
     if endpoint_host != LOOPBACK_HOST:
         print(
             f"⚠️  [Desktop Core] API bound to {bind_host} only — nothing listens on loopback, so "
-            "the webview connects there and is not a loopback client: it will ask for a Bearer "
-            "token (raven mcp token add). Use 0.0.0.0 to serve this PC without a token as well.",
+            "the webview connects there and is not a loopback client: its session credential is "
+            "refused there and it will ask for a Bearer token (raven mcp token add). Use 0.0.0.0 "
+            "so the webview reaches the Core on loopback with its session credential.",
             file=sys.stderr,
         )
 

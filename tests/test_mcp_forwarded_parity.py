@@ -5,13 +5,17 @@ Complements tests/test_core_api_forwarded.py (Core API XFF matrix) for the MCP g
   1. Same (socket peer, forwarding headers, launcher/strict mode) → same verdict from
      `TokenGate` (Core API) and `LanTokenAuth` (MCP), including XFF chains, repeated
      XFF header lines, IPv4-mapped IPv6 and Forwarded / X-Real-IP / Host / Origin.
-  2. Loopback trust from XFF exists only when the socket peer is loopback *and* every
-     XFF hop after the real client is loopback. A remote peer's XFF is never read; a
-     direct loopback client adding XFF can only lower its own trust, never borrow it.
-  3. Real sockets: a LAN client reaching loopback-bound standalone MCP through a local
-     XFF-appending proxy needs a token, even when it sends `X-Forwarded-For: 127.0.0.1`.
+     Since Issue #67 that verdict is 401 for every tokenless request — loopback too —
+     and 200 with a valid token, whatever the headers say.
+  2. The effective source (`access.effective_client`) — which still decides the
+     this-PC-only endpoints (#15) and the 401 text — is loopback only when the socket
+     peer is loopback *and* every XFF hop after the real client is loopback. A remote
+     peer's XFF is never read; a direct loopback client adding XFF can only lower its
+     own standing, never borrow it.
+  3. Real sockets: through a local XFF-appending proxy in front of loopback-bound
+     standalone MCP, every client needs a token — local or LAN, spoofed headers or not.
 
-Policy is unchanged here; these are regression guards only. Temporary vaults only.
+Temporary vaults only.
 """
 from __future__ import annotations
 
@@ -105,22 +109,22 @@ def test_core_api_and_mcp_gates_agree(vaults_root, monkeypatch, mode, peer, head
     api = _status(TokenGate, peer, headers)
     mcp = _status(LanTokenAuth, peer, headers)
     assert api == mcp, (mode, peer, headers, api, mcp)
-    assert api in (200, 401)
+    assert api == 401  # Issue #67: no tokenless pass for any source
 
 
-def _expected(mode, peer, headers):
-    """The contract, spelled out independently of the implementation."""
+def _expected_loopback_source(mode, peer, headers):
+    """Is the effective source this PC? The contract, spelled out independently of the implementation."""
     names = [k.lower() for k, _ in headers]
     client_headers = ("x-forwarded-for", "forwarded", "x-real-ip", "x-client-ip", "true-client-ip",
                       "cf-connecting-ip", "fastly-client-ip", "x-cluster-client-ip")
     forwarding = [k for k in names if k in client_headers]
     loop = access.is_loopback_client
     if not forwarding:
-        return 200 if loop(peer) else 401
+        return bool(loop(peer))
     if mode == "strict" or not loop(peer):
-        return 401
+        return False
     if any(k != "x-forwarded-for" for k in forwarding):
-        return 401
+        return False
     hops = ",".join(v for k, v in headers if k.lower() == "x-forwarded-for").split(",")
     hops = [h.strip() for h in hops]
     for h in reversed(hops):
@@ -129,10 +133,10 @@ def _expected(mode, peer, headers):
         elif h.count(":") == 1:
             h = h.split(":", 1)[0]
         if not h or access._parse_ip(h) is None:
-            return 401
+            return False
         if not loop(h):
-            return 401  # the first non-loopback hop from the right is the client: needs a token
-    return 200
+            return False  # the first non-loopback hop from the right is the client
+    return True
 
 
 @pytest.mark.parametrize("mode", ["launcher", "strict"])
@@ -140,7 +144,22 @@ def _expected(mode, peer, headers):
 @pytest.mark.parametrize("headers", HEADER_SETS, ids=lambda h: repr(h)[:60])
 def test_mcp_gate_matches_the_written_contract(vaults_root, monkeypatch, mode, peer, headers):
     monkeypatch.setattr(access, "_socket_peer", mode == "launcher")
-    assert _status(LanTokenAuth, peer, headers) == _expected(mode, peer, headers), (mode, peer, headers)
+    # Issue #67: no source is exempt — every tokenless request is refused ...
+    assert _status(LanTokenAuth, peer, headers) == 401, (mode, peer, headers)
+    # ... and the source the gate reports downstream follows the written contract.
+    scope = {"client": (peer, 40000), "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
+    assert access.is_loopback_client(access.effective_client(scope)) == _expected_loopback_source(
+        mode, peer, headers), (mode, peer, headers)
+
+
+@pytest.mark.parametrize("mode", ["launcher", "strict"])
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1", "192.168.1.50", "100.101.1.2"])
+@pytest.mark.parametrize("headers", HEADER_SETS, ids=lambda h: repr(h)[:60])
+def test_a_valid_token_passes_whatever_the_headers_say(vaults_root, monkeypatch, mode, peer, headers):
+    monkeypatch.setattr(access, "_socket_peer", mode == "launcher")
+    token = mcp_tokens.add_token("any")
+    auth = headers + [("Authorization", f"Bearer {token}")]
+    assert _status(TokenGate, peer, auth) == _status(LanTokenAuth, peer, auth) == 200
 
 
 # Issue #29 (reported in the PR #27 review as a strict xfail): a loopback peer sending
@@ -183,26 +202,37 @@ def test_a_token_still_passes_with_any_forwarding_headers(vaults_root, monkeypat
     assert _status(gate_cls, "127.0.0.1", headers) == 200
 
 
+def _source(peer, headers):
+    return access.effective_client({"client": (peer, 1), "headers": [(k.lower().encode(), v.encode()) for k, v in headers]})
+
+
 def test_the_xff_only_proxy_path_is_unchanged(vaults_root, monkeypatch):
     """vite `xfwd` sends XFF plus X-Forwarded-Port/-Proto/-Host — none of those name a client."""
     monkeypatch.setattr(access, "_socket_peer", True)
     vite = [("X-Forwarded-For", "127.0.0.1"), ("X-Forwarded-Port", "5173"),
             ("X-Forwarded-Proto", "http"), ("X-Forwarded-Host", "127.0.0.1:5173")]
+    lan = [("X-Forwarded-For", "192.168.1.50")] + vite[1:]
+    assert _source("127.0.0.1", vite) == "127.0.0.1"
+    assert _source("127.0.0.1", lan) == "192.168.1.50"
+    token = mcp_tokens.add_token("vite")
     for gate_cls in (TokenGate, LanTokenAuth):
-        assert _status(gate_cls, "127.0.0.1", vite) == 200
-        lan = [("X-Forwarded-For", "192.168.1.50")] + vite[1:]
+        assert _status(gate_cls, "127.0.0.1", vite) == 401  # #67: no tokenless pass, local browser included
         assert _status(gate_cls, "127.0.0.1", lan) == 401
+        assert _status(gate_cls, "127.0.0.1", vite + [("Authorization", f"Bearer {token}")]) == 200
 
 
 def test_direct_loopback_client_cannot_gain_anything_from_xff(vaults_root, monkeypatch):
-    """No proxy in between: XFF can only lower a loopback client's trust."""
+    """No proxy in between: XFF can only lower a loopback client's standing, and never skips the token."""
     monkeypatch.setattr(access, "_socket_peer", True)
-    assert _status(LanTokenAuth, "127.0.0.1", []) == 200
-    assert _status(LanTokenAuth, "127.0.0.1", [("X-Forwarded-For", "127.0.0.1")]) == 200
-    assert _status(LanTokenAuth, "127.0.0.1", [("X-Forwarded-For", "192.168.1.50")]) == 401
-    # a remote peer claiming loopback via XFF gets nothing
+    assert _source("127.0.0.1", []) == "127.0.0.1"
+    assert _source("127.0.0.1", [("X-Forwarded-For", "127.0.0.1")]) == "127.0.0.1"
+    assert _source("127.0.0.1", [("X-Forwarded-For", "192.168.1.50")]) == "192.168.1.50"
+    for headers in ([], [("X-Forwarded-For", "127.0.0.1")], [("X-Forwarded-For", "192.168.1.50")]):
+        assert _status(LanTokenAuth, "127.0.0.1", headers) == 401, headers
+    # a remote peer claiming loopback via XFF gets nothing — not even a loopback source
     for peer in ("192.168.1.50", "100.101.1.2", "::ffff:192.168.1.50"):
         assert _status(LanTokenAuth, peer, [("X-Forwarded-For", "127.0.0.1")]) == 401, peer
+        assert not access.is_loopback_client(_source(peer, [("X-Forwarded-For", "127.0.0.1")])), peer
 
 
 def test_real_mcp_app_agrees_on_rejections(vaults_root, monkeypatch):
@@ -318,12 +348,14 @@ def test_real_local_xff_proxy_in_front_of_standalone_mcp(vaults_root):
             with httpx.Client(timeout=10) as c:
                 return c.post(f"http://{host}:{pport}/mcp", content=init, headers={**hdr, **(extra or {})}).status_code
 
-        assert post("127.0.0.1") == 200                                   # local client via proxy
+        assert post("127.0.0.1") == 401                                   # local client via proxy (#67)
         assert post(lan) == 401                                           # LAN client via proxy
         assert post(lan, {"X-Forwarded-For": "127.0.0.1"}) == 401         # LAN spoofs loopback
         assert post(lan, {"X-Real-IP": "127.0.0.1"}) == 401
         assert post(lan, {"Host": "127.0.0.1", "Origin": "http://127.0.0.1"}) == 401
+        assert post(lan, {"Authorization": "Bearer rvn_wrong_token"}) == 401
         token = mcp_tokens.add_token("via-proxy")
+        assert post("127.0.0.1", {"Authorization": f"Bearer {token}"}) == 200
         assert post(lan, {"Authorization": f"Bearer {token}"}) == 200
     finally:
         proxy.shutdown()

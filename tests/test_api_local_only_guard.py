@@ -134,6 +134,7 @@ def test_remote_caller_with_a_valid_token_is_refused(root, tmp_path, endpoint) -
     case.untouched()
 
 
+@pytest.mark.no_auto_auth
 @pytest.mark.parametrize("endpoint", ENDPOINTS)
 def test_remote_caller_without_a_token_never_reaches_the_handler(root, tmp_path, endpoint) -> None:
     case = _make(root, tmp_path, endpoint)
@@ -157,13 +158,13 @@ def test_tailnet_via_the_local_dashboard_proxy_is_refused(root, tmp_path, monkey
     "origin",
     ["http://evil.example", "http://192.168.0.5:5173", "http://100.101.1.2:5173", "null", "http://localhost@evil.example", "http://localhost.evil.example"],
 )
+@pytest.mark.no_auto_auth
 def test_loopback_socket_with_a_foreign_origin_is_refused(root, tmp_path, endpoint, origin) -> None:
     """DNS rebinding / a LAN page through a local proxy: socket is loopback, Origin is not."""
     case = _make(root, tmp_path, endpoint)
-    # Issue #28: without a token the access gate refuses it first (no tokenless loopback
-    # trust for a foreign Origin) ...
+    # Without a token the access gate refuses it first — loopback is no exemption (#67) ...
     res = _send(TestClient(app, client=LOCAL), case, {"Origin": origin})
-    assert res.status_code == 401 and "Host/Origin" in res.json()["detail"], res.text
+    assert res.status_code == 401 and "loopback" in res.json()["detail"], res.text
     case.untouched()
     # ... and with a token this route's own guard still keeps it to this PC (#15).
     token = mcp_tokens.add_token("t28")

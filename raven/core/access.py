@@ -5,48 +5,48 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 ``uvicorn raven.api:app`` 어느 경로로 띄워도 같은 판정이 나오도록, 게이트는 실행기가
 아니라 앱 자체(``raven/api/server.py``)에 붙는다. MCP(``raven.mcp.auth``)도 같은 판정을 쓴다.
 
-판정 (출처 = ASGI ``scope["client"]``):
+판정 (Issue #67부터): **모든 출처에 ``Authorization: Bearer <token>``** — loopback, tailnet, 내부망,
+Docker 모두 같다. 토큰은 ``raven mcp token add``로 발급한 것, 또는 Core API에서만 데스크톱 셸이
+자기 webview에 준 실행별 세션 자격 증명(``set_session_token``)이다. 발급된 토큰이 없으면 전부 401
+(fail-closed). URL query의 토큰은 읽지 않는다. 예외는 ``GET /healthz``(고정 본문)와 Core API의
+대시보드 정적 파일뿐이다(``TokenGate`` 참고).
 
-- loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과 (기본값. ``RAVEN_REQUIRE_LOOPBACK_TOKEN``
-  강화 모드에서는 loopback도 토큰 필수 — macOS Docker Desktop의 ``host.docker.internal``
-  연결이 loopback으로 보이기 때문, #67)
-- tailnet: **토큰 필수** — Core API는 #24, MCP(``LanTokenAuth``)는 #26부터. 라우트 판정
-  (``is_tailnet_peer``: ``100.64.0.0/10``·``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이
-  기기의 Tailscale 주소로 나가는 출처)은 남아 있지만, 그 결과로 토큰을 면제하는 게이트는 없다.
-- 그 외 → ``Authorization: Bearer <token>``이 ``raven mcp token add``로 발급한 토큰과 맞아야
-  통과. 발급된 토큰이 없으면 전부 401 (fail-closed). 경로 예외는 없다 — health 포함.
+loopback을 예외로 두지 않는 이유: macOS Docker Desktop은 컨테이너의 ``host.docker.internal`` 연결을
+호스트 loopback으로 넘긴다. 게이트에는 peer ``127.0.0.1``로 보이고, 컨테이너는 Host·Origin을 마음대로
+쓴다. 그래서 #28의 "loopback + loopback Host/Origin이면 토큰 없이 통과"는 컨테이너가 그대로 흉내 낼 수
+있었다(#67). tailnet은 #24(Core API)·#26(MCP)부터 이미 토큰 필수였다 — 라우트 판정(``is_tailnet_peer``)은
+남아 있지만 그 결과로 토큰을 면제하는 게이트는 없다.
 
-Host / Origin 헤더는 출처를 정하는 데 쓰지 않는다. 다만 #28부터 **토큰 없는 loopback 통과**에는
-Host가 loopback 이름(``localhost``, ``127.x``, ``[::1]``, 포트 무관)이고 Origin이 없거나 loopback
-페이지·데스크톱 webview(``tauri://localhost``, ``http(s)://tauri.localhost``)여야 한다
-(``is_local_browser_context``). 브라우저가 다른 사이트를 대신해 보내는 loopback 요청 — 다른 origin의
-페이지, 또는 이름이 127.0.0.1로 해석되게 만든 사이트(DNS rebinding) — 은 그래서 토큰이 필요하다.
-Bearer 토큰 판정에는 영향이 없다. 프록시 헤더(X-Forwarded-For / Forwarded /
-X-Real-IP)는 서버 설정에 따라 다르게 다룬다 — PR #21 재리뷰 P0:
+출처는 판정이 아니라 두 곳에만 쓴다: 통과한 요청의 ``scope["client"]`` 재작성(#15
+``_require_loopback``의 "이 PC 전용" 검사)과 401 안내 문구. 출처를 정할 때 프록시 헤더(X-Forwarded-For /
+Forwarded / X-Real-IP)는 서버 설정에 따라 다르게 다룬다 — PR #21 재리뷰 P0:
 
 - **strict 모드 (기본)**: 게이트가 uvicorn 설정을 모르는 경우(``uvicorn raven.api:app`` 직접
   실행, gunicorn 등). uvicorn은 ``forwarded_allow_ips``가 허용하면 X-Forwarded-For로
   ``scope["client"]``를 *앱보다 먼저* 바꾼다 — ``'*'``면 LAN 기기가 ``127.0.0.1``을 사칭한다.
   그 재작성은 헤더가 있을 때만 일어나고 헤더는 남아 있으므로, **프록시 헤더가 붙은 요청은
-  출처 신뢰를 받지 못한다**(토큰 필수). ``forwarded_allow_ips`` 값과 무관하게 성립한다.
+  출처를 알 수 없는 것으로 본다**(이 PC 전용 API 403). ``forwarded_allow_ips`` 값과 무관하게 성립한다.
 - **launcher 모드**: Raven 실행기(``python -m raven.api``, 데스크톱 런타임)는
   ``serve_kwargs()``로 uvicorn을 ``proxy_headers=False``로 띄운다 — ``scope["client"]``가 실제
   소켓 peer이고 ``FORWARDED_ALLOW_IPS``는 무시된다. 이때 게이트가 X-Forwarded-For를 직접
   읽되 **loopback peer(이 기기의 프록시, 예: vite ``xfwd``)가 보낸 경우만**: 오른쪽부터
-  loopback hop을 건너뛰고 처음 나오는 주소가 출처다. 해석할 수 없는 항목이 있으면 신뢰 ❌.
+  loopback hop을 건너뛰고 처음 나오는 주소가 출처다. 해석할 수 없는 항목이 있으면 출처 미상.
   비루프백 peer의 프록시 헤더, 그리고 X-Forwarded-For 외의 출처 헤더(Forwarded, X-Real-IP,
   True-Client-IP 등 ``_FORWARDING_HEADERS``)가 하나라도 있는 요청은 — X-Forwarded-For와 함께여도 —
-  신뢰 ❌ (#29: 클라이언트의 XFF를 그대로 넘기고 실제 주소는 X-Real-IP에만 쓰는 프록시).
+  출처 미상 (#29: 클라이언트의 XFF를 그대로 넘기고 실제 주소는 X-Real-IP에만 쓰는 프록시).
 
 통과한 요청의 ``scope["client"]``는 게이트가 본 실효 출처로 바뀐다(모르면 ``"unknown"``) —
 ``_require_loopback`` 같은 하위 가드도 같은 출처를 본다. 이 기기의 프록시가 X-Forwarded-For를
-붙이지 않으면 모든 요청이 loopback으로 보이므로, 앞단 프록시는 반드시 XFF를 붙여야 한다.
+붙이지 않으면 모든 요청이 loopback으로 보이므로(이 PC 전용 API가 열린다), 앞단 프록시는 반드시
+XFF를 붙여야 한다.
 
 bind 정책도 여기 둔다 (``safe_bind_host``): 기본 loopback, 비루프백·와일드카드는
 ``RAVEN_ALLOW_REMOTE``가 참일 때만. 게이트가 1차 방어, bind 제한이 2차 방어다.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -60,7 +60,6 @@ from raven.core.mcp_tokens import verify_token
 
 LOOPBACK_HOST = "127.0.0.1"
 ALLOW_REMOTE_ENV = "RAVEN_ALLOW_REMOTE"
-REQUIRE_LOOPBACK_TOKEN_ENV = "RAVEN_REQUIRE_LOOPBACK_TOKEN"
 
 LOOPBACK_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -264,156 +263,121 @@ def effective_client(scope) -> str | None:
     return LOOPBACK_HOST
 
 
-# Issue #28: origins of pages that may use loopback trust without a token — the
-# dashboard itself (served on loopback by vite or the Core) and the desktop webview.
-_WEBVIEW_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+# ─── 인증 (Issue #67: loopback도 예외 없음) ─────────────────────────────
+
+# The one request a gate answers without a token: a liveness check with a fixed body.
+# It reaches no app code and says nothing about vaults, tokens or the network.
+HEALTH_PATH = "/healthz"
+_HEALTH_BODY = b'{"ok":true}'
+
+# Per-launch credential of the desktop shell for its own webview (Issue #67). The shell
+# generates it, hands it to this process on stdin (raven.desktop.runtime) and to the
+# webview over Tauri IPC. Only its SHA-256 lives here; it is never written to disk,
+# logged, put in a URL or in the readiness line.
+_session_digest: bytes | None = None
 
 
-def _loopback_name(host: str) -> bool:
-    """``localhost`` or a loopback IP literal (port and IPv6 brackets already removed)."""
-    host = host.strip().rstrip(".").lower()
-    if host == "localhost":
-        return True
-    addr = _parse_ip(host)
-    return addr is not None and addr.is_loopback
+def set_session_token(token: str | None) -> None:
+    """Accept ``token`` as this process's desktop session credential (None clears it)."""
+    global _session_digest
+    _session_digest = hashlib.sha256(token.encode("utf-8")).digest() if token else None
 
 
-def _host_part(authority: str) -> str | None:
-    """The host of a ``host[:port]`` / ``[v6][:port]`` authority, or None if malformed."""
-    authority = authority.strip()
-    if authority.startswith("["):
-        end = authority.find("]")
-        if end == -1 or (authority[end + 1:] and not authority[end + 1:].startswith(":")):
-            return None
-        return authority[1:end]
-    if authority.count(":") > 1:
-        return None  # an unbracketed IPv6 literal is not a valid Host
-    host, _, port = authority.partition(":")
-    if port and not port.isdigit():
-        return None
-    return host
-
-
-def _is_local_origin(origin: str) -> bool:
-    origin = origin.strip().lower()
-    if origin in _WEBVIEW_ORIGINS:
-        return True
-    scheme, sep, rest = origin.partition("://")
-    if not sep or scheme not in ("http", "https") or "/" in rest or "@" in rest:
-        return False
-    host = _host_part(rest)
-    return host is not None and _loopback_name(host)
-
-
-def is_local_browser_context(scope, *, page_navigation_ok: bool = False) -> bool:
-    """Whether a request's Host and Origin say it was meant for this machine (Issue #28).
-
-    Loopback trust (no token) is for programs on this machine and for the dashboard
-    pages it serves. A browser also sends loopback requests on behalf of other sites:
-    a page on another origin (its ``Origin`` names that site), or a site whose name
-    was made to resolve to 127.0.0.1 (DNS rebinding — its ``Host`` names that site).
-    So a tokenless loopback request must carry, if anything, a loopback ``Host``
-    (``localhost``, ``127.x.x.x``, ``[::1]``, any port) and an ``Origin`` that is a
-    loopback page or the desktop webview. Programs that send neither still pass.
-    A Bearer token is checked separately and is not affected.
-
-    A browser leaves Origin out of plain cross-site loads (``<img>``, ``<script src>``,
-    a link or GET form from another site), which still run. It marks them with
-    ``Sec-Fetch-Site: cross-site`` / ``same-site``; without an Origin to judge, those
-    are refused too. A URL typed by the user (``none``) and same-origin loads pass.
-    ``page_navigation_ok`` (Core API only) still lets a link from another site open a
-    dashboard page — a top-level GET/HEAD navigation outside ``/api``, which returns the
-    static app and no data. Every ``/api`` call still needs a local context or a token.
-    """
-    hosts: list[str] = []
-    origins: list[str] = []
-    fetch_sites: list[str] = []
-    for key, value in scope.get("headers", []):
-        if key == b"host":
-            hosts.append(value.decode("latin-1"))
-        elif key == b"origin":
-            origins.append(value.decode("latin-1"))
-        elif key == b"sec-fetch-site":
-            fetch_sites.append(value.decode("latin-1").strip().lower())
-    if len(hosts) > 1 or len(origins) > 1:
-        return False
-    if not origins and any(site in ("cross-site", "same-site") for site in fetch_sites):
-        return page_navigation_ok and _is_page_navigation(scope)
-    if hosts:
-        host = _host_part(hosts[0])
-        if host is None or not _loopback_name(host):
-            return False
-    if origins and not _is_local_origin(origins[0]):
-        return False
-    return True
-
-
-def _is_page_navigation(scope) -> bool:
-    """A browser opening a page (not an API call): top-level GET/HEAD outside /api."""
-    if scope.get("type") != "http" or scope.get("method") not in ("GET", "HEAD"):
-        return False
-    path = scope.get("path", "")
-    if path == "/api" or path.startswith("/api/"):
-        return False
-    modes = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-mode"]
-    dests = [v.decode("latin-1").strip().lower() for k, v in scope.get("headers", []) if k == b"sec-fetch-dest"]
-    return modes == ["navigate"] and dests in ([], ["document"])
-
-
-def has_valid_bearer(scope) -> bool:
+def _bearer_token(scope) -> str | None:
+    """The token of the first ``Authorization`` header if it is ``Bearer <token>``. URLs are never read."""
     for key, value in scope.get("headers", []):
         if key == b"authorization":
             scheme, _, token = value.decode("latin-1").partition(" ")
-            return scheme.lower() == "bearer" and bool(token.strip()) and verify_token(token.strip())
-    return False
+            token = token.strip()
+            return token if scheme.lower() == "bearer" and token else None
+    return None
 
 
-# ─── loopback 강화 모드 (Issue #67) ─────────────────────────────
+def _is_session_token(token: str) -> bool:
+    digest = _session_digest
+    return digest is not None and hmac.compare_digest(hashlib.sha256(token.encode("utf-8")).digest(), digest)
 
 
-def require_loopback_token_from_env(raw: str | None = None) -> bool:
-    """True only for an explicit truthy ``RAVEN_REQUIRE_LOOPBACK_TOKEN`` (1/true/yes/on, Issue #67)."""
-    if raw is None:
-        raw = os.environ.get(REQUIRE_LOOPBACK_TOKEN_ENV, "")
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+def has_valid_bearer(scope, *, session_ok: bool = False) -> bool:
+    """An issued token (``raven mcp token add``), or — where ``session_ok`` — the desktop session credential."""
+    token = _bearer_token(scope)
+    if not token:
+        return False
+    if session_ok and _is_session_token(token):
+        return True
+    return verify_token(token)
+
+
+def route_path(scope) -> str:
+    """The path the router matches on: ``scope["path"]`` without ``root_path`` (Starlette's rule).
+
+    Path exceptions must be judged on this, not on ``scope["path"]``: with a root path
+    (``uvicorn --root-path``, ``UVICORN_ROOT_PATH``, a mounting ASGI app) the router strips
+    the prefix before matching, so a raw-path check would call an API route "not /api".
+    """
+    path: str = scope.get("path", "")
+    root_path: str = scope.get("root_path", "") or ""
+    if not root_path or not path.startswith(root_path):
+        return path
+    if path == root_path:
+        return ""
+    if path[len(root_path)] == "/":
+        return path[len(root_path):]
+    return path
+
+
+def _is_health_check(scope) -> bool:
+    return scope["type"] == "http" and scope.get("method") == "GET" and route_path(scope) == HEALTH_PATH
 
 
 class TokenGate:
-    """ASGI 게이트 — loopback 외 출처에 Bearer 토큰을 요구한다 (``trust_tailnet``이면 tailnet도 통과).
-    강화 모드(``RAVEN_REQUIRE_LOOPBACK_TOKEN``, #67)에서는 loopback에도 요구한다.
+    """ASGI 게이트 — 모든 출처에 Bearer 토큰을 요구한다. loopback도 예외가 아니다 (Issue #67).
 
-    http와 websocket 둘 다 막는다. 거부된 요청은 감싼 앱에 전달되지 않는다.
-    lifespan 등 다른 scope는 그대로 통과한다.
+    macOS Docker Desktop은 컨테이너의 ``host.docker.internal`` 연결을 호스트 loopback으로 넘기고,
+    컨테이너는 Host·Origin을 마음대로 쓴다. 소켓 주소와 헤더로는 같은 PC의 프로세스와 구분할 수
+    없으므로 출처로 토큰을 면제하지 않는다. 예외는 둘뿐이다:
+
+    - ``GET /healthz`` — 고정 본문(``{"ok":true}``), 앱 코드에 닿지 않는다.
+    - ``public(scope)``가 참인 요청 — Core API가 서빙하는 대시보드 정적 파일(``raven/api/server.py``).
+      MCP에는 없다.
+
+    http와 websocket 둘 다 막는다(websocket은 close 1008). 거부된 요청은 감싼 앱에 전달되지 않는다.
+    lifespan 등 다른 scope는 그대로 통과한다. 출처(``effective_client``)는 판정이 아니라
+    ``scope["client"]`` 재작성(#15 ``_require_loopback``)과 401 안내 문구에만 쓴다.
     """
 
     realm = "raven"
-    # The Core API also serves the dashboard's static pages (#28 review): a link to them
-    # from another site may open them. MCP serves no pages and turns this off.
-    page_navigation_ok = True
-    # Issue #24 (Core API) / #26 (MCP): loopback only — a tailnet source needs a token
-    # like any other. The route check behind ``is_tailnet_peer`` is an inference,
-    # not proof of the connection's WireGuard authentication. No gate opts back in.
-    trust_tailnet = False
+    # The Core API serves the desktop webview, which holds the shell's session credential.
+    # MCP clients are agents with issued tokens, so MCP turns this off.
+    accept_session_token = True
     detail = (
         "원격 접근에는 Authorization: Bearer <token>이 필요합니다 "
         "(raven mcp token add <name>)."
     )
 
-    def __init__(self, app):
+    def __init__(self, app, public=None):
         self.app = app
+        self._public = public
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
+        if _is_health_check(scope):
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(_HEALTH_BODY)).encode())],
+            })
+            await send({"type": "http.response.body", "body": _HEALTH_BODY})
+            return
         source = effective_client(scope)
-        trusted = is_trusted_client(source, allow_tailnet=self.trust_tailnet)
-        # Issue #28: tokenless trust also needs a local Host/Origin (see is_local_browser_context).
-        local = trusted and is_local_browser_context(scope, page_navigation_ok=self.page_navigation_ok)
-        # Issue #67: Docker Desktop host forwarding may appear as 127.0.0.1.
-        # In hardened mode, no network peer is exempt from Bearer authentication.
-        require_token = require_loopback_token_from_env()
-        if (local and not require_token) or has_valid_bearer(scope):
+        public = scope["type"] == "http" and self._public is not None and self._public(scope)
+        # The desktop session credential belongs to the webview on this PC: it is never
+        # accepted from a LAN/tailnet/unknown source, so a copy is useless off this machine.
+        session_ok = self.accept_session_token and is_loopback_client(source)
+        if public or has_valid_bearer(scope, session_ok=session_ok):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
                 port = client[1] if client else 0
@@ -423,25 +387,16 @@ class TokenGate:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
-        detail = self.detail
-        if require_token and source is None:
+        if source is None:
             # The source could not be told (e.g. an ambiguous proxy, #29): say only what is needed.
+            detail = "이 요청에는 Authorization: Bearer <token>이 필요합니다 (raven mcp token add <name>)."
+        elif is_loopback_client(source):
             detail = (
-                "이 요청에는 Authorization: Bearer <token>이 필요합니다 "
+                "같은 PC(loopback)에서 온 요청도 Authorization: Bearer <token>이 필요합니다 "
                 "(raven mcp token add <name>)."
             )
-        elif require_token and is_loopback_client(source):
-            detail = (
-                "이 서버는 loopback 요청에도 Authorization: Bearer <token>을 요구합니다 "
-                "(RAVEN_REQUIRE_LOOPBACK_TOKEN, raven mcp token add <name>)."
-            )
-        elif require_token:
-            pass  # a LAN, tailnet or proxied client: the gate's remote-access text is accurate
-        elif trusted and not local:
-            detail = (
-                "이 PC 밖의 사이트(Host/Origin)에서 온 요청은 loopback이어도 토큰 없이 허용하지 않습니다 "
-                "— Authorization: Bearer <token> (raven mcp token add <name>)."
-            )
+        else:
+            detail = self.detail
         body = json.dumps(
             {"ok": False, "error": "unauthorized", "detail": detail},
             ensure_ascii=False,
