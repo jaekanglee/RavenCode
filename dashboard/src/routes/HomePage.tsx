@@ -857,7 +857,7 @@ function Stat({
   hint?: string;
 }) {
   const color =
-    tone === "warn" ? "var(--color-warning-text)" : "var(--color-ink, #161616)";
+    tone === "warn" ? "var(--color-warning-text)" : "var(--color-ink)";
   return (
     <div
       style={{

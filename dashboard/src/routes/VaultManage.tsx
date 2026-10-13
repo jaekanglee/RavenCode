@@ -403,7 +403,7 @@ export function VaultManage() {
                     <tbody>{linkResult.missing.map((m, i) => (
                       <tr key={i} style={{ borderBottom: "1px solid var(--color-hairline)" }}>
                         <td style={{ padding: "4px 6px", fontFamily: "monospace" }}>{m.slug}</td>
-                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "var(--color-warning-text, #b45309)" }}>{m.target}</td>
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "var(--color-warning-text)" }}>{m.target}</td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -490,7 +490,7 @@ export function VaultManage() {
               background: "var(--color-surface-soft)",
               padding: 18,
               borderRadius: "var(--radius-md)",
-              border: "1px solid var(--color-primary-soft)",
+              border: "1px solid var(--accent-soft)",
               marginBottom: 16,
             }}
           >
@@ -841,7 +841,7 @@ export function VaultManage() {
               background: "var(--color-canvas)",
               padding: 14,
               borderRadius: "var(--radius-md)",
-              border: "1px solid var(--color-primary-soft)",
+              border: "1px solid var(--accent-soft)",
             }}
           >
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-primary)", textTransform: "uppercase", marginBottom: 6 }}>

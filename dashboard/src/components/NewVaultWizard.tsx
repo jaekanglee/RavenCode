@@ -92,7 +92,7 @@ export function NewVaultWizard() {
           onClick={() => setMode("create")}
           style={{
             padding: "8px 16px",
-            border: "1px solid var(--cds-border-subtle-01, #e0e0e0)",
+            border: "1px solid var(--cds-border-subtle)",
             background: mode === "create" ? "var(--color-surface-soft)" : "transparent",
             color: mode === "create" ? "var(--color-primary)" : "var(--color-muted)",
             fontWeight: mode === "create" ? 600 : 400,
@@ -107,7 +107,7 @@ export function NewVaultWizard() {
           onClick={() => setMode("register")}
           style={{
             padding: "8px 16px",
-            border: "1px solid var(--cds-border-subtle-01, #e0e0e0)",
+            border: "1px solid var(--cds-border-subtle)",
             background: mode === "register" ? "var(--color-surface-soft)" : "transparent",
             color: mode === "register" ? "var(--color-primary)" : "var(--color-muted)",
             fontWeight: mode === "register" ? 600 : 400,

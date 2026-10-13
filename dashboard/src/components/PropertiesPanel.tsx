@@ -246,7 +246,7 @@ export function PropertiesPanel({ vault, page, onSaved }: Props) {
                   onClick={handleAddTag}
                   style={{
                     fontSize: 12, padding: "3px 8px", borderRadius: 6,
-                    background: "var(--color-primary)", color: "#fff",
+                    background: "var(--color-primary)", color: "var(--fg-on-accent)",
                     border: "none", cursor: "pointer", fontWeight: 600,
                   }}
                 >+</button>
@@ -279,7 +279,7 @@ export function PropertiesPanel({ vault, page, onSaved }: Props) {
                   onClick={handleAddAlias}
                   style={{
                     fontSize: 12, padding: "3px 8px", borderRadius: 6,
-                    background: "var(--color-primary)", color: "#fff",
+                    background: "var(--color-primary)", color: "var(--fg-on-accent)",
                     border: "none", cursor: "pointer", fontWeight: 600,
                   }}
                 >+</button>

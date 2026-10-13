@@ -306,7 +306,7 @@ export function NewIssueButton({
           </div>
 
           {err && (
-            <div style={{ marginTop: 12, padding: "8px 12px", background: "var(--color-danger-soft, #fee)", color: "var(--color-danger, #c00)", borderRadius: 6, fontSize: 12 }}>
+            <div style={{ marginTop: 12, padding: "8px 12px", background: "var(--color-danger-bg)", color: "var(--color-danger)", borderRadius: 6, fontSize: 12 }}>
               {err}
             </div>
           )}

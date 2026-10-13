@@ -5,19 +5,16 @@ import { NewPageButton } from "./NewPageButton";
 import { NewIssueButton } from "./NewIssueButton";
 import { nodeColor, typeLabel } from "./GraphCanvas";
 import { RawTree } from "./RawTree";
+import { RawCreateDialog } from "./RawCreateDialog";
 import { SearchBar } from "./SearchBar";
 import { HostPicker } from "./HostPicker";
-import { Modal } from "./ui/Modal";
-import { TextField } from "./ui/TextField";
 import { Button } from "./ui/Button";
 import {
   fetchDraftsList,
   hostScopedStorageKey,
   readHostScopedStored,
-  writeRaw,
   type DraftListItem,
 } from "../lib/api";
-import { resolveNewRawFile } from "../lib/rawPath";
 import { useIsDrawerMobile } from "../lib/useMediaQuery";
 import type { TreeNode as TNode, VaultMeta } from "../types";
 
@@ -803,8 +800,8 @@ function VaultTreeGroup({
   );
 }
 
-// v0.7.x+: 사이드바 raw 섹션 인라인 새 파일 생성. RawPanel.tsx의 새 파일 모달과
-// 동일 패턴(파일명 + 부모 디렉토리 → writeRaw)을 재사용해 /raw/{vault} 이동 없이 생성 가능.
+// v0.7.x+: 사이드바 raw 섹션 인라인 새 파일 생성. 구현은 RawCreateDialog 한 곳
+// (Issue #2 B-4에서 3중 복붙을 통합) — 여기서는 트리거와 생성 후 이동만 담당한다.
 function NewRawFileButton({
   vault,
   items,
@@ -818,41 +815,6 @@ function NewRawFileButton({
 }) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [dir, setDir] = useState("raw");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const dirOptions = useMemo(() => {
-    const set = new Set<string>(["raw"]);
-    for (const it of items) {
-      if (it.type === "dir") set.add(it.path);
-    }
-    return [...set].sort();
-  }, [items]);
-
-  async function submit() {
-    setErr(null);
-    // v0.7.181: 검증은 rawPath.resolveNewRawFile 한 곳 — 특히 기존 파일을
-    // writeRaw(rel, "")로 덮어써 내용을 날리는 경로를 여기서 막는다.
-    const { rel, error } = resolveNewRawFile({ name, dir, items });
-    if (error || !rel) {
-      setErr(error);
-      return;
-    }
-    setBusy(true);
-    try {
-      await writeRaw(vault, rel, "");
-      setOpen(false);
-      setName("");
-      onCreated?.();
-      navigate(`/raw/${vault}/${rel}`);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <>
@@ -870,55 +832,15 @@ function NewRawFileButton({
         ＋
       </button>
       {open && (
-        <Modal open={open} onClose={() => !busy && setOpen(false)} disableBackdropClose={busy}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>raw/ 새 파일</h3>
-            <TextField
-              label="파일명"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="예: notes.md, source.txt"
-              helper="확장자 포함. 예: my-notes.md"
-            />
-            <TextField
-              label="부모 디렉토리"
-              value={dir}
-              onChange={(e) => setDir(e.target.value)}
-              helper="기본 raw/. 다른 디렉토리 경로 입력 가능 (예: raw/articles)."
-            />
-            <details style={{ fontSize: 12, color: "var(--color-muted)" }}>
-              <summary style={{ cursor: "pointer" }}>기존 디렉토리 ({dirOptions.length})</summary>
-              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                {dirOptions.map((d) => (
-                  <li key={d} style={{ cursor: "pointer" }} onClick={() => setDir(d)}>
-                    {d}
-                  </li>
-                ))}
-              </ul>
-            </details>
-            {err && (
-              <div
-                style={{
-                  background: "var(--color-danger-soft, #fee)",
-                  color: "var(--color-danger, #c00)",
-                  padding: "8px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                }}
-              >
-                ❌ {err}
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <Button type="button" variant="ghost" size="md" onClick={() => setOpen(false)} disabled={busy}>
-                취소
-              </Button>
-              <Button type="button" variant="primary" size="md" onClick={submit} disabled={busy || !name.trim()}>
-                {busy ? "만드는 중…" : "만들기"}
-              </Button>
-            </div>
-          </div>
-        </Modal>
+        <RawCreateDialog
+          vault={vault}
+          items={items}
+          onClose={() => setOpen(false)}
+          onCreated={(rel) => {
+            onCreated?.();
+            navigate(`/raw/${vault}/${rel}`);
+          }}
+        />
       )}
     </>
   );
@@ -984,7 +906,7 @@ function DraftSection({
             padding: "1px 5px",
             borderRadius: 8,
             background: "var(--color-primary)",
-            color: "#fff",
+            color: "var(--fg-on-accent)",
             verticalAlign: "middle",
           }}>{drafts.length}</span>
         </span>
