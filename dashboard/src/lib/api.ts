@@ -55,14 +55,42 @@ function hostTag(): string {
   return `@${getActiveHostUrl()}`;
 }
 
+/**
+ * Issue #32 잔여: 호스트별로 나눠야 하는 UI 선호(활성 vault·즐겨찾기·열린 폴더)의 키.
+ * 값의 출처는 이 탭의 호스트(로드 시 고정)뿐이다. 이전에는 호스트 구분 없이 한 키를
+ * 공유해서, 다른 호스트에서 고른 이름이 이 화면의 첫 선택에 영향을 줄 수 있었다.
+ */
+export function hostScopedStorageKey(base: string): string {
+  return `${base}@${getActiveHostUrl() || "local"}`;
+}
+
+/**
+ * 호스트별 키를 먼저 보고, 값이 없으면 레거시 키(호스트 구분 없음)를 본다.
+ * 레거시 값은 어느 호스트에서 쓰였는지 알 수 없으므로 로컬 호스트에서만 읽는다 —
+ * 원격 탭이 레거시 값을 초기 선택으로 쓰면 다른 호스트의 이름이 섞인다.
+ * 쓰기는 항상 호스트별 키로만 하고 레거시 키는 고치지 않는다(되돌리기 여지).
+ */
+export function readHostScopedStored(base: string): string | null {
+  const scoped = localStorage.getItem(hostScopedStorageKey(base));
+  if (scoped !== null) return scoped;
+  if (getActiveHostUrl()) return null;
+  return localStorage.getItem(base);
+}
+
+/** 이전 버전이 호스트 구분 없이 쓰던 활성 vault 키 (읽기 전용 폴백). */
 export const ACTIVE_VAULT_KEY = "raven:active_vault";
 
+/** 이 탭의 호스트에 묶인 활성 vault 키. */
+export function activeVaultStorageKey(): string {
+  return hostScopedStorageKey(ACTIVE_VAULT_KEY);
+}
+
 export function getActiveVault(): string {
-  return localStorage.getItem(ACTIVE_VAULT_KEY) || "";
+  return readHostScopedStored(ACTIVE_VAULT_KEY) || "";
 }
 
 export function setActiveVault(name: string): void {
-  localStorage.setItem(ACTIVE_VAULT_KEY, name);
+  localStorage.setItem(activeVaultStorageKey(), name);
 }
 
 // ─── Host Connection Store (Multi-Host v0.8.0+) ─────────────────────

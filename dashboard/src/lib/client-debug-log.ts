@@ -11,6 +11,8 @@
  * endpoint (404/401) cannot make it report its own failure in a loop.
  */
 
+import { activeVaultStorageKey } from "./api";
+
 type Entry = {
   level: string;
   source: string;
@@ -48,7 +50,8 @@ export function installClientDebugLog(win: Window & typeof globalThis): void {
 
   const ctx = () => ({
     url: win.location?.href ?? "",
-    vault: win.localStorage?.getItem("raven:active_vault") ?? "",
+    // Issue #32 잔여: 활성 vault 키는 호스트별이다 (api.activeVaultStorageKey).
+    vault: win.localStorage?.getItem(activeVaultStorageKey()) ?? "",
   });
 
   win.addEventListener("error", (e: ErrorEvent) => {
