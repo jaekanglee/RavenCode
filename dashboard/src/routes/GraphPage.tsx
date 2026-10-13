@@ -1,5 +1,5 @@
 import { apiFetch } from "../lib/api";
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import {
   DEFAULT_FOCUS_DEPTH,
@@ -140,6 +140,8 @@ export function GraphPage() {
   const [filters, dispatchFilters] = useReducer(filterReducer, initialFilters);
   const [loading, setLoading] = useState(() => !graphCache.has(vault));
   const [loadError, setLoadError] = useState(false);
+  // Issue #32 잔여: 마지막으로 시작한 graph 요청만 화면에 반영하기 위한 순번.
+  const graphRequestSeq = useRef(0);
   const [hoveredInsightNodeId, setHoveredInsightNodeId] = useState<string | null>(null);
   const [hoveredInsightType, setHoveredInsightType] = useState<string | null>(null);
   const [showFullGraph, setShowFullGraph] = useState(false);
@@ -179,6 +181,9 @@ export function GraphPage() {
     }
     setLoading(!cached);
     setLoadError(false);
+    // Issue #32 잔여(같은 호스트 안의 응답 순서): vault를 빠르게 바꾸면 이전
+    // vault의 늦은 응답이 현재 그래프를 덮어썼다. 최신 요청의 응답만 반영한다.
+    const requestSeq = ++graphRequestSeq.current;
     // v0.7.144+: ?scope= 쿼리 제거 — current만 사용.
     // 서버 ForceAtlas 좌표는 클라이언트 물리의 출발점일 뿐이라 거칠어도 된다.
     // 기본 500회는 169문서 vault에서 ~2.8초, 60회는 ~0.3초.
@@ -188,17 +193,22 @@ export function GraphPage() {
         return r.json();
       })
       .then((d) => {
+        if (requestSeq !== graphRequestSeq.current) return;
         const next = { nodes: d.nodes ?? [], edges: d.edges ?? [] };
         graphCache.set(vault, next);
         setGraph(next);
       })
       .catch(() => {
+        if (requestSeq !== graphRequestSeq.current) return;
         // 캐시가 있으면 그대로 보여주고, 처음 받는 중에 실패했을 때만 에러를 띄운다.
         if (cached) return;
         setGraph({ nodes: [], edges: [] });
         setLoadError(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (requestSeq !== graphRequestSeq.current) return;
+        setLoading(false);
+      });
   };
 
   useEffect(() => {
