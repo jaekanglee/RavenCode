@@ -1065,6 +1065,7 @@ function SidebarStatsWidget({
 }) {
   return (
     <div
+      data-testid="sidebar-stats-widget"
       style={{
         padding: "10px 12px",
         background: "var(--color-surface-soft)",
@@ -1081,6 +1082,8 @@ function SidebarStatsWidget({
       {pageCount !== null && (
         <div
           data-testid="sidebar-stats-counts"
+          data-page-count={pageCount}
+          data-raw-count={rawCount}
           style={{ marginTop: 6, display: "flex", gap: 6, fontSize: 11, fontVariantNumeric: "tabular-nums" }}
         >
           <span>페이지 {pageCount}</span>

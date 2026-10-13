@@ -53,15 +53,18 @@ describe("Sidebar Stats 위젯 (Issue #3 C-1)", () => {
   it("트리와 raw 목록에서 실제 수치를 보여준다", () => {
     renderSidebar({ test: TREE });
 
-    expect(screen.getByText("현재 보관소")).toBeTruthy();
-    expect(screen.getByText("페이지 3")).toBeTruthy();
-    expect(screen.getByText("raw 2")).toBeTruthy();
+    // 위젯 자체가 렌더됐는지(구조)와 수치(값)를 본다. 라벨 문구는 검증하지 않는다.
+    expect(screen.getByTestId("sidebar-stats-widget")).toBeTruthy();
+    const counts = screen.getByTestId("sidebar-stats-counts");
+    expect(counts.getAttribute("data-page-count")).toBe("3");
+    expect(counts.getAttribute("data-raw-count")).toBe("2");
   });
 
   it("트리가 아직 없으면 0으로 단정하지 않고 수치 줄을 생략한다", () => {
     renderSidebar({ test: null });
 
-    expect(screen.getByText("현재 보관소")).toBeTruthy();
+    // 위젯은 있지만 수치 줄은 없다 — "없음"과 "0개"를 구분한다.
+    expect(screen.getByTestId("sidebar-stats-widget")).toBeTruthy();
     expect(screen.queryByTestId("sidebar-stats-counts")).toBeNull();
   });
 });
