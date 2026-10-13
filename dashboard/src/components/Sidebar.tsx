@@ -369,6 +369,15 @@ export function Sidebar({
   const sidebarTree = useMemo(() => normalizeSidebarTree(activeTree), [activeTree]);
   const activeRawItems = rawItems[activeVault] ?? [];
 
+  // Issue #3 C-1: "Stats"라는 이름의 위젯에 수치가 하나도 없었다. 별도 요청을 만들지 않고
+  // 사이드바가 이미 렌더에 쓰는 정규화 트리·raw 목록에서 그대로 세므로, 호스트별 캐시나
+  // 요청 경로가 늘지 않는다 (#32의 호스트 분리에도 영향 없음).
+  const activePageCount = useMemo(() => {
+    const pages: TNode[] = [];
+    if (sidebarTree) collectPages(sidebarTree, pages);
+    return pages.length;
+  }, [sidebarTree]);
+
   // v0.7.97.4+: resize drag handlers. 데스크탑에서만 활성화.
   // v0.7.97.4.1+: drag 중 setState 호출 제거 → 매 픽셀 React re-render 방지.
   // aside DOM width 직접 조작 (ref 기반), drag 끝나면 state 1회 commit + localStorage.
@@ -640,9 +649,13 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Mini Stats Widget */}
+      {/* Mini Stats Widget — Issue #3 C-1: 실제 수치(페이지·raw)를 보여준다. */}
       <div style={{ marginTop: "auto", paddingTop: 16, borderTop: "1px solid var(--color-hairline)" }}>
-        <SidebarStatsWidget activeVault={activeVault} />
+        <SidebarStatsWidget
+          activeVault={activeVault}
+          pageCount={sidebarTree ? activePageCount : null}
+          rawCount={activeRawItems.length}
+        />
       </div>
     </aside>
   );
@@ -1040,9 +1053,19 @@ function TreeLeaf({
   );
 }
 
-function SidebarStatsWidget({ activeVault }: { activeVault: string }) {
+function SidebarStatsWidget({
+  activeVault,
+  pageCount,
+  rawCount,
+}: {
+  activeVault: string;
+  /** null = 트리가 아직 없다(미선택/로딩). 이때는 0으로 단정하지 않고 수치 줄을 생략한다. */
+  pageCount: number | null;
+  rawCount: number;
+}) {
   return (
     <div
+      data-testid="sidebar-stats-widget"
       style={{
         padding: "10px 12px",
         background: "var(--color-surface-soft)",
@@ -1056,6 +1079,18 @@ function SidebarStatsWidget({ activeVault }: { activeVault: string }) {
         {activeVault || "—"}
       </div>
       <div style={{ fontFamily: "var(--font-display)" }}>현재 보관소</div>
+      {pageCount !== null && (
+        <div
+          data-testid="sidebar-stats-counts"
+          data-page-count={pageCount}
+          data-raw-count={rawCount}
+          style={{ marginTop: 6, display: "flex", gap: 6, fontSize: 11, fontVariantNumeric: "tabular-nums" }}
+        >
+          <span>페이지 {pageCount}</span>
+          <span aria-hidden>·</span>
+          <span>raw {rawCount}</span>
+        </div>
+      )}
     </div>
   );
 }
