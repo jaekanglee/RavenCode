@@ -276,6 +276,9 @@ export async function testHostConnection(
 
 export interface SystemInfo {
   ok: boolean;
+  /** Issue #18: the Python Core's version (`raven.__version__`), labelled apart from
+   *  the desktop shell version that `getVersion()` reports. */
+  core_version?: string;
   tailscale_ip: string | null;
   lan_ip: string | null;
   local_api: string;
