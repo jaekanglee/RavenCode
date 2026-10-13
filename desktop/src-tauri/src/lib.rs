@@ -556,6 +556,23 @@ fn spawn_core_event_loop(app: &tauri::AppHandle) {
     }
 }
 
+/// 웹뷰가 준 파일명에서 경로 성분을 버리고 파일명만 남긴다.
+///
+/// 웹뷰 입력은 신뢰하지 않는다: `../../etc/passwd`나 `/tmp/evil.md`가 그대로
+/// 경로가 되면 사용자 몰래 임의 위치에 쓰게 된다. 저장 위치를 고르는 다이얼로그
+/// (#4 D-2)에 넣는 **제안 이름**에도 같은 규칙을 적용한다 — 제안 이름이 경로를
+/// 벗어나면 다이얼로그가 엉뚱한 폴더를 열 수 있다.
+fn safe_file_name(filename: &str) -> Result<String, String> {
+    use std::path::Path;
+
+    Path::new(filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("잘못된 파일명입니다: {filename:?}"))
+}
+
 /// Resolves where an exported file should land inside `dir`.
 ///
 /// 웹뷰가 준 이름은 신뢰하지 않는다 — 경로 성분을 버리고 파일명만 취하며,
@@ -563,24 +580,20 @@ fn spawn_core_event_loop(app: &tauri::AppHandle) {
 fn resolve_download_target(dir: &std::path::Path, filename: &str) -> Result<std::path::PathBuf, String> {
     use std::path::Path;
 
-    let name = Path::new(filename)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .ok_or_else(|| format!("잘못된 파일명입니다: {filename:?}"))?;
+    let name = safe_file_name(filename)?;
 
-    let stem = Path::new(name)
+    let stem = Path::new(&name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("file")
         .to_string();
-    let ext = Path::new(name)
+    let ext = Path::new(&name)
         .extension()
         .and_then(|s| s.to_str())
         .map(|e| format!(".{e}"))
         .unwrap_or_default();
 
-    let mut target = dir.join(name);
+    let mut target = dir.join(&name);
     let mut counter = 1;
     while target.exists() {
         target = dir.join(format!("{stem} ({counter}){ext}"));
@@ -607,6 +620,46 @@ fn save_download_file(filename: String, contents: String) -> Result<String, Stri
     let target = resolve_download_target(&dir, &filename)?;
     std::fs::write(&target, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))?;
     Ok(target.display().to_string())
+}
+
+/// 저장 위치를 사용자가 직접 고르는 문서 내보내기 (Issue #4 D-2).
+///
+/// 다이얼로그를 **Rust가** 띄운다: 웹뷰가 저장 경로를 넘기게 하면 위의 파일명
+/// 정화(`safe_file_name`)를 그대로 우회하게 되고, 그게 바로 이 저장 경로가
+/// 막으려던 일이다. 웹뷰는 파일명과 내용만 주고, 경로는 사용자가 네이티브
+/// 다이얼로그에서 고른다.
+///
+/// `blocking_save_file`은 다이얼로그를 메인 스레드에 띄우고 호출 스레드를
+/// 블록한다 — 플러그인 문서가 "메인 스레드에서는 쓰지 말고 async 커맨드에서
+/// 쓰라"고 명시한 형태다. 신규 의존성은 없다: dialog 플러그인은 이미 등록돼
+/// 있고 `blocking_save_file`은 그 플러그인의 API다.
+#[command]
+async fn save_download_file_as(
+    app: tauri::AppHandle,
+    filename: String,
+    contents: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let suggested = safe_file_name(&filename)?;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("문서 내보내기")
+        .set_file_name(&suggested)
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file();
+
+    // 취소는 오류가 아니다 — "저장하지 않았다"는 사실만 돌려준다.
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+
+    let target = picked
+        .into_path()
+        .map_err(|e| format!("저장 경로를 읽지 못했습니다: {e}"))?;
+    std::fs::write(&target, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))?;
+    Ok(Some(target.display().to_string()))
 }
 
 fn startup_failure_message(error: &dyn std::fmt::Display) -> String {
@@ -665,7 +718,8 @@ pub fn run() {
             app_version,
             core_status,
             restart_core,
-            save_download_file
+            save_download_file,
+            save_download_file_as
         ])
         .on_menu_event(|app, event| {
             if event.id.as_ref() == "reload" {
@@ -1074,6 +1128,7 @@ mod tests {
 
     use super::core::{mcp_enabled_from_env, mcp_mode_from_env, runtime_launch_spec};
     use super::resolve_download_target;
+    use super::safe_file_name;
     use std::path::PathBuf;
 
     // v0.7.184+: 문서 내보내기 파일 저장 경로 규칙.
@@ -1124,6 +1179,67 @@ mod tests {
         assert!(resolve_download_target(&dir, "..").is_err());
         assert!(resolve_download_target(&dir, "/").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Issue #4 D-2: 저장 위치 선택 다이얼로그에 넣는 "제안 이름"에도 같은 정화를 건다.
+    // 제안 이름이 경로를 벗어나면 다이얼로그가 엉뚱한 폴더를 연다.
+    #[test]
+    fn suggested_name_for_the_save_dialog_is_sanitized() {
+        assert_eq!(safe_file_name("내보내기-시험-문서.md").unwrap(), "내보내기-시험-문서.md");
+        assert_eq!(safe_file_name("../../etc/passwd").unwrap(), "passwd");
+        assert_eq!(safe_file_name("/tmp/evil.md").unwrap(), "evil.md");
+        assert_eq!(safe_file_name("raw/note.md").unwrap(), "note.md");
+        assert!(safe_file_name("").is_err());
+        assert!(safe_file_name("..").is_err());
+        assert!(safe_file_name("/").is_err());
+    }
+
+    // Issue #4 D-2: 웹뷰가 저장 경로를 넘기게 하면 파일명 정화를 우회하는 통로가 생긴다.
+    // 경로는 사용자가 네이티브 다이얼로그에서 고르고, 커맨드 인자는 이름+내용뿐임을 소스로 지킨다.
+    // (다이얼로그는 GUI라 자동 e2e가 없다 — reopen_arm_is_macos_only와 같은 이유.)
+    #[test]
+    fn save_as_command_takes_no_path_from_the_webview() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find(concat!("async fn save_download_file_as"))
+            .expect("save_download_file_as가 사라졌다");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("커맨드 끝을 못 찾음")];
+
+        // 인자는 웹뷰에서 온 이름과 내용뿐 — 경로 파라미터가 없어야 한다.
+        assert!(
+            body.contains("filename: String") && body.contains("contents: String"),
+            "커맨드 인자가 바뀌었다"
+        );
+        assert!(
+            !body.contains("path: String") && !body.contains("target: String"),
+            "웹뷰가 저장 경로를 넘기게 되면 정화를 우회한다"
+        );
+        // 경로는 다이얼로그가 정한다.
+        assert!(body.contains("blocking_save_file"), "네이티브 저장 다이얼로그가 사라졌다");
+        assert!(body.contains("safe_file_name(&filename)"), "제안 이름 정화가 사라졌다");
+    }
+
+    #[test]
+    fn default_capability_allows_the_save_as_command() {
+        // 권한이 빠지면 invoke가 조용히 거부된다 (app_version 권한 누락과 같은 유형).
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let perms: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert!(
+            perms.contains(&"allow-save-download-file-as"),
+            "allow-save-download-file-as 권한 누락"
+        );
+        // 커맨드 등록도 함께 지킨다.
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains(concat!("save_download_file", "_as\n        ])")),
+            "invoke_handler에 save_download_file_as가 등록되지 않았다"
+        );
     }
 
     #[test]

@@ -15,9 +15,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import {
   downloadPageMarkdown,
+  downloadPageMarkdownAs,
   markdownFilename,
   pageMarkdownUrl,
   saveTextFile,
+  saveTextFileAs,
 } from "../src/lib/pageExport";
 import { ShareButton } from "../src/components/ShareButton";
 
@@ -113,6 +115,54 @@ describe("ShareButton 내보내기 섹션", () => {
     expect(screen.queryByLabelText("PDF로 저장")).toBeNull();
     expect(screen.queryByText(/PDF/)).toBeNull();
   });
+
+  it("저장 위치 선택 버튼이 save_download_file_as를 부르고 저장 경로를 보여준다", async () => {
+    const invoke = vi.fn(async () => "/Users/me/Documents/시험-문서.md");
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    try {
+      await openPopover();
+
+      await act(async () => {
+        screen.getByLabelText("저장 위치 선택").click();
+      });
+
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
+          filename: "시험-문서.md",
+          contents: RAW_MD,
+        })
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("share-popover").textContent).toContain(
+          "/Users/me/Documents/시험-문서.md"
+        )
+      );
+      // 저장 위치 선택 경로는 Blob 다운로드를 타지 않는다.
+      expect(clicked).toEqual([]);
+    } finally {
+      delete (window as any).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("저장 위치 선택에서 취소하면 오류도 저장 표시도 남기지 않는다", async () => {
+    const invoke = vi.fn(async () => null);
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    try {
+      await openPopover();
+
+      await act(async () => {
+        screen.getByLabelText("저장 위치 선택").click();
+      });
+
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      const popover = screen.getByTestId("share-popover");
+      expect(popover.textContent).not.toContain("/Users/me/Documents");
+      expect(popover.querySelector(".share-export-error")).toBeNull();
+      expect(clicked).toEqual([]);
+    } finally {
+      delete (window as any).__TAURI_INTERNALS__;
+    }
+  });
 });
 
 
@@ -175,5 +225,107 @@ describe("데스크톱(Tauri) 저장 경로", () => {
       filename: "시험-문서.md",
       path: "/Users/me/Downloads/시험-문서.md",
     });
+  });
+});
+
+/* Issue #4 D-2 — 저장 위치 선택 다이얼로그.
+ *
+ * 수정 전: 저장이 항상 ~/Downloads로 조용히 떨어졌다. 이슈의 수용 기준은
+ * "저장 위치 선택 다이얼로그 제공"이다.
+ *
+ * 설계상 중요한 점: 다이얼로그는 **Rust가** 띄우고 웹뷰는 경로를 넘기지 않는다.
+ * 웹뷰가 경로를 주면 `safe_file_name` 정화를 우회하는 통로가 생기므로, 여기서는
+ * 웹뷰가 파일명+내용만 보내는지까지 고정한다.
+ */
+describe("데스크톱 저장 위치 선택 (#4 D-2)", () => {
+  afterEach(() => {
+    delete (window as any).__TAURI_INTERNALS__;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("사용자가 고른 경로를 저장 결과로 돌려준다", async () => {
+    const invoke = vi.fn(async () => "/Users/me/Documents/보고서/시험-문서.md");
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+
+    const saved = await saveTextFileAs("시험-문서.md", "본문", "text/markdown");
+
+    expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
+      filename: "시험-문서.md",
+      contents: "본문",
+    });
+    expect(saved).toEqual({
+      filename: "시험-문서.md",
+      path: "/Users/me/Documents/보고서/시험-문서.md",
+    });
+  });
+
+  it("웹뷰는 저장 경로를 넘기지 않는다 (파일명 정화 우회 차단)", async () => {
+    const invoke = vi.fn(
+      async (_cmd: string, _args?: Record<string, unknown>) => "/Users/me/Documents/a.md"
+    );
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+
+    await saveTextFileAs("../../etc/passwd", "본문", "text/markdown");
+
+    const args = invoke.mock.calls[0][1] as Record<string, unknown>;
+    expect(Object.keys(args).sort()).toEqual(["contents", "filename"]);
+  });
+
+  it("사용자가 취소하면 null을 돌려주고 오류로 보지 않는다", async () => {
+    const invoke = vi.fn(async () => null);
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+
+    expect(await saveTextFileAs("a.md", "본문", "text/markdown")).toBeNull();
+  });
+
+  it("브라우저에는 네이티브 다이얼로그가 없으므로 기존 다운로드로 폴백한다", async () => {
+    const createObjectURL = vi.fn(() => "blob:mock");
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    const names: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      names.push(this.download);
+    });
+
+    const saved = await saveTextFileAs("a.md", "본문", "text/markdown");
+
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(names).toEqual(["a.md"]);
+    expect(saved).toEqual({ filename: "a.md", path: null });
+  });
+
+  it("downloadPageMarkdownAs가 export.md를 받아 선택한 위치에 저장한다", async () => {
+    const invoke = vi.fn(async () => "/Users/me/Documents/시험-문서.md");
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        fetched.push(String(input));
+        return new Response(RAW_MD, { status: 200 });
+      })
+    );
+
+    const saved = await downloadPageMarkdownAs("my-vault", "content/concept/시험-문서");
+
+    expect(fetched.some((u) => u.includes("/export.md"))).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
+      filename: "시험-문서.md",
+      contents: RAW_MD,
+    });
+    expect(saved?.path).toBe("/Users/me/Documents/시험-문서.md");
+  });
+
+  it("취소하면 fetch한 본문을 저장하지 않고 null을 돌려준다", async () => {
+    const invoke = vi.fn(async () => null);
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(RAW_MD, { status: 200 }))
+    );
+
+    expect(await downloadPageMarkdownAs("v", "content/a")).toBeNull();
   });
 });

@@ -78,11 +78,35 @@ export async function saveTextFile(
   return { filename, path: null };
 }
 
-export async function downloadPageMarkdown(
+/**
+ * 저장 위치를 사용자가 직접 고르는 저장 (Issue #4 D-2).
+ *
+ * 데스크톱은 Rust가 네이티브 저장 다이얼로그를 띄운다(`save_download_file_as`).
+ * 웹뷰가 경로를 넘기지 않는다는 점이 핵심이다 — 웹뷰가 경로를 주면 Rust의
+ * 파일명 정화(`safe_file_name`)를 우회하는 통로가 생기고, 그게 이 경로가
+ * 막으려던 바로 그 일이다. 사용자가 취소하면 `null` (오류 아님).
+ *
+ * 브라우저에는 네이티브 다이얼로그가 없으므로 기존 다운로드 경로로 폴백한다.
+ */
+export async function saveTextFileAs(
+  filename: string,
+  text: string,
+  mime: string
+): Promise<SavedFile | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return saveTextFile(filename, text, mime);
+  const path = await invoke("save_download_file_as", { filename, contents: text });
+  // 취소는 저장이 아니다 — 빈 경로/비문자열은 "저장 안 함"으로 본다.
+  if (typeof path !== "string" || !path) return null;
+  return { filename, path };
+}
+
+/** export.md 본문을 받아온다. 두 저장 경로(md/저장 위치 선택)가 공유한다. */
+async function fetchPageMarkdownText(
   vault: string,
   slug: string,
   opts: { frontmatter?: boolean } = {}
-): Promise<SavedFile> {
+): Promise<string> {
   const res = await apiFetch(pageMarkdownUrl(vault, slug, opts));
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
@@ -90,5 +114,24 @@ export async function downloadPageMarkdown(
       detail ? `내보내기 실패 (HTTP ${res.status}): ${detail.slice(0, 200)}` : `내보내기 실패 (HTTP ${res.status})`
     );
   }
-  return saveTextFile(markdownFilename(slug), await res.text(), "text/markdown;charset=utf-8");
+  return res.text();
+}
+
+export async function downloadPageMarkdown(
+  vault: string,
+  slug: string,
+  opts: { frontmatter?: boolean } = {}
+): Promise<SavedFile> {
+  const text = await fetchPageMarkdownText(vault, slug, opts);
+  return saveTextFile(markdownFilename(slug), text, "text/markdown;charset=utf-8");
+}
+
+/** 저장 위치를 골라 내보낸다. 사용자가 취소하면 null. */
+export async function downloadPageMarkdownAs(
+  vault: string,
+  slug: string,
+  opts: { frontmatter?: boolean } = {}
+): Promise<SavedFile | null> {
+  const text = await fetchPageMarkdownText(vault, slug, opts);
+  return saveTextFileAs(markdownFilename(slug), text, "text/markdown;charset=utf-8");
 }

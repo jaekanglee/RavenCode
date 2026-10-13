@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
-import { downloadPageMarkdown } from "../lib/pageExport";
+import { downloadPageMarkdown, downloadPageMarkdownAs } from "../lib/pageExport";
 import { Button } from "./ui/Button";
 
 // 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
@@ -238,6 +238,24 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
     }
   }
 
+  // Issue #4 D-2: 저장 위치를 사용자가 고르는 경로. 취소는 오류가 아니다.
+  async function handleExportMarkdownAs() {
+    setExporting(true);
+    setExportError(null);
+    setSavedPath(null);
+    try {
+      const saved = await downloadPageMarkdownAs(vault, slug);
+      if (saved) {
+        setSavedPath(saved.path ?? saved.filename);
+        setTimeout(() => setSavedPath(null), 6000);
+      }
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const lanUrl = sysInfo?.lan_api ? `${sysInfo.lan_api}/page/${vault}/${slug}` : null;
   const tsUrl = sysInfo?.tailscale_api ? `${sysInfo.tailscale_api}/page/${vault}/${slug}` : null;
 
@@ -329,6 +347,18 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
               >
                 <Icon.Download />
                 {exporting ? "내보내는 중…" : "Markdown (.md) 파일로 저장"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                fullWidth
+                disabled={exporting}
+                onClick={() => void handleExportMarkdownAs()}
+                aria-label="저장 위치 선택"
+                style={{ justifyContent: "flex-start", gap: 8 }}
+              >
+                {exporting ? "내보내는 중…" : "저장 위치 선택…"}
               </Button>
             </div>
             {exportError ? (
