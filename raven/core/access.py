@@ -58,6 +58,7 @@ from raven.core.mcp_tokens import verify_token
 
 LOOPBACK_HOST = "127.0.0.1"
 ALLOW_REMOTE_ENV = "RAVEN_ALLOW_REMOTE"
+REQUIRE_LOOPBACK_TOKEN_ENV = "RAVEN_REQUIRE_LOOPBACK_TOKEN"
 
 LOOPBACK_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -396,7 +397,10 @@ class TokenGate:
         trusted = is_trusted_client(source, allow_tailnet=self.trust_tailnet)
         # Issue #28: tokenless trust also needs a local Host/Origin (see is_local_browser_context).
         local = trusted and is_local_browser_context(scope, page_navigation_ok=self.page_navigation_ok)
-        if local or has_valid_bearer(scope):
+        # Issue #67: Docker Desktop host forwarding may appear as 127.0.0.1.
+        # In hardened mode, no network peer is exempt from Bearer authentication.
+        require_token = os.environ.get(REQUIRE_LOOPBACK_TOKEN_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+        if (local and not require_token) or has_valid_bearer(scope):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
                 port = client[1] if client else 0
@@ -407,7 +411,12 @@ class TokenGate:
             await send({"type": "websocket.close", "code": 1008})
             return
         detail = self.detail
-        if trusted and not local:
+        if require_token:
+            detail = (
+                "이 서버는 loopback 요청에도 Authorization: Bearer <token>을 요구합니다 "
+                "(raven mcp token add <name>)."
+            )
+        elif trusted and not local:
             detail = (
                 "이 PC 밖의 사이트(Host/Origin)에서 온 요청은 loopback이어도 토큰 없이 허용하지 않습니다 "
                 "— Authorization: Bearer <token> (raven mcp token add <name>)."
