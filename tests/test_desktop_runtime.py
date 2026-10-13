@@ -177,7 +177,7 @@ _STDERR_WRITING_ENDPOINTS = [
 ]
 
 
-def test_desktop_core_survives_closed_stderr_pipe() -> None:
+def test_desktop_core_survives_closed_stderr_pipe(tmp_path: Path) -> None:
     """Endpoints that write warnings to stderr must keep working after the
     shell stops reading the pipe.
 
@@ -187,8 +187,12 @@ def test_desktop_core_survives_closed_stderr_pipe() -> None:
     BrokenPipeError inside the request handler → 500 on /hybrid-search and
     /rag/query while the plain /search kept working.
     """
+    # Isolated registry: the default HOME registry is empty on CI and a fresh
+    # checkout, where _pick_resolvable_vault then has no vault to use (#68).
+    env = _isolated_env(tmp_path, "stderr")
     process = _popen_core(
         [sys.executable, "-m", "raven.desktop.runtime"],
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

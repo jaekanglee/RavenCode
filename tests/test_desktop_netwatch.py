@@ -542,7 +542,14 @@ def test_the_watcher_thread_stops_promptly_and_survives_a_bad_check() -> None:
         api_bind_host="127.0.0.1", api_port=1, api_endpoint_host="127.0.0.1", interval=0.05, log=lambda m: None,
     )
     w.start()
-    time.sleep(0.5)
+    # Ticks land on the watcher's own thread. Host timer granularity can be far
+    # coarser than the 0.05 s interval (macOS: time.sleep/select resolve at
+    # ~0.19 s), so wait on the observed call count instead of assuming the
+    # interval elapsed — a fixed sleep yields only ~3 ticks and reads as a
+    # regression (issue #68).
+    deadline = time.monotonic() + 5.0
+    while len(calls) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
     started = time.monotonic()
     assert w.stop(timeout=2)
     assert time.monotonic() - started < 1.5
