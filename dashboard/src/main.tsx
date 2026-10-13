@@ -5,7 +5,7 @@ import "./styles/globals.css";
 
 // v0.7.175+: Tauri desktop mode — inject Core endpoint before React renders.
 import { setApiBase } from "./lib/api-base";
-import { setSessionCredential } from "./lib/host-auth";
+import { canonicalBase, setSessionCredential, setSessionRefresher } from "./lib/host-auth";
 import { installClientDebugLog } from "./lib/client-debug-log";
 
 // Detect Tauri webview and fetch the Python Core endpoint.
@@ -20,11 +20,22 @@ async function initDesktopEndpoint(): Promise<void> {
     try {
       const endpoint = await tauriInternals.invoke("core_endpoint");
       if (endpoint && typeof endpoint === "string" && endpoint.trim().length > 0) {
-        // Issue #67: the Core API needs a Bearer token from loopback too. The shell's
-        // per-launch credential is kept in memory for this endpoint only.
+        // Issue #67: the Core API needs a Bearer token from loopback too. The running
+        // Core's credential is kept in memory for this endpoint only; after a Core restart
+        // the fetch wrapper asks the shell for the new one.
+        const snapshot = async () => {
+          const snap = await tauriInternals.invoke("core_session_token");
+          return snap && typeof snap.endpoint === "string" && typeof snap.token === "string"
+            ? { endpoint: snap.endpoint as string, token: snap.token as string }
+            : null;
+        };
+        setSessionRefresher(snapshot);
         try {
-          const token = await tauriInternals.invoke("core_session_token");
-          if (typeof token === "string") setSessionCredential(endpoint.trim(), token);
+          // endpoint and credential come from the same Core; take it only for this endpoint
+          const snap = await snapshot();
+          if (snap && canonicalBase(snap.endpoint) === canonicalBase(endpoint)) {
+            setSessionCredential(endpoint.trim(), snap.token);
+          }
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn("[Raven Desktop] no session credential; the token dialog will ask:", e);

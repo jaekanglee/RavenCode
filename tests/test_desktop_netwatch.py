@@ -653,7 +653,7 @@ def _next_event(core: subprocess.Popen[str], timeout: float = 10.0) -> dict:
 
 
 # Issue #67: the Core API needs a Bearer from loopback too. The real shell hands its Core a
-# per-launch session credential on stdin; these end-to-end runs do the same.
+# session credential (new for every Core start) on stdin; these end-to-end runs do the same.
 SESSION_TOKEN = "rvs_netwatch_test_" + secrets.token_hex(16)
 
 

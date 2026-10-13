@@ -2422,6 +2422,7 @@ name = "raven-desktop"
 version = "0.3.4"
 dependencies = [
  "dirs",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tauri",

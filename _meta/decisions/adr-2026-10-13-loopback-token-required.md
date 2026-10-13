@@ -35,10 +35,10 @@ tags: [security, access, mcp, api, desktop, docker]
 
 C의 경계:
 
-- 생성: Unix는 `/dev/urandom` 32바이트, 없으면(Windows) OS RNG로 시드된 `RandomState` SipHash로 대신한다(신규 의존성 없음). `rvs_` + 64 hex.
+- 생성 (2026-10-13 개정): OS CSPRNG에서 바로 32바이트 — `getrandom` 0.3(macOS `getentropy`, Linux `getrandom(2)`(없으면 `/dev/urandom`), Windows `ProcessPrng`). `rvs_` + 64 hex = 256비트. OS 생성기가 실패하면 약한 난수로 대신하지 않는다: 그 Core는 세션 자격 증명 없이 뜨고 webview는 발급 토큰을 묻는다(fail closed). 첫 버전의 Windows 경로(`RandomState` SipHash)는 OS CSPRNG 출력이 아니라 보장이 부족해 바꿨다(`getrandom`은 tauri가 이미 쓰는 0.3.4 — 직접 의존성만 추가, 사용자 승인).
 - 전달: Core에는 stdin 한 줄 뒤 EOF(`RAVEN_DESKTOP_SESSION_STDIN=1`일 때만 읽는다). argv·환경 변수·파일·로그·readiness 줄·URL에는 넣지 않는다. Core는 SHA-256만 메모리에 둔다.
 - 범위: Core API만(MCP는 받지 않는다), 같은 PC(loopback 실효 출처)에서만 — vite가 LAN 브라우저를 중계하면 받지 않는다.
-- 수명: 앱 실행 동안. Core 재시작·포트 이동 때 셸이 같은 값을 다시 넘기고, webview는 리로드 때 IPC로 다시 받는다. 앱을 끄면 사라진다. `raven mcp token revoke`는 발급 토큰만 회수한다 — 세션 자격 증명은 앱을 끄면 끝난다.
+- 수명 (2026-10-13 개정): **Core 한 번의 실행 동안.** Core를 시작할 때마다(재시작·포트 이동 포함) 새로 만들고, 재시작한 Core는 이전 값을 거부한다. 대시보드는 401을 받으면 IPC로 현재 값을 다시 받아 한 번 재시도한다(새 값이 없거나 같으면 토큰 입력창). 앱을 끄면 사라진다. `raven mcp token revoke`는 발급 토큰만 회수한다 — 세션 자격 증명은 Core가 끝나면 끝난다.
 - webview 보관: 메모리에만(sessionStorage·localStorage 아님). `dashboard/src/lib/host-auth.ts`가 데스크톱 Core의 정확한 origin에만 붙인다. 거절되면 지우고 토큰 입력창으로 넘어간다.
 - 한계: webview에서 스크립트가 실행되면(XSS) IPC로 값을 얻어 앱이 켜져 있는 동안 같은 PC에서 Core API를 쓸 수 있다. webview에서 스크립트가 돌면 어차피 같은 Core를 호출할 수 있으므로 새 권한은 아니다. #17의 HTML 정화·CSP(`script-src 'self'`)가 1차 방어다. IPC는 앱 자기 창(`capabilities/default.json`의 `main`)에만 열려 있다.
 

@@ -20,6 +20,9 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
+# Issue #67: the desktop session credential comes straight from the OS CSPRNG
+# (macOS getentropy, Linux getrandom(2), else /dev/urandom, Windows ProcessPrng). Already in the tree via tauri.
+getrandom = "0.3"
 
 # 릴리스 빌드(`cargo build --release --features custom-protocol`)에서만 켠다.
 # 이 피처가 켜지면 프론트엔드가 dashboard/dist로 임베드되고 devUrl을 무시하므로,

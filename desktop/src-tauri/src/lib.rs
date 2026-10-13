@@ -148,14 +148,37 @@ async fn core_endpoint(app: tauri::AppHandle) -> Result<String, String> {
     .await
 }
 
-/// Gives the webview this app launch's Core API credential (Issue #67).
+/// Gives the webview the running Core's API credential (Issue #67).
 ///
 /// The Core API needs `Authorization: Bearer` from every source, loopback included. The
 /// dashboard keeps this value in memory (never storage, never a URL) and sends it only to
 /// this app's own Core. Only the app's own window can call it (capabilities/default.json).
+///
+/// It is the credential of the Core running now: every Core start gets a new one, so after
+/// a restart the dashboard asks again (and the old one is refused). `Err` if the Core is not
+/// ready in time or was started without one (OS CSPRNG failure) — the dashboard then asks
+/// the user for an issued token.
 #[command]
-fn core_session_token() -> String {
-    core::session_token().to_string()
+async fn core_session_token(app: tauri::AppHandle) -> Result<SessionSnapshot, String> {
+    off_runtime(move || session_snapshot_within(&app.state::<CoreState>(), CORE_READY_TIMEOUT, CORE_READY_POLL)).await
+}
+
+/// The running Core's endpoint and credential, read together so the dashboard can tell
+/// which Core a credential belongs to (after a port move it must not go to the old port).
+#[derive(serde::Serialize)]
+struct SessionSnapshot {
+    endpoint: String,
+    token: String,
+}
+
+fn session_snapshot_within(
+    state: &CoreState,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> Result<SessionSnapshot, String> {
+    let (endpoint, token) = wait_for_core(state, timeout, poll, |core| (core.endpoint.clone(), core.session_token()))?;
+    let token = token.ok_or_else(|| "this Core has no session credential".to_string())?;
+    Ok(SessionSnapshot { endpoint, token })
 }
 
 /// Exposes the MCP HTTP endpoint to the webview (waits until core is ready; empty string if MCP
@@ -756,6 +779,19 @@ mod tests {
         let state = CoreState::default();
         *state.0.lock().unwrap() = Some(ManagedCore::for_test("http://127.0.0.1:5555", mcp));
         state
+    }
+
+    // Issue #67: the webview gets endpoint and credential from one Core; none → Err (token dialog).
+    #[test]
+    fn session_snapshot_pairs_the_credential_with_its_core_endpoint() {
+        let state = CoreState::default();
+        *state.0.lock().unwrap() = Some(ManagedCore::for_test_with_session("http://127.0.0.1:5555", "rvs_snap"));
+        let snap = super::session_snapshot_within(&state, T, P).unwrap();
+        assert_eq!((snap.endpoint.as_str(), snap.token.as_str()), ("http://127.0.0.1:5555", "rvs_snap"));
+        let none = ready(None);
+        assert_eq!(super::session_snapshot_within(&none, T, P).err().as_deref(), Some("this Core has no session credential"));
+        let empty = CoreState::default();
+        assert!(super::session_snapshot_within(&empty, Duration::from_millis(50), P).is_err());
     }
 
     #[test]

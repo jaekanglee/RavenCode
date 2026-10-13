@@ -6,7 +6,7 @@ itself. No source, Host or Origin earns a tokenless pass any more. What stays op
 
 - ``GET /healthz`` — fixed body, never reaches the app (compose healthchecks);
 - the Core API's dashboard static files (``raven/api/server.py::_is_public_static``);
-- the desktop webview's per-launch session credential (``access.set_session_token``),
+- the desktop webview's per-Core session credential (``access.set_session_token``),
   Core API only and only from a loopback source.
 """
 from __future__ import annotations

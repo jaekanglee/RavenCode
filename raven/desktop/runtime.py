@@ -135,7 +135,7 @@ def _watched_parent_pid() -> int | None:
     return pid
 
 
-# Issue #67: the shell's per-launch session credential for its own webview arrives on
+# Issue #67: the shell's session credential (new for every Core start) for its webview arrives on
 # stdin (one line, then EOF) — never in argv, the environment, a file or the readiness
 # line. Only a process the shell started with this variable reads stdin at all.
 SESSION_STDIN_ENV = "RAVEN_DESKTOP_SESSION_STDIN"

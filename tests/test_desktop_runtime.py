@@ -19,19 +19,20 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Issue #67: the Core API needs a Bearer from every source, loopback included. The Tauri
-# shell hands its Core a per-launch session credential on stdin (RAVEN_DESKTOP_SESSION_STDIN)
+# shell hands each Core it starts a new session credential on stdin (RAVEN_DESKTOP_SESSION_STDIN)
 # and the webview sends it as a Bearer. Real-socket tests launch the runtime the same way.
 SESSION_TOKEN = "rvs_runtime_test_" + secrets.token_hex(16)
 AUTH = {"Authorization": f"Bearer {SESSION_TOKEN}"}
 
 
-def _popen_core(argv: list[str], *, env: dict[str, str] | None = None, **kwargs) -> subprocess.Popen:
+def _popen_core(argv: list[str], *, env: dict[str, str] | None = None, session: str = SESSION_TOKEN,
+                **kwargs) -> subprocess.Popen:
     """``subprocess.Popen`` for the runtime, with the session credential on stdin like the shell."""
     env = dict(os.environ if env is None else env)
     env["RAVEN_DESKTOP_SESSION_STDIN"] = "1"
     kwargs.setdefault("cwd", REPO_ROOT)
     proc = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, **kwargs)
-    line = SESSION_TOKEN + "\n"
+    line = session + "\n"
     proc.stdin.write(line if kwargs.get("text") else line.encode())
     proc.stdin.close()
     proc.stdin = None  # communicate() would flush the closed pipe (ValueError on Python 3.12)
@@ -1953,6 +1954,33 @@ def test_session_credential_from_stdin_is_required_on_loopback(tmp_path) -> None
     finally:
         core.terminate()
         core.wait(timeout=10)
+
+
+def test_a_restarted_core_refuses_the_previous_credential(tmp_path) -> None:
+    """Every Core start gets a new credential from the shell; the old one must not open the new Core."""
+    old, new = "rvs_old_" + secrets.token_hex(16), "rvs_new_" + secrets.token_hex(16)
+    env = _isolated_env(tmp_path, "desktop")
+    port = _free_port()
+    env["PORT_API"] = str(port)
+    url = f"http://127.0.0.1:{port}/api/vaults"
+    first = _popen_core([sys.executable, "-m", "raven.desktop.runtime"], env=env, session=old,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        _wait_for_ready(first)
+        assert _status(url, old) == 200
+    finally:
+        first.terminate()
+        first.wait(timeout=10)
+    second = _popen_core([sys.executable, "-m", "raven.desktop.runtime"], env=env, session=new,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        ready = _wait_for_ready(second)
+        url = f"http://127.0.0.1:{ready['port']}/api/vaults"
+        assert _status(url, old) == 401
+        assert _status(url, new) == 200
+    finally:
+        second.terminate()
+        second.wait(timeout=10)
 
 
 def test_session_credential_is_not_accepted_by_the_mcp_listener(tmp_path) -> None:
