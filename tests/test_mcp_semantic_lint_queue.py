@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from raven.core.lint import STALE_DAYS
 from raven.core.registry import VaultMeta
 from raven.core.vault import Vault
 from raven.mcp.cli import register_tools
@@ -40,6 +42,13 @@ def _write_page(root: Path, slug: str, frontmatter: dict, body: str = "본문") 
     path = root / "content" / f"{slug}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(core_frontmatter.render(frontmatter, body), encoding="utf-8")
+
+def _recent_updated() -> str:
+    """An ``updated`` date that never reaches lint #7's window regardless of the
+    run date: #7 fires at ``STALE_DAYS`` (90) days and older, so this stays
+    exactly 89 days old forever instead of ageing past the threshold on a fixed
+    calendar date (issue #68)."""
+    return (date.today() - timedelta(days=STALE_DAYS - 1)).isoformat()
 
 
 def test_confidence_low_and_stale_grouped_on_same_slug(tmp_path: Path):
@@ -128,6 +137,7 @@ def test_limit_truncates_and_flags(tmp_path: Path):
 def test_no_candidates_is_not_an_error(tmp_path: Path):
     root = _vault(tmp_path)
     # Create mutually-linked pages so neither is orphaned, with distinct titles
+    recent = _recent_updated()
     _write_page(
         root,
         "concept-foo",
@@ -135,8 +145,8 @@ def test_no_candidates_is_not_an_error(tmp_path: Path):
             "title": "Concepts of Foo",
             "type": "concept",
             "confidence": "high",
-            "created": "2026-07-10",
-            "updated": "2026-07-10",
+            "created": recent,
+            "updated": recent,
         },
         "[[content/guide-bar]]",
     )
@@ -147,8 +157,8 @@ def test_no_candidates_is_not_an_error(tmp_path: Path):
             "title": "Guide to Bar",
             "type": "concept",
             "confidence": "high",
-            "created": "2026-07-10",
-            "updated": "2026-07-10",
+            "created": recent,
+            "updated": recent,
         },
         "[[content/concept-foo]]",
     )
