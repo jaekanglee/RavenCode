@@ -10,7 +10,13 @@ import { HostPicker } from "./HostPicker";
 import { Modal } from "./ui/Modal";
 import { TextField } from "./ui/TextField";
 import { Button } from "./ui/Button";
-import { fetchDraftsList, writeRaw, type DraftListItem } from "../lib/api";
+import {
+  fetchDraftsList,
+  hostScopedStorageKey,
+  readHostScopedStored,
+  writeRaw,
+  type DraftListItem,
+} from "../lib/api";
 import { resolveNewRawFile } from "../lib/rawPath";
 import { useIsDrawerMobile } from "../lib/useMediaQuery";
 import type { TreeNode as TNode, VaultMeta } from "../types";
@@ -65,14 +71,24 @@ function writeSidebarWidth(w: number) {
   } catch {}
 }
 
-function openFoldersStorageKey(vault: string): string {
+/* Issue #32 잔여: 즐겨찾기·열린 폴더는 vault 이름·폴더 경로만 담고 있어 호스트별로 나눈다.
+ * 호스트마다 vault 이름과 트리가 달라서, 공유하면 다른 호스트에서 고른 이름이 이 화면의
+ * 첫 선택·정렬에 영향을 줄 수 있다. 읽기는 로컬 호스트에 한해 레거시 키로 폴백한다. */
+const FAVORITE_VAULTS_KEY = "raven.dashboard.favoriteVaults";
+
+/** 호스트 구분 없는 열린 폴더 키(레거시 폴백에도 쓴다). 저장은 hostScopedStorageKey로 감싼다. */
+function openFoldersBaseKey(vault: string): string {
   return `raven.sidebar.openFolders.${vault}`;
+}
+
+function openFoldersStorageKey(vault: string): string {
+  return hostScopedStorageKey(openFoldersBaseKey(vault));
 }
 
 function readOpenFolders(vault: string): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(openFoldersStorageKey(vault));
+    const raw = readHostScopedStored(openFoldersBaseKey(vault));
     const parsed = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : []);
   } catch {
@@ -90,7 +106,7 @@ function writeOpenFolders(vault: string, folders: Set<string>) {
 function readFavoriteVaults(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem("raven.dashboard.favoriteVaults");
+    const raw = readHostScopedStored(FAVORITE_VAULTS_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed : []);
   } catch {
@@ -101,7 +117,7 @@ function readFavoriteVaults(): Set<string> {
 function writeFavoriteVaults(favs: Set<string>) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem("raven.dashboard.favoriteVaults", JSON.stringify([...favs]));
+    window.localStorage.setItem(hostScopedStorageKey(FAVORITE_VAULTS_KEY), JSON.stringify([...favs]));
   } catch {}
 }
 

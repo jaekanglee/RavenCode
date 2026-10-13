@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiFetch } from "../lib/api";
+import { apiFetch, setActiveVault } from "../lib/api";
 
 interface VaultMeta {
   name: string;
@@ -10,8 +10,7 @@ interface VaultMeta {
   default: boolean;
 }
 
-const ACTIVE_KEY = "raven:active_vault";
-
+// Issue #32 잔여: 활성 vault 선택은 호스트별 키에 저장한다 (api.setActiveVault가 소유).
 export function VaultPicker({
   active,
   onChange,
@@ -50,7 +49,7 @@ export function VaultPicker({
           const def = d.vaults.find((v: VaultMeta) => v.default) || d.vaults[0];
           if (def) {
             onChange(def.name);
-            localStorage.setItem(ACTIVE_KEY, def.name);
+            setActiveVault(def.name);
           }
         }
       })
@@ -82,7 +81,7 @@ export function VaultPicker({
 
   async function select(name: string) {
     onChange(name);
-    localStorage.setItem(ACTIVE_KEY, name);
+    setActiveVault(name);
     setOpen(false);
     try {
       await apiFetch(`/api/vaults/${name}/select`, { method: "POST" });

@@ -321,3 +321,78 @@ describe("편집 초안은 호스트별로 분리된다 (Issue #32 D — 다른 
     expect(local.draftStorageKey("notes", "hello")).toBe("raven:draft@local:notes:hello");
   });
 });
+
+describe("UI 선호도 호스트별로 분리된다 (Issue #32 잔여 — 활성 vault·즐겨찾기·열린 폴더)", () => {
+  const FAV = "raven.dashboard.favoriteVaults";
+
+  it("저장 키에 이 탭의 호스트가 들어가고, 쓰기는 호스트별 키로만 간다", async () => {
+    const local = await loadTab();
+    expect(local.api.hostScopedStorageKey("raven:active_vault")).toBe("raven:active_vault@local");
+    local.api.setActiveVault("alpha");
+    expect(localStorage.getItem("raven:active_vault@local")).toBe("alpha");
+    expect(localStorage.getItem("raven:active_vault")).toBeNull(); // 레거시 키는 고치지 않는다
+
+    vi.resetModules();
+    localStorage.clear();
+    storeActiveHost("a");
+    const remote = await loadTab();
+    expect(remote.api.hostScopedStorageKey("raven:active_vault")).toBe(`raven:active_vault@${A}`);
+    expect(remote.api.hostScopedStorageKey(FAV)).toBe(`${FAV}@${A}`);
+    remote.api.setActiveVault("beta");
+    expect(localStorage.getItem(`raven:active_vault@${A}`)).toBe("beta");
+    expect(localStorage.getItem("raven:active_vault")).toBeNull();
+  });
+
+  it("레거시(호스트 구분 없음) 값은 로컬 탭에서만 초기 선택으로 읽는다", async () => {
+    localStorage.setItem("raven:active_vault", "legacy-vault");
+    const local = await loadTab();
+    expect(local.api.getActiveVault()).toBe("legacy-vault"); // 로컬: 폴백 허용
+
+    vi.resetModules();
+    storeActiveHost("a");
+    const remote = await loadTab();
+    expect(remote.api.getActiveVault()).toBe(""); // 원격: 출처를 알 수 없는 값을 쓰지 않는다
+  });
+
+  it("원격 호스트 탭의 사이드바는 그 호스트의 즐겨찾기만 반영한다 (레거시 값 무시)", async () => {
+    localStorage.setItem(FAV, JSON.stringify(["gamma"])); // A를 쓰던 시절의 값일 수 있다
+    localStorage.setItem(`${FAV}@${A}`, JSON.stringify(["beta"]));
+    storeActiveHost("a");
+    await loadTab();
+    const { render, cleanup, screen } = await import("@testing-library/react");
+    const { MemoryRouter } = await import("react-router-dom");
+    const { Sidebar } = await import("../src/components/Sidebar");
+    const meta = (name: string, isDefault = false) => ({
+      name,
+      path: `/v/${name}`,
+      mode: "personal",
+      owner: "u",
+      default: isDefault,
+    });
+    try {
+      render(
+        <MemoryRouter>
+          <Sidebar
+            vaults={[meta("alpha", true), meta("beta"), meta("gamma")]}
+            trees={{}}
+            rawItems={{}}
+            activeVault="gamma"
+            activeSlug={null}
+            onSelectVault={() => {}}
+            onRefresh={() => {}}
+            open={true}
+            onClose={() => {}}
+          />
+        </MemoryRouter>,
+      );
+      // A의 즐겨찾기 = beta뿐 → gamma 화면의 토글은 OFF, 정렬은 beta → default alpha → gamma
+      const btn = screen.getByRole("button", { name: /즐겨찾기/ }) as HTMLButtonElement;
+      expect(btn.getAttribute("aria-pressed")).toBe("false");
+      expect(btn.textContent).toContain("☆");
+      const select = document.querySelector('select[aria-label="보관소 선택"]') as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(["beta", "alpha", "gamma"]);
+    } finally {
+      cleanup();
+    }
+  });
+});

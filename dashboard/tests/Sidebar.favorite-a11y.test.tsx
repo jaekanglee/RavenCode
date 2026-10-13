@@ -18,9 +18,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Sidebar } from "../src/components/Sidebar";
+import { hostScopedStorageKey } from "../src/lib/api";
 import type { VaultMeta } from "../src/types";
 
+/** 이전 버전이 호스트 구분 없이 쓰던 키 (읽기 전용 폴백으로만 남는다). */
 const FAV_KEY = "raven.dashboard.favoriteVaults";
+/** Issue #32 잔여: 즐겨찾기 저장은 호스트별 키로 간다. 이 파일은 호스트 설정이 없어 `@local`. */
+const favKeyInUse = () => hostScopedStorageKey(FAV_KEY);
 
 function vault(name: string, isDefault = false): VaultMeta {
   return { name, path: `/vaults/${name}`, mode: "personal", owner: "user", default: isDefault };
@@ -151,7 +155,7 @@ describe("저장/복원/정렬 회귀 없음", () => {
     const { unmount } = render(ui("alpha", vi.fn()));
     fireEvent.click(favButton());
 
-    expect(JSON.parse(localStorage.getItem(FAV_KEY) ?? "[]")).toEqual(["alpha"]);
+    expect(JSON.parse(localStorage.getItem(favKeyInUse()) ?? "[]")).toEqual(["alpha"]);
 
     // 재마운트 (새 인스턴스) → localStorage에서 복원
     unmount();
@@ -202,6 +206,6 @@ describe("vault 변경 시 favorite 상태가 정확히 따라간다", () => {
     expect(favButton().textContent).toContain("★");
 
     // 저장된 값도 alpha 하나만 유지된다 (vault 전환이 저장을 오염시키지 않는다)
-    expect(JSON.parse(localStorage.getItem(FAV_KEY) ?? "[]")).toEqual(["alpha"]);
+    expect(JSON.parse(localStorage.getItem(favKeyInUse()) ?? "[]")).toEqual(["alpha"]);
   });
 });
