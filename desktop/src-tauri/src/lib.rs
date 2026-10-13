@@ -1203,18 +1203,25 @@ mod tests {
         let start = src
             .find(concat!("async fn save_download_file_as"))
             .expect("save_download_file_as가 사라졌다");
-        let body = &src[start..start + src[start..].find("\n}\n").expect("커맨드 끝을 못 찾음")];
 
-        // 인자는 웹뷰에서 온 이름과 내용뿐 — 경로 파라미터가 없어야 한다.
-        assert!(
-            body.contains("filename: String") && body.contains("contents: String"),
-            "커맨드 인자가 바뀌었다"
+        // 인자는 **화이트리스트**로 고정한다. 블랙리스트(`path: String` 등)는
+        // 이름만 바꾼 경로 인자(`dest: String`, `save_to: PathBuf`)를 놓친다.
+        let open = start + src[start..].find('(').expect("파라미터 시작을 못 찾음") + 1;
+        let close = open + src[open..].find(") ->").expect("파라미터 끝을 못 찾음");
+        let params: Vec<&str> = src[open..close]
+            .split(',')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        assert_eq!(
+            params,
+            vec!["app: tauri::AppHandle", "filename: String", "contents: String"],
+            "커맨드 인자가 바뀌었다 — 웹뷰가 경로를 넘기게 되면 파일명 정화를 우회한다"
         );
-        assert!(
-            !body.contains("path: String") && !body.contains("target: String"),
-            "웹뷰가 저장 경로를 넘기게 되면 정화를 우회한다"
-        );
+
         // 경로는 다이얼로그가 정한다.
+        let body = &src[start..start + src[start..].find("\n}\n").expect("커맨드 끝을 못 찾음")];
         assert!(body.contains("blocking_save_file"), "네이티브 저장 다이얼로그가 사라졌다");
         assert!(body.contains("safe_file_name(&filename)"), "제안 이름 정화가 사라졌다");
     }
