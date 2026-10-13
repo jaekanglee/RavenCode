@@ -83,3 +83,43 @@ def test_updater_endpoint_points_at_current_repo() -> None:
 def test_scripts_do_not_reference_old_repo_name(relpath: str) -> None:
     text = (ROOT / relpath).read_text(encoding="utf-8")
     assert "RavenWiki" not in text, f"{relpath}에 옛 레포 이름(RavenWiki)이 남아 있습니다"
+
+
+# ── Issue #18 — 코어 버전 노출 + 세 버전의 관계 고정 ────────────────────────────
+#
+# 결정(제품): 세 버전을 한 값으로 통일하지 않는다. 릴리스 주기가 다르고(코어는
+# 매 코어 릴리스마다 오르고, 셸은 자기 주기로 DMG를 굽고, 대시보드는 셸에 번들
+# 되는 private 패키지다), 통일하면 코어 릴리스마다 셸을 재빌드·재서명해야 한다.
+# 대신 사용자에게 보이는 두 표면을 라벨로 구분하고 각 값을 자기 SOT에서
+# 파생시킨다(화면에 리터럴 하드코딩 금지):
+#   코어     = raven/__init__.py::__version__  → /api/system/info `core_version`
+#   셸       = desktop/src-tauri/tauri.conf.json → 셸 IPC `app_version`
+#   대시보드 = dashboard/package.json (private 번들 — 릴리스 버전으로 노출하지 않는다)
+# 그래서 여기서는 "두 값이 같다"가 아니라 "코어 값이 자기 SOT에서 온다"를 고정한다.
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from raven.api.server import app
+
+    return TestClient(app)
+
+
+def test_system_info_exposes_the_core_version_from_its_sot() -> None:
+    """관리 화면이 코어 버전을 볼 수 있어야 한다 (셸 버전만 보이던 상태의 회귀 가드)."""
+    import raven
+
+    from raven.api import server
+
+    assert server.app.version == raven.__version__  # OpenAPI(/docs)도 코어 SOT를 따른다
+    data = _client().get("/api/system/info").json()
+    assert data["core_version"] == raven.__version__
+
+
+def test_system_info_core_version_is_derived_not_hardcoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """코어 버전은 문자열 리터럴이 아니라 raven.__version__에서 파생돼야 한다."""
+    from raven.api import server
+
+    monkeypatch.setattr(server, "raven_version", "9.9.9")
+    assert _client().get("/api/system/info").json()["core_version"] == "9.9.9"

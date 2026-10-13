@@ -762,6 +762,14 @@ export function VaultManage() {
                 <span style={{ color: "var(--color-muted)" }}>표준 API 포트:</span>{" "}
                 <strong style={{ fontFamily: "monospace" }}>{sysInfo?.port || 8765}</strong>
               </div>
+              {/* Issue #18: 코어(Python) 버전은 셸 버전과 별개 릴리스 주기를 가진다.
+                  셸 버전은 데스크톱 블록에서 따로 보여주므로 여기서는 코어만 표기한다. */}
+              <div>
+                <span style={{ color: "var(--color-muted)" }}>코어(Core) 버전:</span>{" "}
+                <strong style={{ fontFamily: "monospace" }}>
+                  {sysInfo?.core_version ? `v${sysInfo.core_version}` : "확인 불가"}
+                </strong>
+              </div>
               {access.known && (
                 <div>
                   <span style={{ color: "var(--color-muted)" }}>네트워크 상태:</span>{" "}
@@ -886,7 +894,7 @@ export function VaultManage() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <div>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>Raven Desktop</div>
-                <div style={{ fontSize: 12, color: "var(--color-muted)" }}>현재 버전: {appVersion ? `v${appVersion}` : "확인 불가"}</div>
+                <div style={{ fontSize: 12, color: "var(--color-muted)" }}>셸(Shell) 버전: {appVersion ? `v${appVersion}` : "확인 불가"}</div>
               </div>
               <Button
                 variant="secondary"

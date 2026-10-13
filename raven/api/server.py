@@ -326,6 +326,10 @@ def system_info():
 
     return {
         "ok": True,
+        # Issue #18: the Core's own version, labelled so the admin screen can tell it
+        # apart from the desktop shell's version (which only the shell knows, via
+        # tauri.conf.json). Sourced from raven.__version__ — never hardcoded here.
+        "core_version": raven_version,
         "tailscale_ip": ts_ip,
         "lan_ip": lan_ip,
         "local_api": local_api,
