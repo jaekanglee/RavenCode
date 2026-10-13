@@ -634,6 +634,21 @@ fn report_startup_failure_and_exit(app: &tauri::AppHandle, error: &str) {
         .show(move |_| exit_handle.exit(1));
 }
 
+/// The exit code `AppHandle::exit(N)` asked for, recorded when the runtime hands it over
+/// (Issue #42). `None` means nothing asked: the last window closed, or the loop ended by
+/// itself. See `exit_code_for` for how it becomes a process exit code.
+#[derive(Default)]
+struct RequestedExit(Mutex<Option<i32>>);
+
+/// Issue #42: the code the process must end with.
+///
+/// `RequestExit(N)` reaches us as `RunEvent::ExitRequested { code: Some(N) }`, which is the
+/// only place the code survives — the event loop itself ends with 0 (see `run`). A plain
+/// exit (`code: None`: last window closed) keeps the loop's own code.
+fn exit_code_for(requested: Option<i32>, loop_code: i32) -> i32 {
+    requested.unwrap_or(loop_code)
+}
+
 pub fn run() {
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
@@ -642,6 +657,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CoreState::default())
+        .manage(RequestedExit::default())
         .invoke_handler(tauri::generate_handler![
             core_endpoint,
             core_session_token,
@@ -734,24 +750,46 @@ pub fn run() {
         .build(tauri::generate_context!());
 
     match app {
-        Ok(app) => app.run(|app, event| {
-            match event {
-                RunEvent::Exit | RunEvent::ExitRequested { .. } => {
-                    app.state::<CoreState>().stop();
-                }
-                // Tauri only defines `Reopen` on macOS (Dock icon click); matching it
-                // unconditionally broke the Linux/Windows build (Issue #40).
-                #[cfg(target_os = "macos")]
-                RunEvent::Reopen { has_visible_windows, .. } => {
-                    if !has_visible_windows {
-                        if let Some(window) = app.get_webview_window("main") {
-                            show_and_recover(&window);
+        // Issue #42: `App::run` ends in `tao::EventLoop::run`, which is `process::exit` on
+        // whatever the loop returned — and the code `AppHandle::exit(N)` asked for never
+        // reaches it. Handling `RequestExit(N)`, tauri-runtime-wry does pass `N` to this
+        // callback, but then sets `ControlFlow::Exit`, which tao documents as `ExitWithCode(0)`
+        // (both are the same value), so the app died with 0: a launcher or script saw a failed
+        // start as a clean exit. `run_return` gives the process back to us instead, and we end
+        // it with the code the run recorded from `ExitRequested`.
+        Ok(app) => {
+            let handle = app.handle().clone();
+            let loop_code = app.run_return(move |app, event| {
+                match event {
+                    // The one place the requested code survives (see above).
+                    RunEvent::ExitRequested { code, .. } => {
+                        if let Some(code) = code {
+                            *app.state::<RequestedExit>().0.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
+                        }
+                        app.state::<CoreState>().stop();
+                    }
+                    RunEvent::Exit => {
+                        app.state::<CoreState>().stop();
+                    }
+                    // Tauri only defines `Reopen` on macOS (Dock icon click); matching it
+                    // unconditionally broke the Linux/Windows build (Issue #40).
+                    #[cfg(target_os = "macos")]
+                    RunEvent::Reopen { has_visible_windows, .. } => {
+                        if !has_visible_windows {
+                            if let Some(window) = app.get_webview_window("main") {
+                                show_and_recover(&window);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
-            }
-        }),
+            });
+            // The updater's restart exits from inside the loop (`process::restart`), so it never
+            // reaches this point. This is the normal exit: `exit(N)` (tray Quit asks for 0
+            // explicitly, a failed start for 1) or the loop's own code when nothing asked.
+            let requested = *handle.state::<RequestedExit>().0.lock().unwrap_or_else(PoisonError::into_inner);
+            std::process::exit(exit_code_for(requested, loop_code));
+        }
         Err(e) => {
             // No event loop or AppHandle exists yet, so tauri_plugin_dialog can't show anything
             // here (Issue #1 A-3) — report on stderr and keep the exit code.
@@ -766,8 +804,8 @@ mod tests {
     // Issue #1 A-4: mcp_endpoint는 Core가 준비되지 않은 채 타임아웃되면 Ok("")를 돌려줬다 —
     // "MCP 꺼짐"(정상 빈 값)과 구분되지 않는 실패 위장. 타임아웃은 Err로 전파한다.
     use super::{
-        core::ManagedCore, core_endpoint_within, mcp_endpoint_within, off_runtime, CoreState,
-        CORE_READY_POLL, CORE_READY_TIMEOUT,
+        core::ManagedCore, core_endpoint_within, exit_code_for, mcp_endpoint_within, off_runtime,
+        CoreState, CORE_READY_POLL, CORE_READY_TIMEOUT,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1268,6 +1306,41 @@ mod tests {
         let at = src.find(arm).expect("Reopen 처리부가 사라졌다");
         let before = src[..at].trim_end().lines().last().unwrap_or("").trim();
         assert_eq!(before, "#[cfg(target_os = \"macos\")]");
+    }
+
+    // Issue #42: `AppHandle::exit(N)`의 코드는 프로세스 종료까지 살아남지 못했다.
+    // tauri-runtime-wry는 `ExitRequested { code: Some(N) }`로 N을 넘겨주지만 곧바로
+    // `ControlFlow::Exit`(= `ExitWithCode(0)`)를 세우고, `tao::EventLoop::run`은 그 값을
+    // `process::exit`에 그대로 넘긴다. 그래서 실패한 시작(exit(1))도 0으로 끝났다.
+    // 우리가 받은 코드로 직접 프로세스를 끝내는지 소스로 지킨다 (macOS 전용 재현이라
+    // 자동 e2e가 없다 — `reopen_arm_is_macos_only`와 같은 이유).
+    #[test]
+    fn the_code_from_exit_n_reaches_the_process_exit() {
+        assert_eq!(exit_code_for(Some(1), 0), 1, "exit(1) must survive the loop's own 0");
+        assert_eq!(exit_code_for(Some(0), 0), 0);
+        assert_eq!(exit_code_for(Some(1), 1), 1);
+        assert_eq!(exit_code_for(None, 0), 0, "nothing asked → the loop's code stays");
+
+        let src = include_str!("lib.rs");
+        let start = src.find(concat!("pub fn ", "run()")).expect("run() is gone");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("run() has no end")];
+        assert!(body.contains("run_return"), "run() must take the exit code back from the loop");
+        assert!(
+            !body.contains(concat!("app", ".run(")),
+            "app.run() swallows the exit code again"
+        );
+        assert!(
+            body.contains(concat!("RunEvent::", "ExitRequested { code, .. }")),
+            "the requested code is only available on ExitRequested"
+        );
+        assert!(
+            body.contains(concat!("std::process::exit(", "exit_code_for(requested, loop_code))")),
+            "the recorded code must be the process exit code"
+        );
+        assert!(
+            src.contains(concat!(".manage(", "RequestedExit::default())")),
+            "the slot that carries the code across the loop must be registered"
+        );
     }
 
     /// Issue #43: a start still waiting for readiness belongs to `CoreState` too.
