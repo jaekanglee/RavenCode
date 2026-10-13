@@ -135,12 +135,17 @@ def test_compose_uses_vaults_as_wiki_vaults_dir() -> None:
 
 
 def test_compose_healthchecks_match_service_ports() -> None:
-    """api는 8765, mcp-http는 8766 자기 포트로 헬스체크해야 한다."""
+    """api는 8765, mcp-http는 8766 자기 포트로 헬스체크해야 한다.
+
+    Issue #67: 둘 다 토큰 없는 `GET /healthz`를 `curl -f`로 부른다 — /api·/mcp는 컨테이너 안
+    loopback에서도 토큰이 필요하고, `-f` 없이는 401도 성공으로 친다.
+    """
     content = COMPOSE.read_text(encoding="utf-8")
-    assert 'http://127.0.0.1:8765/api/vaults' in content, \
-        "api healthcheck must probe port 8765"
-    assert 'http://127.0.0.1:8766/mcp' in content, \
-        "mcp-http healthcheck must probe its own port 8766"
+    assert '["CMD", "curl", "-fsS", "http://127.0.0.1:8765/healthz"]' in content, \
+        "api healthcheck must probe /healthz on port 8765 and fail on HTTP errors"
+    assert '["CMD", "curl", "-fsS", "http://127.0.0.1:8766/healthz"]' in content, \
+        "mcp-http healthcheck must probe /healthz on its own port 8766 and fail on HTTP errors"
+    assert "/api/vaults\"]" not in content and "8766/mcp" not in content.split("healthcheck")[-1]
 
 
 def test_entrypoint_preserves_host_raven_vaults_dir() -> None:

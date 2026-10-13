@@ -9,6 +9,8 @@ status: accepted
 
 # Core API Tailnet Token
 
+> ⚠️ **2026-10-13 일부 대체 (#67):** "loopback은 토큰 없이 통과"는 [[adr-2026-10-13-loopback-token-required]]로 대체됐다. 이제 같은 PC(loopback)를 포함한 모든 출처에 토큰이 필요하다(macOS Docker Desktop 컨테이너가 loopback으로 보이기 때문). 나머지 내용은 유효하다.
+
 > **결정:** Core API는 loopback 직접 연결만 토큰 없이 받는다. tailnet을 포함한 그 밖의 모든 출처는 `raven mcp token add`로 발급한 Bearer 토큰이 있어야 한다. 이 결정은 [[adr-2026-10-08-core-api-access-gate]]의 tailnet 무인증 신뢰를 Core API에 한해 대체한다 (Issue #24). **범위는 Core API 한정**이다(2026-10-09 결정). MCP는 #26에서 같은 정책으로 바꿨다 → [[adr-2026-10-09-mcp-remote-token]].
 
 ## 맥락

@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -651,6 +652,11 @@ def _next_event(core: subprocess.Popen[str], timeout: float = 10.0) -> dict:
     raise AssertionError("no event from the Core")
 
 
+# Issue #67: the Core API needs a Bearer from loopback too. The real shell hands its Core a
+# per-launch session credential on stdin; these end-to-end runs do the same.
+SESSION_TOKEN = "rvs_netwatch_test_" + secrets.token_hex(16)
+
+
 def _start(tmp_path: Path, initial: str, *argv: str) -> tuple[subprocess.Popen[str], Path, int, int]:
     ctl = tmp_path / "ctl"
     _set(ctl, initial)
@@ -661,24 +667,30 @@ def _start(tmp_path: Path, initial: str, *argv: str) -> tuple[subprocess.Popen[s
         **{k: v for k, v in os.environ.items() if not k.startswith(("RAVEN_", "WIKI_", "PORT_"))},
         "HOME": str(home), "WIKI_VAULTS_DIR": str(tmp_path / "vaults"), "RAVEN_ALLOW_REMOTE": "1",
         "PORT_API": str(api_port), "PYTHONPATH": str(REPO_ROOT), "GEMINI_API_KEY": "",
+        "RAVEN_DESKTOP_SESSION_STDIN": "1",
     }
     core = subprocess.Popen(
         [sys.executable, "-c", _CORE_WITH_SWITCH, str(ctl), *argv, "--mcp", "--mcp-port", str(mcp_port)],
-        cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=REPO_ROOT, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    core.stdin.write(SESSION_TOKEN + "\n")
+    core.stdin.close()
     ready = json.loads(core.stdout.readline())
     assert ready["port"] == api_port, ready
     return core, ctl, api_port, mcp_port
 
 
 def _info(port: int) -> dict:
-    with urlopen(f"http://127.0.0.1:{port}/api/system/info", timeout=5) as r:
+    req = Request(f"http://127.0.0.1:{port}/api/system/info",
+                  headers={"Authorization": f"Bearer {SESSION_TOKEN}"})
+    with urlopen(req, timeout=5) as r:
         return json.load(r)
 
 
-def _code(host: str, port: int, path: str = "/mcp") -> int:
+def _code(host: str, port: int, path: str = "/mcp", token: str | None = None) -> int:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        with urlopen(f"http://{host}:{port}{path}", timeout=3) as r:
+        with urlopen(Request(f"http://{host}:{port}{path}", headers=headers), timeout=3) as r:
             return r.status
     except HTTPError as e:
         return e.code
@@ -696,6 +708,8 @@ def test_core_holds_and_advertises_a_tailnet_address_that_comes_up_later(tmp_pat
         # Auth is unchanged on the new address: no token, no access.
         assert _code(LAN, mcp_port) == 401
         assert _code(LAN, api_port, "/api/vaults") == 401
+        # The webview's session credential is for this PC only (#67): useless from the tailnet.
+        assert _code(LAN, api_port, "/api/vaults", SESSION_TOKEN) == 401
         net = _info(api_port)["network"]
         assert net["tailscale"]["ip"] == LAN
         assert net["mcp"]["tailnet"] == {"address": f"{LAN}:{mcp_port}", "state": "protected", "detail": ""}

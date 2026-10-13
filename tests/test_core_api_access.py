@@ -7,11 +7,13 @@ PR #21 1차 수정은 데스크톱 런타임에서만 API를 ``LanTokenAuth``로
 
 Contract (모든 실행 경로 공통):
   1. 접근 게이트는 앱(``raven.api.app``) 자체에 있다 — 실행 경로가 무엇이든 같은 판정.
-     출처는 소켓 주소(ASGI ``scope["client"]``)로만 본다. Host/Origin/X-Forwarded-For는 무시.
-     - loopback(127.0.0.0/8, ::1, ::ffff:127.x) → 통과
+     모든 출처에 ``Authorization: Bearer <raven mcp token add 토큰>``이 필요하다, 아니면 401.
+     - loopback(127.0.0.0/8, ::1, ::ffff:127.x)도 예외가 아니다 (#67 — macOS Docker Desktop의
+       ``host.docker.internal`` 연결이 loopback으로 보이고 Host/Origin은 위조할 수 있다)
      - tailnet(100.64.0.0/10, fd7a:115c:a1e0::/48) → #24부터 토큰 필요 (MCP도 #26부터 동일)
-     - 그 외 → ``Authorization: Bearer <raven mcp token add 토큰>``이 맞아야 통과, 아니면 401.
-       발급 0개면 전부 401. 예외 경로(health 등) 없음.
+     - Host/Origin/X-Forwarded-For로 토큰을 면제받을 수 없다. 발급 0개면 전부 401.
+     - 예외 경로: ``GET /healthz``(고정 본문)와, 대시보드 빌드를 서빙할 때의 정적 파일뿐.
+       ``/api/...``와 API 문서(``/docs``, ``/openapi.json`` …)는 언제나 토큰이 필요하다.
   2. bind: 기본 loopback. 비루프백/와일드카드는 ``RAVEN_ALLOW_REMOTE``가 참(1/true/yes/on)일
      때만. standalone CLI는 opt-in 없는 원격 bind 요청을 **거부**(exit 2)하고, 데스크톱
      런타임은 창이 안 뜨는 일이 없게 loopback으로 낮춘다. 우선순위: ``--host`` > ``RAVEN_HOST``.
@@ -37,7 +39,7 @@ from raven.core import mcp_tokens
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-TRUSTED_SOURCES = [
+LOOPBACK_SOURCES = [
     "127.0.0.1",
     "127.8.9.10",
     "::1",
@@ -99,9 +101,17 @@ def test_app_refuses_unauthenticated_non_local_source(vaults_root, ip):
     assert res.json()["error"] == "unauthorized"
 
 
-@pytest.mark.parametrize("ip", TRUSTED_SOURCES)
-def test_app_serves_loopback(vaults_root, ip):
-    assert _call("GET", "/api/vaults", ip).status_code == 200, ip
+@pytest.mark.parametrize("ip", LOOPBACK_SOURCES)
+def test_app_requires_token_from_loopback(vaults_root, ip):
+    """#67: loopback is no exemption; with a token it is served like any other source."""
+    res = _call("GET", "/api/vaults", ip)
+    assert res.status_code == 401, ip
+    assert res.headers["www-authenticate"].startswith("Bearer")
+    for headers in ({"Host": "127.0.0.1:8765"}, {"Origin": "tauri://localhost"},
+                    {"Host": "localhost", "Origin": "http://localhost:5173"}):
+        assert _call("GET", "/api/vaults", ip, headers).status_code == 401, (ip, headers)
+    token = mcp_tokens.add_token("local")
+    assert _call("GET", "/api/vaults", ip, {"Authorization": f"Bearer {token}"}).status_code == 200, ip
 
 
 @pytest.mark.parametrize("ip", TAILNET_SOURCES)
@@ -125,10 +135,35 @@ def test_headers_never_vouch_for_a_lan_source(vaults_root, headers):
     assert _call("GET", "/api/vaults", "192.168.1.50", headers).status_code == 401, headers
 
 
-@pytest.mark.parametrize("path", ["/", "/api/system/info", "/docs", "/openapi.json", "/api/health", "/assets/x.js"])
-def test_no_unauthenticated_exemptions(vaults_root, path):
-    """health/readiness 같은 예외 경로가 없다 — 게이트는 경로를 보지 않는다."""
-    assert _call("GET", path, "192.168.1.50").status_code == 401, path
+@pytest.mark.parametrize("ip", ["192.168.1.50", "127.0.0.1"])
+@pytest.mark.parametrize("path", ["/", "/api/system/info", "/docs", "/openapi.json", "/redoc", "/api/health",
+                                  "/assets/x.js", "/healthz/", "/api/healthz"])
+def test_no_unauthenticated_exemptions_without_a_dashboard_build(vaults_root, monkeypatch, ip, path):
+    """대시보드 빌드를 서빙하지 않으면 ``GET /healthz`` 말고 예외 경로가 없다."""
+    import raven.api.server as server
+
+    monkeypatch.setattr(server, "_DASHBOARD_DIST", None)
+    assert _call("GET", path, ip).status_code == 401, path
+
+
+@pytest.mark.parametrize("ip", ["192.168.1.50", "127.0.0.1"])
+@pytest.mark.parametrize("path", ["/api/system/info", "/api/vaults", "/docs", "/openapi.json", "/redoc", "/api"])
+def test_api_and_docs_stay_gated_with_a_dashboard_build(vaults_root, monkeypatch, tmp_path, ip, path):
+    import raven.api.server as server
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(server, "_DASHBOARD_DIST", dist)
+    for method in ("GET", "HEAD", "POST"):
+        assert _call(method, path, ip).status_code == 401, (method, path)
+
+
+@pytest.mark.parametrize("ip", ["192.168.1.50", "127.0.0.1"])
+def test_health_check_answers_without_a_token(vaults_root, ip):
+    res = _call("GET", "/healthz", ip)
+    assert res.status_code == 200 and res.json() == {"ok": True}
+    assert _call("POST", "/healthz", ip).status_code == 401
 
 
 def test_bearer_matrix(vaults_root):
@@ -186,13 +221,20 @@ def test_unauthenticated_destructive_calls_never_reach_handlers(vaults_root, mon
     assert registry().get("alpha") is not None
     assert not (vaults_root / "beta").exists()
 
-    # control — 같은 요청이 loopback에서는 실제로 지운다 (테스트가 무력하지 않다)
-    res = _call("DELETE", "/api/vaults/alpha?force=true", "127.0.0.1")
+    # loopback도 토큰 없이는 닿지 않는다 (#67)
+    for method, path, kw in calls:
+        assert _call(method, path, "127.0.0.1", **kw).status_code == 401, (method, path)
+    assert reached == [] and vault_dir.exists()
+
+    # control — 같은 요청이 loopback + 토큰이면 실제로 지운다 (테스트가 무력하지 않다)
+    token = mcp_tokens.add_token("local")
+    res = _call("DELETE", "/api/vaults/alpha?force=true", "127.0.0.1", {"Authorization": f"Bearer {token}"})
     assert res.status_code == 200, res.text
     assert not vault_dir.exists()
 
 
-def test_websocket_scope_is_gated_too(vaults_root):
+@pytest.mark.parametrize("peer", ["192.168.1.50", "127.0.0.1"])
+def test_websocket_scope_is_gated_too(vaults_root, peer):
     from raven.api import app
 
     sent: list[dict] = []
@@ -205,12 +247,12 @@ def test_websocket_scope_is_gated_too(vaults_root):
 
     scope = {
         "type": "websocket", "path": "/ws", "raw_path": b"/ws", "query_string": b"",
-        "headers": [], "client": ("192.168.1.50", 1), "server": ("raven", 80),
+        "headers": [], "client": (peer, 1), "server": ("raven", 80),
         "scheme": "ws", "root_path": "", "subprotocols": [],
         "asgi": {"version": "3.0"},
     }
     asyncio.run(app(scope, receive, send))
-    assert sent and sent[0]["type"] == "websocket.close", sent
+    assert sent and sent[0] == {"type": "websocket.close", "code": 1008}, sent
 
 
 def test_single_gate_implementation_is_shared_with_mcp():
@@ -398,7 +440,11 @@ def _assert_remote_contract(port: int, lan: str, vaults_root: Path) -> None:
 
     token = mcp_tokens.add_token("lan-device")
     assert _http("GET", f"{remote}/api/vaults", {"Authorization": f"Bearer {token}"}) == 200
-    assert _http("GET", f"http://127.0.0.1:{port}/api/vaults") == 200
+    # #67: this PC needs the token too — and gets in with it
+    local = f"http://127.0.0.1:{port}/api/vaults"
+    assert _http("GET", local) == 401
+    assert _http("GET", local, {"Host": "127.0.0.1", "Origin": "http://127.0.0.1:5173"}) == 401
+    assert _http("GET", local, {"Authorization": f"Bearer {token}"}) == 200
 
 
 @pytest.fixture
@@ -455,7 +501,7 @@ def test_real_socket_direct_uvicorn_asgi_is_gated(vaults_root, lan_ip):
 
 
 def test_real_socket_desktop_remote_requires_token_and_keeps_local(vaults_root, lan_ip):
-    """데스크톱 원격 모드: LAN 401, 유효 토큰 200(이중 게이트로 거부 ❌), loopback 200."""
+    """데스크톱 원격 모드: LAN 401, 유효 토큰 200(이중 게이트로 거부 ❌), loopback도 토큰으로 200."""
     import json
     import select
 
@@ -504,12 +550,15 @@ def test_real_socket_desktop_cli_host_beats_raven_host_env(vaults_root, lan_ip):
         # TCP 수준에서 거절돼야 한다 — 401(HTTPError)은 "LAN에 열려 있다"는 뜻이다.
         with pytest.raises(ConnectionRefusedError):
             socket.create_connection((lan_ip, ready["port"]), timeout=2).close()
-        assert _http("GET", f"http://127.0.0.1:{ready['port']}/api/vaults") == 200
+        local = f"http://127.0.0.1:{ready['port']}/api/vaults"
+        assert _http("GET", local) == 401  # #67
+        token = mcp_tokens.add_token("local")
+        assert _http("GET", local, {"Authorization": f"Bearer {token}"}) == 200
     finally:
         _stop(proc)
 
 
-def test_real_socket_tailnet_source_is_trusted(vaults_root):
+def test_real_socket_tailnet_source_needs_a_token(vaults_root):
     from raven.api.main import get_tailscale_ip
 
     ts = get_tailscale_ip()

@@ -39,7 +39,7 @@ from raven.core import network_status
 from raven.core import policy as policy_module
 from raven.core.vault import Vault
 from raven.core import backup as backup_module
-from raven.core.access import TokenGate
+from raven.core.access import TokenGate, route_path
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
 from raven import __version__ as raven_version
@@ -106,13 +106,34 @@ _cors_origin_regex = (
     r"192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
     r"172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$"
 )
-# Issue #14: 접근 게이트는 실행기가 아니라 앱에 붙는다. 데스크톱 런타임 /
+# Paths FastAPI serves outside /api: the API schema and its viewers stay behind the token.
+_API_DOCS_PATHS = frozenset(p for p in (app.docs_url, app.redoc_url, app.openapi_url,
+                                        app.swagger_ui_oauth2_redirect_url) if p)
+
+
+def _is_public_static(scope) -> bool:
+    """The built dashboard's files (Issue #67): pages, JS, CSS, images — no vault data, no token.
+
+    Exact by routing: only GET/HEAD, only when this process serves a dashboard build, and
+    never ``/api``, ``/api/...`` or the API docs. ``scope["path"]`` is the decoded path the
+    router matches on, so ``%2F``/``%61pi`` spellings land on the same side as the route
+    they reach. ``..`` is not normalised by the router; the SPA fallback below keeps every
+    file it serves inside the build. WebSocket upgrades are never public (TokenGate).
+    The path is the one the router matches (``root_path`` stripped, #67 review B1).
+    """
+    if _DASHBOARD_DIST is None or scope.get("method") not in ("GET", "HEAD"):
+        return False
+    path = route_path(scope)
+    return not (path == "/api" or path.startswith("/api/") or path in _API_DOCS_PATHS)
+
+
+# Issue #14 · #67: 접근 게이트는 실행기가 아니라 앱에 붙는다. 데스크톱 런타임 /
 # `python -m raven.api` / `uvicorn raven.api:app` 어느 경로로 띄워도 같은 판정 —
-# loopback 출처만 통과, 그 외(tailnet 포함, #24)는 `raven mcp token add`로 발급한 Bearer 토큰
-# 필수(발급 0개면 전부 401). 경로 예외 없음. 판정 로직은 MCP와 공유한다
-# (`raven/core/access.py`). CORS보다 먼저 add → CORS가 바깥: 브라우저 preflight는
-# CORS가 직접 응답해 핸들러에 닿지 않고, 401 응답에도 CORS 헤더가 붙는다.
-app.add_middleware(TokenGate)
+# 모든 출처(loopback 포함, #67)에 `raven mcp token add`로 발급한 Bearer 토큰(또는 데스크톱 셸의
+# 세션 자격 증명) 필수, 발급 0개면 전부 401. 예외는 `GET /healthz`와 위의 대시보드 정적 파일.
+# 판정 로직은 MCP와 공유한다 (`raven/core/access.py`). CORS보다 먼저 add → CORS가 바깥:
+# 브라우저 preflight는 CORS가 직접 응답해 핸들러에 닿지 않고, 401 응답에도 CORS 헤더가 붙는다.
+app.add_middleware(TokenGate, public=_is_public_static)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -3555,15 +3576,23 @@ if _DASHBOARD_DIST is not None:
     # SPA fallback: any non-API GET that didn't match a route → index.html
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
+        rel = full_path.lstrip("/")
         # Unknown API paths must stay JSON 404s, not silently become index.html
         # (clients probing /api/... would otherwise get 200 + HTML).
-        if full_path == "api" or full_path.startswith("api/"):
+        if rel == "api" or rel.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not Found")
-        # Serve the exact file if it exists (favicon, sw.js, manifest…)
-        candidate = _DASHBOARD_DIST / full_path
-        if full_path and candidate.is_file():
+        # Serve the exact file if it exists (favicon, sw.js, manifest…) — only from inside
+        # the build. These requests need no token (#67), so `..` and absolute spellings
+        # (`//etc/passwd` → full_path "/etc/passwd") must never reach a file outside it.
+        root = _DASHBOARD_DIST.resolve()
+        try:
+            candidate = (root / rel).resolve()
+            servable = bool(rel) and candidate.is_relative_to(root) and candidate.is_file()
+        except (OSError, ValueError):  # e.g. an embedded NUL ("/%00")
+            servable = False
+        if servable:
             return FileResponse(candidate)
-        return FileResponse(_DASHBOARD_DIST / "index.html")
+        return FileResponse(root / "index.html")
 
 
 # ────────────────────────── local helpers ──────────────────────────

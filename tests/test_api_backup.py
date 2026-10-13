@@ -1,4 +1,8 @@
-"""POST /api/backup/export|import — loopback 전용 경로 API 회귀 가드."""
+"""POST /api/backup/export|import — loopback 전용 경로 API 회귀 가드.
+
+Issue #67: every request needs a Bearer token, loopback included. ``local`` below is a
+TestClient, which conftest gives the test session credential (like the desktop webview).
+"""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -67,21 +71,26 @@ def test_ipv4_mapped_ipv6_loopback_allowed(tmp_path, monkeypatch):
 def test_origin_header_checked_on_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("WIKI_VAULTS_DIR", str(tmp_path / "a"))
     Vault.create("alpha", tmp_path / "a" / "alpha")
+    tokenless = TestClient(app, client=("127.0.0.1", 50000), headers={"Authorization": ""})
 
-    def export(origin: str, name: str):
-        return local.post(
+    def export(client, origin: str, name: str):
+        return client.post(
             "/api/backup/export",
             json={"dest_path": str(tmp_path / name)},
             headers={"Origin": origin},
         )
 
-    # Issue #28: a foreign Origin gets no tokenless loopback trust — refused by the gate.
-    assert export("http://evil.example", "e1.zip").status_code == 401
-    assert export("http://192.168.0.5:5173", "e2.zip").status_code == 401
+    # Issue #67: without a token the gate refuses every Origin — loopback, desktop webview included.
+    for i, origin in enumerate(("http://evil.example", "tauri://localhost", "http://localhost:5173")):
+        assert export(tokenless, origin, f"t{i}.zip").status_code == 401, origin
+        assert not (tmp_path / f"t{i}.zip").exists()
+    # With the (session) token, this path-taking endpoint still keeps foreign Origins off (#15).
+    assert export(local, "http://evil.example", "e1.zip").status_code == 403
+    assert export(local, "http://192.168.0.5:5173", "e2.zip").status_code == 403
     assert not (tmp_path / "e1.zip").exists() and not (tmp_path / "e2.zip").exists()
-    assert export("tauri://localhost", "e3.zip").status_code == 200
-    assert export("http://tauri.localhost", "e4.zip").status_code == 200
-    assert export("http://localhost:5173", "e5.zip").status_code == 200
+    assert export(local, "tauri://localhost", "e3.zip").status_code == 200
+    assert export(local, "http://tauri.localhost", "e4.zip").status_code == 200
+    assert export(local, "http://localhost:5173", "e5.zip").status_code == 200
 
 
 def test_relative_path_and_bad_zip_are_400(tmp_path, monkeypatch):

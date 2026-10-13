@@ -23,7 +23,7 @@
  * tokens and screen always refer to one host.
  */
 
-import { authHeaderFor, canonicalBase, clearHostToken, requestAuth } from "./host-auth";
+import { authHeaderFor, canonicalBase, clearHostToken, clearSessionCredential, requestAuth } from "./host-auth";
 
 let apiBase = "";
 
@@ -173,8 +173,9 @@ function handleUnauthorized(res: Response, base: string, auto: boolean): void {
     const next = window.location.pathname + window.location.search;
     window.location.assign(`/__raven/login?next=${encodeURIComponent(next)}`);
   } else if (/^bearer\b/i.test(challenge)) {
-    // The stored token was refused (revoked or wrong): drop it, ask again.
-    if (auto) clearHostToken(base);
+    // The token we attached was refused (revoked or wrong): drop it, ask again.
+    // The desktop credential goes first, so a refused one falls back to the dialog.
+    if (auto && !clearSessionCredential(base)) clearHostToken(base);
     requestAuth(base);
   }
 }

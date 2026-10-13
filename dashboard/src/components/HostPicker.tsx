@@ -386,7 +386,7 @@ export function HostPicker() {
               type="password"
               autoComplete="off"
               placeholder="rvn_... (상대 PC에서 raven mcp token add <이름>)"
-              helper="tailnet·내부망 연결에 필요합니다. 이 창을 닫으면 지워집니다."
+              helper="Raven API 연결에 필요합니다. 이 창을 닫으면 지워집니다."
               value={token}
               onChange={(e) => setToken(e.target.value)}
               style={{ marginTop: 12 }}

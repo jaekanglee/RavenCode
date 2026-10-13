@@ -6,6 +6,8 @@ tags: [security, access, mcp, api]
 
 # 토큰 없는 loopback 통과에 loopback Host·Origin 요구
 
+> ⚠️ **2026-10-13 대체 (#67):** 이 결정은 [[adr-2026-10-13-loopback-token-required]]로 대체됐다. 토큰 없는 loopback 통과 자체가 없어져 Host·Origin 조건도 쓰이지 않는다 — macOS Docker Desktop 컨테이너는 loopback으로 보이고 Host·Origin을 마음대로 쓰므로 이 조건으로 막을 수 없었다. 아래는 역사 기록이다.
+
 **결정**: Core API(`TokenGate`)와 MCP(`LanTokenAuth`)는 토큰 없이 loopback 출처를 통과시킬 때, Host가 loopback 이름이고 Origin이 없거나 이 PC의 페이지일 것을 추가로 요구한다. Bearer 토큰 요청과 원격 출처 판정은 바뀌지 않는다 (Issue #28).
 
 ## 맥락

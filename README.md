@@ -192,7 +192,6 @@ make desktop-release   # 새 버전을 물어 범프·커밋·태그·푸시 →
 | `WIKI_VAULT` | (registry default) | active vault 일시 변경 |
 | `GEMINI_API_KEY` | (없음) | AI 보조 기능(태그 추천·RAG 답변·AI 조언·모순 탐지·초안 생성)의 Gemini 호출 키. 없으면 외부 호출 없이 비-LLM fallback으로 동작한다. **`OPENAI_API_KEY`·`API_KEY`·`GOOGLE_API_KEY`는 Gemini 키로 쓰지 않는다**(#47, 다른 서비스 키가 Google로 전송되던 문제) |
 | `RAVEN_DEBUG_LOG` | (꺼짐) | `1`이면 `POST /api/debug-log`가 대시보드의 브라우저 오류를 `tmp/dashboard-client.log`에 JSON 한 줄씩 기록한다(1 MiB를 넘으면 `.1`로 한 번 회전). 꺼져 있으면 404. 진단할 때만 켠다(#19) |
-| `RAVEN_REQUIRE_LOOPBACK_TOKEN` | (꺼짐) | `1`·`true`·`yes`·`on`(대소문자·앞뒤 공백 무시)이면 Core API와 MCP HTTP가 **loopback 요청에도** Bearer 토큰을 요구한다(강화 모드, #67). 그 밖의 값이나 미설정은 기존 기본값 — 직접 loopback 연결은 토큰 없이 통과 — 그대로다. 아래 "loopback과 Docker Desktop" 참고 |
 
 ```bash
 # 예: 다른 위치 vault 사용
@@ -328,16 +327,16 @@ python -m raven.mcp.cli --transport http --host 127.0.0.1 --port 8766 --mode rea
 - **sandbox 우회**: 일부 MCP 클라이언트는 stdio spawn을 보안상 차단 — HTTP는 영향 없음
 - **lifecycle 단순**: 서버 lifecycle은 운영자가 관리 (직접 띄우거나 launchd/systemd 등록)
 
-### 원격 접근 — 토큰 (v0.7.182+, ⚠️ #26부터 tailnet도 토큰 필요)
+### 접근 토큰 (v0.7.182+, ⚠️ #67부터 같은 PC(loopback)도 토큰 필요)
 
-MCP HTTP 리스너는 **같은 PC(loopback) 직접 연결만** 토큰 없이 받는다. tailnet을 포함한 다른 모든 출처는 vault owner가 발급한 Bearer 토큰이 있어야 한다. 데스크톱 앱(Raven.app), `./raven.sh start`, team launchd 인스턴스, Docker `mcp-http`가 모두 같은 게이트(`raven/mcp/auth.py::LanTokenAuth`)를 쓴다. 인증을 끄는 옵션은 없다.
+MCP HTTP 리스너는 **모든 출처**에 vault owner가 발급한 Bearer 토큰을 요구한다 — 같은 PC(loopback)도 예외가 아니다(#67). 데스크톱 앱(Raven.app), `./raven.sh start`, team launchd 인스턴스, Docker `mcp-http`가 모두 같은 게이트(`raven/mcp/auth.py::LanTokenAuth`)를 쓴다. 인증을 끄는 옵션은 없다.
 
 | 출처 (소켓 주소) | 처리 |
 |---|---|
-| loopback `127.0.0.0/8`, `::1` | 토큰 없이 통과 |
-| tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), 내부망, Docker 게이트웨이·CGNAT, 그 외 | `Authorization: Bearer <token>`이 맞아야 통과, 아니면 401 (`WWW-Authenticate: Bearer realm="raven-mcp"`). 발급된 토큰이 없으면 전부 401 |
+| loopback `127.0.0.0/8`, `::1`, tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), 내부망, Docker 게이트웨이·CGNAT, 그 외 | `Authorization: Bearer <token>`이 맞아야 통과, 아니면 401 (`WWW-Authenticate: Bearer realm="raven-mcp"`). 발급된 토큰이 없으면 전부 401 |
+| `GET /healthz` | 토큰 없이 `{"ok":true}` (고정 본문, MCP 앱에 닿지 않음 — healthcheck용) |
 
-`initialize`, `tools/list`, `tools/call`, GET 스트림, 세션 DELETE 모두 게이트를 먼저 지난다. 출처는 소켓 주소로 본다. X-Forwarded-For·Host·Origin을 위조해도 통과하지 못한다(Core API와 같은 프록시 정책). 토큰 없는 loopback 요청은 Host가 loopback 이름이고 Origin이 없거나 이 PC의 페이지일 때만 통과한다(#28 — 아래 Core API 항목). stdio 전송은 네트워크 리스너가 아니라 해당하지 않는다.
+`initialize`, `tools/list`, `tools/call`, GET 스트림, 세션 DELETE 모두 게이트를 먼저 지난다. X-Forwarded-For·Host·Origin을 어떻게 쓰든 토큰 없이는 통과하지 못한다. 잘못되거나 회수된 토큰, URL query의 토큰도 401이다. stdio 전송은 네트워크 리스너가 아니라 해당하지 않는다.
 
 ```bash
 raven mcp token add 민수-노트북    # 토큰은 지금 한 번만 출력 (파일엔 해시만)
@@ -351,7 +350,7 @@ raven mcp token revoke 민수-노트북 # 재시작 없이 즉시 401
 ```json
 { "mcpServers": { "raven": {
   "type": "http",
-  "url": "http://<호스트 tailnet 또는 내부망 IP>:8766/mcp",
+  "url": "http://<호스트 — 같은 PC면 127.0.0.1, 아니면 tailnet·내부망 IP>:8766/mcp",
   "headers": { "Authorization": "Bearer rvn_..." }
 } } }
 ```
@@ -361,11 +360,12 @@ raven mcp token revoke 민수-노트북 # 재시작 없이 즉시 401
 claude mcp add --transport http raven http://<호스트>:8766/mcp --header "Authorization: Bearer rvn_..."
 ```
 
-- **⚠️ Breaking change (#26)**: 이전에는 tailnet 기기, team 인스턴스(`0.0.0.0:8767`), Docker `mcp-http`, `./raven.sh start` MCP를 비-loopback 주소로 연 경우 토큰 없이 붙을 수 있었다. 이제는 모두 401이다. 호스트 PC에서 사람이나 기기마다 토큰을 발급해 위 설정에 넣는다. 같은 PC의 에이전트(`http://127.0.0.1:8766/mcp`)는 바꿀 것이 없다.
+- **⚠️ Breaking change (#67) — 같은 PC의 MCP 클라이언트도 토큰 필요**: 이전에는 `http://127.0.0.1:8766/mcp`·`http://localhost:8766/mcp`로 붙는 같은 PC의 에이전트가 토큰 없이 받아졌다. macOS Docker Desktop의 컨테이너가 `host.docker.internal`로 붙으면 서버에는 같은 PC(127.0.0.1)로 보이고 Host 헤더도 컨테이너가 정하므로, 같은 PC의 컨테이너가 토큰 없이 admin MCP를 쓸 수 있었다. 이제 같은 PC의 클라이언트도 위처럼 `headers`에 토큰을 넣는다(`raven mcp token add <이름>`). 데스크톱 앱 webview는 셸이 자동으로 인증한다(아래 Core API 항목).
+- **⚠️ Breaking change (#26)**: 이전에는 tailnet 기기, team 인스턴스(`0.0.0.0:8767`), Docker `mcp-http`, `./raven.sh start` MCP를 비-loopback 주소로 연 경우 토큰 없이 붙을 수 있었다. 이제는 모두 401이다. 호스트 PC에서 사람이나 기기마다 토큰을 발급해 위 설정에 넣는다.
 - **증상과 복구**: 클라이언트가 연결 실패를 보고한다. MCP Python SDK 2.x는 401을 상태 코드 없이 `initialize` 실패(`MCPError -32603 "Server returned an error response"`)로 보여준다. `curl -i -X POST http://<호스트>:8766/mcp`가 `401`과 `WWW-Authenticate: Bearer realm="raven-mcp"`를 주면 토큰이 없거나 틀린 것이다. `raven mcp token list`로 이름을 확인하고, 잃어버렸으면 `revoke` 후 다시 `add`한다. 헤더를 넣은 뒤 다시 연결하면 된다(서버 재시작 불필요).
 - 데스크톱 앱은 API가 `0.0.0.0`일 때 MCP도 `0.0.0.0`에 바인딩한다. 좁히려면 `RAVEN_MCP_HOST=<주소>`를 쓰고, 끄려면 `RAVEN_DESKTOP_MCP=0`, 읽기 전용으로 두려면 `RAVEN_DESKTOP_MCP_MODE=read`를 쓴다. Core API도 같은 판정과 같은 토큰을 쓴다(아래 "라이선스 / 상태"의 Core API 접근 게이트).
 - 평문 HTTP라 같은 망에서 트래픽을 엿보면 토큰이 보인다(tailnet 구간은 WireGuard로 암호화된다). 신뢰할 수 있는 망에서만 쓰고, 유출이 의심되면 revoke한다.
-- 근거: [`_meta/decisions/adr-2026-10-09-mcp-remote-token.md`](_meta/decisions/adr-2026-10-09-mcp-remote-token.md) (ADR 2026-09-30을 대체)
+- 근거: [`_meta/decisions/adr-2026-10-13-loopback-token-required.md`](_meta/decisions/adr-2026-10-13-loopback-token-required.md) (#67), [`_meta/decisions/adr-2026-10-09-mcp-remote-token.md`](_meta/decisions/adr-2026-10-09-mcp-remote-token.md) (ADR 2026-09-30을 대체)
 
 ### 권한 모드 3종 (서버 시작 시 argv로 고정)
 
@@ -638,24 +638,24 @@ cd dashboard && npm install
 - v0.7.179 (REST 관례 정리 + 에러 envelope 분류 + link 스캔 중복 제거)
 - v0.7.178 (동시 편집 precondition + 열화 정직화 + 선언-실제 재정합)
 - **전제 = 신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)**. auth/ACL은 여전히 non-goal이므로, 이 API에 도달할 수 있는 사람은 vault를 읽고 쓰고 지울 수 있다 — tailnet을 남과 공유하지 말 것.
-- **⚠️ Breaking change (Issue #24) — tailnet도 토큰 필요**: Core API는 이제 **같은 PC(loopback) 직접 연결만** 토큰 없이 받는다. tailnet을 포함한 다른 모든 출처는 Bearer 토큰이 필요하다. MCP도 #26부터 같은 정책이다(아래 "MCP"). 결정: [`_meta/decisions/adr-2026-10-08-core-api-tailnet-token.md`](_meta/decisions/adr-2026-10-08-core-api-tailnet-token.md).
+- **⚠️ Breaking change (Issue #67) — 같은 PC(loopback)도 토큰 필요**: Core API와 MCP는 이제 **모든 출처**에 Bearer 토큰을 요구한다. 이전에는 같은 PC의 직접 연결이 토큰 없이 받아졌는데(#28부터는 loopback Host·Origin일 때만), macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스트 loopback으로 넘기고 Host·Origin은 컨테이너가 정하므로, 같은 PC의 아무 컨테이너나 토큰 없이 vault를 읽고 쓰고 admin MCP를 쓸 수 있었다. 결정: [`_meta/decisions/adr-2026-10-13-loopback-token-required.md`](_meta/decisions/adr-2026-10-13-loopback-token-required.md). 인증을 끄는 설정은 없다(#69의 `RAVEN_REQUIRE_LOOPBACK_TOKEN`은 이제 기본 동작이라 없어졌다 — 설정해 두어도 아무 효과가 없다).
+  - **데스크톱 앱**: 바꿀 것이 없다. 셸이 앱을 켤 때마다 자격 증명을 하나 만들어 Core(stdin)와 자기 webview(Tauri IPC)에만 준다. webview는 그것을 메모리에만 두고 자기 Core에만 보낸다. Core 재시작·포트 이동 뒤에도 그대로 쓴다. 이 자격 증명은 Core API 전용이고 같은 PC 출처에서만 받는다 — MCP나 다른 PC에서는 401이다.
+  - **vite 개발 대시보드** (`./raven.sh start`): 같은 PC에서 열어도 첫 요청의 401에서 토큰 입력창이 뜬다. `raven mcp token add <이름>`으로 만든 토큰을 넣는다(탭을 닫으면 지워짐). vite 프록시는 토큰을 대신 붙이지 않는다 — 붙이면 vite에 닿는 누구나(같은 PC의 컨테이너 포함) 인증된 셈이 된다.
+  - **같은 PC의 MCP 클라이언트**: `http://127.0.0.1:8766/mcp`도 `headers`에 토큰을 넣는다(위 "에이전트 인터페이스 (MCP) → 접근 토큰").
+  - **스크립트**: `/api`를 부르는 스크립트는 `Authorization: Bearer <token>` 헤더를 보낸다. `scripts/smoke-desktop.sh`는 `RAVEN_SMOKE_TOKEN`을 받는다. 살아 있는지만 보려면 토큰 없는 `GET /healthz`(본문 `{"ok":true}` 고정)를 쓴다 — `scripts/restart-all.sh`와 Docker compose healthcheck가 그렇게 한다.
+  - **Core가 서빙하는 대시보드 정적 파일**(`dashboard/dist`: HTML·JS·CSS·이미지·SPA 경로)은 토큰 없이 열린다(vault 데이터 없음). `/api`, `/api/...`, API 문서(`/docs`, `/redoc`, `/openapi.json`)는 토큰이 필요하다. 정적 파일은 빌드 폴더 밖으로 나가지 않는다(`..`·절대 경로 차단).
+- **⚠️ Breaking change (Issue #24) — tailnet도 토큰 필요**: tailnet을 포함한 다른 PC의 출처는 #24(Core API)·#26(MCP)부터 토큰이 필요했다. 결정: [`_meta/decisions/adr-2026-10-08-core-api-tailnet-token.md`](_meta/decisions/adr-2026-10-08-core-api-tailnet-token.md).
   - **토큰 발급** (API가 도는 PC에서): `raven mcp token add <이름>` — 평문은 한 번만 출력된다. Docker는 `docker compose exec api python -m raven.cli mcp token add <이름>`.
-  - **마이그레이션**: 대시보드 멀티호스트는 호스트 추가 화면의 **접근 토큰** 칸에 입력하거나, 401이 뜨면 열리는 토큰 입력창에 넣는다(창을 닫으면 지워짐 — sessionStorage). 모바일 앱은 설정의 API Key에, 스크립트·MCP 외 HTTP 클라이언트는 `Authorization: Bearer <token>` 헤더에 넣는다. API가 직접 서빙하는 대시보드(`http://<tailnet-IP>:8765/`)는 원격 브라우저로 열리지 않는다(HTML부터 401, 의도된 변경이고 인증 예외 없음). 대신 다음 중 하나를 쓴다.
+  - **마이그레이션**: 대시보드 멀티호스트는 호스트 추가 화면의 **접근 토큰** 칸에 입력하거나, 401이 뜨면 열리는 토큰 입력창에 넣는다(창을 닫으면 지워짐 — sessionStorage). 모바일 앱은 설정의 API Key에, 스크립트·MCP 외 HTTP 클라이언트는 `Authorization: Bearer <token>` 헤더에 넣는다. API가 직접 서빙하는 대시보드(`http://<tailnet-IP>:8765/`)는 페이지는 열리지만(#67부터 정적 파일은 토큰 없음) API 요청은 토큰이 필요하다. 다음 중 하나를 쓴다.
     - **데스크톱 앱 멀티호스트**: 사이드바 호스트 선택 → 호스트 추가 → `http://<tailnet-IP>:8765`와 토큰 입력
     - **Docker 대시보드**: `http://<호스트>:5173` 로그인 화면에 토큰을 한 번 입력
     - **vite 개발 대시보드** (`./raven.sh start`, 개발용): `http://<호스트>:5173`에서 401이 뜨면 토큰 입력창에 넣는다
   - **진단**: 응답이 `401`이고 `WWW-Authenticate: Bearer realm="raven"`이면 토큰이 없거나 틀린 것이다 — `raven mcp token list`로 이름을 확인하고, 잃어버렸으면 `revoke` 후 다시 `add`. `curl -H "Authorization: Bearer <token>" http://<host>:8765/api/vaults`로 확인한다. 대시보드는 거절된 저장 토큰을 지우고 다시 묻는다. 브라우저가 저장을 거부하면(사생활 보호 모드 등) 성공으로 표시하지 않는다.
   - **대시보드 토큰 경계**: 저장된 토큰은 `/api/*` 요청에만, 요청이 실제로 가는 origin(스킴·호스트·포트가 정확히 같은 곳)의 것만 붙는다. `fetch(Request)`도 같다. 자동으로 붙인 토큰이 실린 요청은 **redirect를 따라가지 않는다**(`redirect: "error"`) — Core API는 `/api` 응답에서 redirect하지 않으므로, redirect가 오면 연결 오류로 보인다. 엔드포인트를 HTTPS로 redirect하는 프록시 뒤에 두었다면 호스트 주소를 처음부터 `https://`로 넣는다. Docker 대시보드에서 세션의 토큰이 폐기되면 토큰 입력창이 아니라 로그인 화면으로 돌아간다.
-  - **MCP**: #26부터 MCP HTTP도 loopback만 토큰 없이 받는다. 데스크톱 앱, `./raven.sh start`, team 인스턴스, Docker `mcp-http` 모두 같다. #24 시점에는 데스크톱 원격 모드에서 tailnet 기기가 토큰 없이 MCP `wiki_delete`를 호출할 수 있었고, standalone `raven.mcp.cli`에는 게이트가 없었다. 설정 방법은 위 "에이전트 인터페이스 (MCP) → 원격 접근 — 토큰"에 있다.
-- **Core API 접근 게이트 (Issue #14)** — 게이트는 실행기가 아니라 앱(`raven.api.app`)에 붙어 있어, 데스크톱 앱 · `python -m raven.api` · `uvicorn raven.api:app` 어느 경로든 판정이 같다 (`raven/core/access.py`, MCP와 같은 구현):
-  - loopback 출처 → 통과. tailnet 출처 → **토큰 필수** (Core API #24, MCP #26). 아래 라우트 판정은 코드에 남아 있지만, 어느 게이트도 이 판정으로 토큰을 면제하지 않는다 — 판정 내용: 주소가 `100.64.0.0/10`·`fd7a:115c:a1e0::/48` 안에 있고, 그 주소로 가는 응답이 이 기기의 Tailscale 주소(`tailscale ip`)에서 나가야 한다. 대역 소속만으로는 신뢰하지 않는다 — CGNAT은 통신사 LAN·다른 VPN·Docker 망도 쓴다. Tailscale CLI/daemon이 없거나(Docker 컨테이너 포함) 라우트가 다른 인터페이스로 나가면 토큰이 필요하다. 본인 tailnet = 신뢰 네트워크라는 위 전제를 따른다 — **이렇게 판정된 tailnet 기기는 vault를 읽고 쓰고 지울 수 있다.** 이 판정은 요청 시점의 송신 라우트를 보는 추론이다. 수락된 연결의 WireGuard 인증을 직접 증명하지 않으며, 비대칭·정책 라우팅 등 라우팅을 바꿀 수 있는 쪽에는 맞지 않는다 — Core API는 #24, MCP는 #26으로 이 신뢰를 걷어냈다.
-  - 그 외 출처(LAN, Docker 게이트웨이 등) → `raven mcp token add`로 발급한 `Authorization: Bearer <token>` 필수. 발급 0개면 전부 401. health 등 예외 경로 없음.
-  - **loopback과 Docker Desktop (#67)**: macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스트 loopback으로 넘긴다. Core·MCP에는 그 연결이 `127.0.0.1`에서 온 것으로 보이고, 컨테이너가 `Host: 127.0.0.1:<port>`를 보내면 아래의 토큰 없는 loopback 통과를 받는다. 기본값에서는 같은 PC의 컨테이너가 loopback 프로세스와 같이 취급된다는 뜻이다. `RAVEN_REQUIRE_LOOPBACK_TOKEN=1`(강화 모드)을 Core·MCP **프로세스 환경**에 주고 재시작하면 loopback을 포함한 모든 요청에 Bearer가 필요하다:
-    - `./raven.sh`는 `.env`를 읽으므로 거기에 적으면 API·MCP 둘 다 적용된다. Finder·Dock으로 연 Raven.app은 셸 환경을 물려받지 않아 적용되지 않는다(`launchctl setenv`로 넣거나 터미널에서 실행해야 한다).
-    - 대시보드(vite·데스크톱)는 첫 요청의 401에서 토큰 입력 창을 띄운다. 토큰은 탭의 sessionStorage에만 있어 앱·창을 열 때마다 다시 입력해야 한다.
-    - Docker compose의 healthcheck(`curl /api/vaults`, `/mcp`)는 토큰을 보내지 않는다 — 컨테이너 안에서 강화 모드를 켜면 API healthcheck는 실패하고, MCP healthcheck는 401도 성공으로 친다.
-    - 강화 모드는 opt-in이라 기본 설치의 #67 경로는 그대로 열려 있다.
-  - 출처는 소켓 주소로 판단한다. Host/Origin으로 출처를 정하지는 않는다. 다만 **토큰 없는 loopback 통과**에는 Host가 loopback 이름(`127.0.0.1`·`localhost`·`[::1]`, 포트 무관)이고 Origin이 없거나 loopback 페이지·데스크톱 webview(`tauri://localhost`, `http(s)://tauri.localhost`)여야 한다(#28). 브라우저가 다른 사이트를 위해 보내는 loopback 요청 — 다른 origin의 페이지, 이름이 127.0.0.1로 해석되게 만든 사이트(DNS rebinding) — 은 토큰이 필요하다. Origin 없이 `Sec-Fetch-Site: cross-site`·`same-site`로 오는 로드(다른 사이트의 `<img>`·링크 등)도 같다 — 다만 다른 사이트의 링크로 Core가 서빙하는 대시보드 페이지(`/api` 밖)를 여는 것은 허용한다(데이터 없음). CLI·스크립트·로컬 MCP 클라이언트(`http://127.0.0.1:8766/mcp`, `http://localhost:8766/mcp`)와 대시보드(vite·데스크톱)는 그대로다. Android 에뮬레이터(`10.0.2.2`)나 기기 이름·`0.0.0.0`으로 접속하는 로컬 클라이언트는 이제 토큰이 필요하다. Bearer 토큰 요청은 Host/Origin과 무관하다. 프록시 헤더(X-Forwarded-For/Forwarded/X-Real-IP와 True-Client-IP 등 출처 헤더 — 목록은 `raven/core/access.py::_FORWARDING_HEADERS`)가 붙은 요청은 `uvicorn raven.api:app` 직접 실행에서는 출처 신뢰를 받지 못하고(토큰 필수 — `--forwarded-allow-ips '*'`여도 사칭 불가), Raven 실행기(`python -m raven.api`, 데스크톱)에서는 이 기기의 프록시(예: vite `xfwd`)가 붙인 X-Forwarded-For만 해석한다. X-Forwarded-For와 함께 다른 출처 헤더(Forwarded, X-Real-IP, True-Client-IP 등)가 오면 출처를 알 수 없는 것으로 보고 토큰을 요구한다(#29 — 클라이언트의 XFF를 그대로 넘기고 실제 주소는 X-Real-IP에만 쓰는 프록시로 loopback을 사칭하던 경로). **이 기기에서 도는 프록시가 X-Forwarded-For 없이 API를 LAN에 중계하면, 그 요청은 직접 loopback 접속과 구분할 수 없어 인증 없이 통과한다** — 지원하는 프록시(대시보드 vite `xfwd: true`, Docker `spa_server`, 문서의 Caddy → dashboard)는 모두 XFF를 붙이거나 자체 로그인을 요구한다. 그 밖의 프록시(socat, nginx 기본 설정 등)로 API를 노출하는 구성은 공식 지원하지 않는다 — loopback 프로세스 신뢰와 함께 승인된 잔여 위험이다.
+- **Core API 접근 게이트 (Issue #14 · #67)** — 게이트는 실행기가 아니라 앱(`raven.api.app`)에 붙어 있어, 데스크톱 앱 · `python -m raven.api` · `uvicorn raven.api:app` 어느 경로든 판정이 같다 (`raven/core/access.py`, MCP와 같은 구현):
+  - 모든 출처 → `raven mcp token add`로 발급한 `Authorization: Bearer <token>` 필수(Core API는 데스크톱 셸의 세션 자격 증명도 같은 PC 출처에서만 받는다). 발급 0개면 전부 401. 예외는 `GET /healthz`와 대시보드 정적 파일뿐이다. Host·Origin·출처 주소로 토큰을 면제하지 않는다. tailnet 라우트 판정(`is_tailnet_peer`)은 코드에 남아 있지만 토큰 면제에 쓰지 않는다.
+  - 출처(소켓 주소, 이 기기의 프록시가 붙인 X-Forwarded-For)는 판정이 아니라 #15의 **이 PC 전용 API**(경로를 받거나 vault를 지우는 API — 유효한 토큰이 있어도 다른 PC에서는 403)와 401 안내 문구에만 쓴다. 프록시 헤더(X-Forwarded-For/Forwarded/X-Real-IP와 True-Client-IP 등 출처 헤더 — 목록은 `raven/core/access.py::_FORWARDING_HEADERS`)가 붙은 요청은 `uvicorn raven.api:app` 직접 실행에서는 출처를 알 수 없는 것으로 보고, Raven 실행기(`python -m raven.api`, 데스크톱)에서는 이 기기의 프록시(예: vite `xfwd`)가 붙인 X-Forwarded-For만 해석한다. X-Forwarded-For와 함께 다른 출처 헤더가 오면 출처를 알 수 없는 것으로 본다(#29). **이 기기에서 도는 프록시가 X-Forwarded-For 없이 API를 LAN에 중계하면 그 요청은 같은 PC로 보여 이 PC 전용 API가 열린다**(토큰은 여전히 필요) — 지원하는 프록시(대시보드 vite `xfwd: true`, Docker `spa_server`, 문서의 Caddy → dashboard)는 모두 XFF를 붙이거나 자체 로그인을 요구한다.
+  - **남는 위험**: macOS Docker Desktop의 컨테이너는 같은 PC로 보이므로, **토큰을 가진** 컨테이너는 이 PC 전용 API도 쓸 수 있다. 토큰 없이는 아무것도 못 한다.
 - **bind** — 기본은 loopback. 비루프백·와일드카드는 `RAVEN_ALLOW_REMOTE=1`(또는 `--host tailscale`)일 때만. opt-in 없이 `python -m raven.api --host 0.0.0.0` / `RAVEN_HOST=0.0.0.0`을 주면 **exit 2로 거부**, 데스크톱 앱은 창이 안 뜨는 일이 없게 loopback으로 낮춘다. 우선순위는 `--host` > `RAVEN_HOST`. Docker `api` 서비스는 compose가 `RAVEN_ALLOW_REMOTE=1`을 명시해 컨테이너 안 `0.0.0.0`에 바인딩한다. 컨테이너에서는 호스트·dashboard·같은 망의 다른 컨테이너가 모두 bridge IP로 보이므로 **Docker 대역은 신뢰하지 않고 전부 토큰을 요구**한다 — `docker compose exec api python -m raven.cli mcp token add <이름>`으로 발급하고, 브라우저는 dashboard(`:5173`)의 로그인 화면에 한 번 입력한다. 쿠키에는 API 토큰이 아니라 메모리 세션 id만 담긴다(HttpOnly·SameSite=Strict, 로그아웃·토큰 revoke·재시작 시 즉시 무효, 쿠키로 인증된 쓰기 요청은 같은 Origin만). TLS 뒤에 두면 `RAVEN_DASHBOARD_SECURE_COOKIE=1`로 Secure를 붙인다 — 평문 HTTP로 tailnet 밖에 열면 세션 쿠키가 노출된다. 실제 태세는 `GET /api/system/info`의 `bind_host`로 확인.
 - 동시 편집은 precondition 토큰으로 lost update를 거부한다 (v0.7.178). 자동 merge는 non-goal.
 - 멀티 에이전트 write는 **experimental** (scope 명시 + 동시성 사용자 책임)

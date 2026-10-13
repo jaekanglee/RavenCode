@@ -27,11 +27,10 @@ case "$1" in
         exec python -m raven.api --host "$HOST" --port "$PORT_API"
         ;;
     mcp-http)
-        # Issue #26: 인증 게이트(raven.mcp.auth.LanTokenAuth) 뒤에서 뜬다. 컨테이너에서는
-        #   포트 매핑을 거친 클라이언트가 게이트웨이 IP로 보이므로 컨테이너 밖에서 오는
-        #   요청은 모두 Bearer 토큰이 필요하다 (docker compose exec api python -m raven.cli
-        #   mcp token add <이름>). 컨테이너 안 loopback(healthcheck)만 토큰 없이 통과.
-        #   인증을 끄는 옵션은 없다.
+        # Issue #26 · #67: 인증 게이트(raven.mcp.auth.LanTokenAuth) 뒤에서 뜬다. 모든 요청 —
+        #   컨테이너 안 loopback 포함 — 에 Bearer 토큰이 필요하다 (docker compose exec api
+        #   python -m raven.cli mcp token add <이름>). 예외는 healthcheck용 `GET /healthz`
+        #   (고정 본문)뿐이다. 인증을 끄는 옵션은 없다.
         #
         # uvicorn 옵션은 cli.py가 내부에서 정한다 — Core API와 같은 serve_kwargs()
         #   (proxy_headers=False, X-Forwarded-For는 loopback 프록시가 보낸 것만 게이트가 해석).

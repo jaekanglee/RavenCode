@@ -20,7 +20,10 @@ Contract:
      bridge) → token.
   4. The XFF-derived source of a local proxy is checked the same way (same host,
      same routing table as the proxy that saw the peer).
-  5. Loopback trust is unchanged and needs no Tailscale.
+  5. Loopback needs no Tailscale — and, since Issue #67, gets no tokenless pass either.
+
+The route check only classifies the source; no gate lets it stand in for a token
+(Core API since #24, MCP since #26).
 """
 from __future__ import annotations
 
@@ -96,7 +99,9 @@ def test_no_tailscale_means_no_tailnet_trust(vaults_root, monkeypatch, self_ips)
     # Even when the route source happens to be a 100.x address (a CGNAT LAN).
     _routes(monkeypatch, self_ips, lambda ip: "100.64.200.1")
     assert _call("100.64.200.3").status_code == 401
-    assert _call("127.0.0.1").status_code == 200  # loopback needs no Tailscale
+    # loopback needs no Tailscale: it is classified as loopback, and needs a token like everyone (#67)
+    assert access.is_loopback_client(access.effective_client({"client": ("127.0.0.1", 1), "headers": []}))
+    assert _call("127.0.0.1").status_code == 401
 
 
 def test_route_lookup_failure_is_fail_closed(vaults_root, monkeypatch):

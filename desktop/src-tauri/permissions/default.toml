@@ -1,11 +1,16 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file", "allow-app-version"]
+permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file", "allow-app-version"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
 description = "Allow invoking the core_endpoint command."
 commands.allow = ["core_endpoint"]
+
+[[permission]]
+identifier = "allow-core-session-token"
+description = "Allow invoking the core_session_token command (Issue #67: the webview's Core API credential)."
+commands.allow = ["core_session_token"]
 
 [[permission]]
 identifier = "allow-mcp-endpoint"

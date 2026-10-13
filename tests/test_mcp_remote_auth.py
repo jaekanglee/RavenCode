@@ -1,4 +1,4 @@
-"""Issue #26 — every non-loopback MCP HTTP request needs a Bearer token, tailnet included.
+"""Issue #26 — every MCP HTTP request needs a Bearer token, tailnet included (and loopback since #67).
 
 Before #26 the desktop MCP gate (`LanTokenAuth`) let route-judged tailnet peers in
 without a token, and standalone `raven.mcp.cli` (`./raven.sh start`, the team
@@ -6,7 +6,8 @@ launchd instance, Docker `mcp-http`) had no gate at all and served uvicorn with
 `forwarded_allow_ips="*"` + `proxy_headers=True` (any client could claim any address).
 
 Contract (all MCP HTTP listeners — desktop runtime, standalone, team, Docker):
-  1. direct loopback → no token.
+  1. direct loopback → needs a token too since Issue #67 (macOS Docker Desktop's
+     host.docker.internal arrives as loopback); a valid one works like from anywhere.
   2. any other source — tailnet IPv4/IPv6 included, LAN, Docker/CGNAT — needs a valid
      `Authorization: Bearer` from `raven mcp token add`; missing/invalid → 401 before
      the MCP app runs: initialize, tools/list, tools/call, GET stream, DELETE session.
@@ -103,7 +104,7 @@ def test_both_launchers_wrap_the_mcp_app_in_the_gate(vault, launcher):
 
     app = _apps()[launcher]
     assert isinstance(app, LanTokenAuth), launcher
-    assert app.trust_tailnet is False
+    assert app.accept_session_token is False  # agents use issued tokens; the webview credential is Core-only
 
 
 @pytest.mark.parametrize("launcher", ["desktop", "standalone"])
@@ -299,9 +300,11 @@ def test_real_socket_lan_needs_a_token(vault, kind):
     proc, port = _launch(kind, vault)
     try:
         _remote_contract(f"http://{lan}:{port}/mcp", vault)
-        names, _ = _sdk_run(f"http://127.0.0.1:{port}/mcp")  # loopback: no token
-        assert "wiki_search" in names
+        # loopback gets the same contract since #67 — no token, no MCP
+        _remote_contract(f"http://127.0.0.1:{port}/mcp", vault)
         token = mcp_tokens.add_token(f"lan-{kind}")
+        names, _ = _sdk_run(f"http://127.0.0.1:{port}/mcp", token)
+        assert "wiki_search" in names
         # after the failure, a client that adds the header reconnects fine
         names, _ = _sdk_run(f"http://{lan}:{port}/mcp", token)
         assert "wiki_search" in names

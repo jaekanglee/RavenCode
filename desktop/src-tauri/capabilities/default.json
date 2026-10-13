@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "allow-core-endpoint",
+    "allow-core-session-token",
     "allow-mcp-endpoint",
     "allow-core-status",
     "allow-restart-core",

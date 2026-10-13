@@ -72,8 +72,30 @@ export function clearHostToken(base: string): void {
   }
 }
 
-/** `Bearer <token>` for a host, or null. */
+// Issue #67: the desktop shell's credential for its own Core (Tauri IPC
+// `core_session_token`). Memory only — never storage, a URL or a log — and only for
+// that one base, so it is never sent to another host the user registered.
+let sessionCredential: { base: string; token: string } | null = null;
+
+export function setSessionCredential(base: string, token: string): void {
+  const value = token.trim();
+  sessionCredential = value ? { base: canonicalBase(base), token: value } : null;
+}
+
+/** Drops the desktop credential (e.g. the Core refused it) so the token dialog can take over. */
+export function clearSessionCredential(base: string): boolean {
+  if (sessionCredential && sessionCredential.base === canonicalBase(base)) {
+    sessionCredential = null;
+    return true;
+  }
+  return false;
+}
+
+/** `Bearer <token>` for a host, or null: the desktop credential for its own Core, else the stored token. */
 export function authHeaderFor(base: string): string | null {
+  if (sessionCredential && sessionCredential.base === canonicalBase(base)) {
+    return `Bearer ${sessionCredential.token}`;
+  }
   const token = getHostToken(base);
   return token ? `Bearer ${token}` : null;
 }

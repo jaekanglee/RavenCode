@@ -1,6 +1,9 @@
 """Forwarded-header trust (PR #21 re-review P0).
 
-The access gate trusts loopback/tailnet *sources*. uvicorn's ProxyHeadersMiddleware
+The access gate decides the request's *source* (used for this-PC-only endpoints, #15,
+and the 401 text). Since Issue #67 no source skips the Bearer token, loopback included,
+so a spoofed source can no longer skip authentication — but it must still never pass
+for "this PC". uvicorn's ProxyHeadersMiddleware
 rewrites ``scope["client"]`` from ``X-Forwarded-For`` *before* the app runs whenever
 the peer matches ``forwarded_allow_ips`` (``--forwarded-allow-ips`` /
 ``FORWARDED_ALLOW_IPS``). With ``'*'`` a LAN host could send
@@ -9,7 +12,7 @@ the peer matches ``forwarded_allow_ips`` (``--forwarded-allow-ips`` /
 Contract:
   1. **Strict mode** (default — any server the gate did not configure itself, e.g.
      ``uvicorn raven.api:app``): a request carrying ``X-Forwarded-For`` /
-     ``Forwarded`` / ``X-Real-IP`` gets no source-based trust at all → token required.
+     ``Forwarded`` / ``X-Real-IP`` has an unknown source → never "this PC".
      uvicorn only rewrites the client when that header is present, so whatever
      ``forwarded_allow_ips`` says, a rewritten client can never be trusted.
   2. **Launcher mode** (``python -m raven.api``, desktop runtime — they run uvicorn
@@ -18,7 +21,7 @@ Contract:
      on this machine, e.g. the vite dev server with ``xfwd``). It walks the list from
      the right, skipping loopback hops; the first other entry is the source. A
      non-loopback peer's forwarding headers grant nothing. ``FORWARDED_ALLOW_IPS`` is
-     ignored.
+     ignored. Every request still needs a token (#67).
   3. Downstream handlers see the gate's effective source in ``request.client`` (so
      ``_require_loopback`` cannot be fooled either); an unknown source becomes
      ``"unknown"``.
@@ -97,7 +100,9 @@ def test_strict_mode_forwarding_headers_need_a_token(vaults_root, strict_mode, p
 
 
 def test_strict_mode_without_forwarding_headers_is_unchanged(vaults_root, strict_mode):
-    assert _call("GET", "/api/vaults", "127.0.0.1").status_code == 200
+    assert _call("GET", "/api/vaults", "127.0.0.1").status_code == 401  # #67: loopback needs a token too
+    token = mcp_tokens.add_token("t")
+    assert _call("GET", "/api/vaults", "127.0.0.1", {"Authorization": f"Bearer {token}"}).status_code == 200
     assert _call("GET", "/api/vaults", "100.100.1.2").status_code == 401  # #24: tailnet needs a token
     assert _call("GET", "/api/vaults", "192.168.1.50").status_code == 401
 
@@ -115,27 +120,31 @@ def test_strict_mode_token_still_works_but_handlers_see_unknown_source(vaults_ro
 
 
 @pytest.mark.parametrize(
-    "xff, expected",
+    "xff, this_pc",
     [
-        ("127.0.0.1", 200),                         # local browser via local proxy
-        ("::ffff:127.0.0.1", 200),                  # node reports v4-mapped
-        ("100.101.1.2", 401),                       # tailnet browser via local proxy (#24: token)
-        ("fd7a:115c:a1e0::9", 401),
-        ("192.168.1.50", 401),                      # LAN browser via local proxy
-        ("127.0.0.1, 192.168.1.50", 401),           # LAN spoofs loopback, proxy appends real IP
-        ("100.101.1.2, 192.168.1.50", 401),         # LAN spoofs tailnet
-        ("192.168.1.50, 127.0.0.1", 401),           # two local hops; real client is LAN
-        ("192.168.1.50,127.0.0.1,127.0.0.1", 401),
-        ("127.0.0.1, 127.0.0.1", 200),
-        ("garbage", 401),
-        ("127.0.0.1, garbage", 401),
-        ("", 401),
-        ("192.168.1.50:5555", 401),
-        ("[::1]:5555", 200),
+        ("127.0.0.1", True),                         # local browser via local proxy
+        ("::ffff:127.0.0.1", True),                  # node reports v4-mapped
+        ("100.101.1.2", False),                      # tailnet browser via local proxy
+        ("fd7a:115c:a1e0::9", False),
+        ("192.168.1.50", False),                     # LAN browser via local proxy
+        ("127.0.0.1, 192.168.1.50", False),          # LAN spoofs loopback, proxy appends real IP
+        ("100.101.1.2, 192.168.1.50", False),        # LAN spoofs tailnet
+        ("192.168.1.50, 127.0.0.1", False),          # two local hops; real client is LAN
+        ("192.168.1.50,127.0.0.1,127.0.0.1", False),
+        ("127.0.0.1, 127.0.0.1", True),
+        ("garbage", False),
+        ("127.0.0.1, garbage", False),
+        ("", False),
+        ("192.168.1.50:5555", False),
+        ("[::1]:5555", True),
     ],
 )
-def test_launcher_mode_reads_xff_only_from_loopback_proxy(vaults_root, launcher_mode, xff, expected):
-    assert _call("GET", "/api/vaults", "127.0.0.1", {"X-Forwarded-For": xff}).status_code == expected, xff
+def test_launcher_mode_reads_xff_only_from_loopback_proxy(vaults_root, launcher_mode, xff, this_pc):
+    # #67: no tokenless pass whatever the proxy says ...
+    assert _call("GET", "/api/vaults", "127.0.0.1", {"X-Forwarded-For": xff}).status_code == 401, xff
+    # ... and the source handed to this-PC-only endpoints (#15) follows the narrow XFF rule.
+    scope = {"client": ("127.0.0.1", 1), "headers": [(b"x-forwarded-for", xff.encode())]}
+    assert access.is_loopback_client(access.effective_client(scope)) is this_pc, xff
 
 
 @pytest.mark.parametrize("peer", ["192.168.1.50", "100.101.1.2", "10.0.0.3"])
@@ -266,6 +275,12 @@ SPOOFS = [
 ]
 
 
+def _assert_loopback_needs_a_token(base):
+    assert _status(f"{base}/api/vaults") == 401  # Issue #67
+    token = mcp_tokens.add_token("local")
+    assert _status(f"{base}/api/vaults", {"Authorization": f"Bearer {token}"}) == 200
+
+
 def _assert_spoofs_refused(base, vaults_root):
     from raven.core.vault import Vault
 
@@ -296,7 +311,7 @@ def test_real_direct_uvicorn_with_wildcard_forwarded_ips(vaults_root, lan_ip, ar
     try:
         _wait(port, proc)
         _assert_spoofs_refused(f"http://{lan_ip}:{port}", vaults_root)
-        assert _status(f"http://127.0.0.1:{port}/api/vaults") == 200
+        _assert_loopback_needs_a_token(f"http://127.0.0.1:{port}")
     finally:
         _stop(proc)
 
@@ -311,7 +326,7 @@ def test_real_standalone_ignores_forwarded_allow_ips_env(vaults_root, lan_ip):
     try:
         _wait(port, proc)
         _assert_spoofs_refused(f"http://{lan_ip}:{port}", vaults_root)
-        assert _status(f"http://127.0.0.1:{port}/api/vaults") == 200
+        _assert_loopback_needs_a_token(f"http://127.0.0.1:{port}")
     finally:
         _stop(proc)
 
@@ -392,7 +407,7 @@ def test_real_local_xff_proxy_in_front_of_standalone(vaults_root, lan_ip, tmp_pa
     try:
         _wait(port, proc)
         pport = proxy.server_address[1]
-        assert _status(f"http://127.0.0.1:{pport}/api/vaults") == 200            # local browser
+        assert _status(f"http://127.0.0.1:{pport}/api/vaults") == 401            # local browser (#67)
         assert _status(f"http://{lan_ip}:{pport}/api/vaults") == 401              # LAN browser
         assert _status(f"http://{lan_ip}:{pport}/api/vaults", {"X-Forwarded-For": "127.0.0.1"}) == 401
         assert _status(f"http://{lan_ip}:{pport}/api/vaults/alpha?force=true", method="DELETE") == 401
