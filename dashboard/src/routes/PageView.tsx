@@ -270,12 +270,17 @@ export function PageView() {
       console.log("[Raven-Debug] useEffect early return (no slug)");
       return;
     }
+    // Issue #32 잔여(같은 호스트 안의 응답 순서): slug/vault가 빠르게 바뀌면
+    // 늦게 도착한 이전 요청의 응답이 현재 문서 화면을 덮어썼다. 이 effect가
+    // 시작한 요청의 결과만 반영하고, 정리된 뒤의 응답은 버린다.
+    let cancelled = false;
     console.log("[Raven-Debug] useEffect fetchPage start");
     setPage(undefined);
     setErr(null);
     setRecommendations([]);
     fetchPage(vault, slug)
       .then((d) => {
+        if (cancelled) return;
         console.log("[Raven-Debug] fetchPage OK, slug=", d.slug);
         const fm = d.frontmatter || {};
         const tags = (fm.tags || "").replace(/[\[\]]/g, "").trim();
@@ -299,26 +304,42 @@ export function PageView() {
         // Fetch related recommendations
         fetchRecommendations(vault, d.slug)
           .then((recData) => {
+            if (cancelled) return;
             setRecommendations(recData.recommendations || []);
           })
           .catch((e) => {
+            if (cancelled) return;
             console.log("[Raven-Debug] fetchRecommendations CATCH:", e);
             setRecommendations([]);
           });
       })
       .catch((e) => {
+        if (cancelled) return;
         console.log("[Raven-Debug] fetchPage CATCH:", e);
         setErr(String(e.message || e));
         setPage(null);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [slug, vault, reloadKey]);
 
   useEffect(() => {
     if (!vault) return;
+    let cancelled = false;
     apiFetch(`/api/vaults/${encodeURIComponent(vault)}/graph`)
       .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
-      .then((d) => setGraph({ nodes: d.nodes ?? [], edges: d.edges ?? [] }))
-      .catch(() => setGraph({ nodes: [], edges: [] }));
+      .then((d) => {
+        if (cancelled) return;
+        setGraph({ nodes: d.nodes ?? [], edges: d.edges ?? [] });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setGraph({ nodes: [], edges: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [vault]);
 
   const parsedData = useMemo(() => {
