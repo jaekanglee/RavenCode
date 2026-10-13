@@ -7,7 +7,9 @@ Raven API에는 계정이 없다. 대신 **요청이 어디서 왔는지**(소�
 
 판정 (출처 = ASGI ``scope["client"]``):
 
-- loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과
+- loopback ``127.0.0.0/8``, ``::1`` (IPv4-mapped 포함) → 통과 (기본값. ``RAVEN_REQUIRE_LOOPBACK_TOKEN``
+  강화 모드에서는 loopback도 토큰 필수 — macOS Docker Desktop의 ``host.docker.internal``
+  연결이 loopback으로 보이기 때문, #67)
 - tailnet: **토큰 필수** — Core API는 #24, MCP(``LanTokenAuth``)는 #26부터. 라우트 판정
   (``is_tailnet_peer``: ``100.64.0.0/10``·``fd7a:115c:a1e0::/48`` **이면서** 응답 라우트가 이
   기기의 Tailscale 주소로 나가는 출처)은 남아 있지만, 그 결과로 토큰을 면제하는 게이트는 없다.
@@ -366,8 +368,19 @@ def has_valid_bearer(scope) -> bool:
     return False
 
 
+# ─── loopback 강화 모드 (Issue #67) ─────────────────────────────
+
+
+def require_loopback_token_from_env(raw: str | None = None) -> bool:
+    """True only for an explicit truthy ``RAVEN_REQUIRE_LOOPBACK_TOKEN`` (1/true/yes/on, Issue #67)."""
+    if raw is None:
+        raw = os.environ.get(REQUIRE_LOOPBACK_TOKEN_ENV, "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 class TokenGate:
     """ASGI 게이트 — loopback 외 출처에 Bearer 토큰을 요구한다 (``trust_tailnet``이면 tailnet도 통과).
+    강화 모드(``RAVEN_REQUIRE_LOOPBACK_TOKEN``, #67)에서는 loopback에도 요구한다.
 
     http와 websocket 둘 다 막는다. 거부된 요청은 감싼 앱에 전달되지 않는다.
     lifespan 등 다른 scope는 그대로 통과한다.
@@ -399,7 +412,7 @@ class TokenGate:
         local = trusted and is_local_browser_context(scope, page_navigation_ok=self.page_navigation_ok)
         # Issue #67: Docker Desktop host forwarding may appear as 127.0.0.1.
         # In hardened mode, no network peer is exempt from Bearer authentication.
-        require_token = os.environ.get(REQUIRE_LOOPBACK_TOKEN_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+        require_token = require_loopback_token_from_env()
         if (local and not require_token) or has_valid_bearer(scope):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
@@ -411,11 +424,19 @@ class TokenGate:
             await send({"type": "websocket.close", "code": 1008})
             return
         detail = self.detail
-        if require_token:
+        if require_token and source is None:
+            # The source could not be told (e.g. an ambiguous proxy, #29): say only what is needed.
             detail = (
-                "이 서버는 loopback 요청에도 Authorization: Bearer <token>을 요구합니다 "
+                "이 요청에는 Authorization: Bearer <token>이 필요합니다 "
                 "(raven mcp token add <name>)."
             )
+        elif require_token and is_loopback_client(source):
+            detail = (
+                "이 서버는 loopback 요청에도 Authorization: Bearer <token>을 요구합니다 "
+                "(RAVEN_REQUIRE_LOOPBACK_TOKEN, raven mcp token add <name>)."
+            )
+        elif require_token:
+            pass  # a LAN, tailnet or proxied client: the gate's remote-access text is accurate
         elif trusted and not local:
             detail = (
                 "이 PC 밖의 사이트(Host/Origin)에서 온 요청은 loopback이어도 토큰 없이 허용하지 않습니다 "

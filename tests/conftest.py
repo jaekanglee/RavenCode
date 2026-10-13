@@ -49,6 +49,14 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _default_loopback_policy(monkeypatch):
+    # Issue #67: `launchctl setenv RAVEN_REQUIRE_LOOPBACK_TOKEN 1` reaches Terminal and so
+    # pytest. Tests start from the default policy; the ones about hardened mode set it
+    # themselves. Subprocess servers inherit os.environ, so they start without it too.
+    monkeypatch.delenv("RAVEN_REQUIRE_LOOPBACK_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_tailnet(request, monkeypatch):
     if request.node.get_closest_marker("real_tailnet"):
         yield

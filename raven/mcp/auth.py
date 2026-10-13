@@ -3,7 +3,8 @@
 모든 MCP HTTP 리스너(데스크톱 런타임, ``./raven.sh start``, team launchd 인스턴스,
 Docker ``mcp-http``)가 ``raven.mcp.cli.build_http_app``을 통해 이 게이트 뒤에서 뜬다:
 
-- 직접 loopback 출처 → 토큰 없이 통과
+- 직접 loopback 출처 → 토큰 없이 통과 (기본값. ``RAVEN_REQUIRE_LOOPBACK_TOKEN`` 강화 모드에서는
+  loopback도 토큰 필수, #67)
 - 그 외 모든 출처 — tailnet(IPv4·IPv6) 포함, 내부망, Docker/CGNAT — →
   ``Authorization: Bearer <token>``이 발급된 토큰과 맞아야 통과. 발급된 토큰이 없으면
   전부 401 (fail-closed). opt-out 플래그나 인증 없는 경로는 없다.

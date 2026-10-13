@@ -19,7 +19,8 @@
 #                  dashboard 프록시가 /api 요청마다 Bearer로 실어 보낸다)
 #   3) 그 외 클라이언트(모바일, MCP 클라이언트 등): Authorization: Bearer <token>
 #      (MCP 클라이언트 설정의 "headers" 또는 `claude mcp add ... --header`)
-#   컨테이너 healthcheck는 컨테이너 안 loopback이라 토큰 없이 통과한다.
+#   컨테이너 healthcheck는 컨테이너 안 loopback이라 토큰 없이 통과한다(기본값 — 컨테이너에
+#   RAVEN_REQUIRE_LOOPBACK_TOKEN을 켜면 API healthcheck는 401로 실패한다, #67).
 #   http://<host>:8765      # API
 #   http://<host>:8766/mcp  # MCP HTTP
 #   http://<host>:5173      # Dashboard

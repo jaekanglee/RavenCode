@@ -50,5 +50,6 @@ tags: [security, access, mcp, api]
 
 - 토큰 없이 이 PC의 API·MCP를 쓰는 브라우저 페이지는 loopback 페이지와 데스크톱 webview뿐이다.
 - Origin이 없는 cross-site 로드는 `Sec-Fetch-Site`로 거부한다. 이 헤더를 보내지 않는 오래된 브라우저(Safari 16.4 이전 등)에서는 그런 GET이 여전히 실행된다 — 응답은 읽을 수 없지만, 상태를 바꾸는 GET이 있으면 실행된다. DNS rebinding은 Host에 사이트 이름이 남아 막힌다.
+- **(2026-10-13 개정, #67)** macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스트 loopback으로 넘긴다. 게이트에는 peer `127.0.0.1`로 보이고, 컨테이너는 Host·Origin을 마음대로 쓸 수 있으므로 이 결정의 Host/Origin 조건으로는 막지 못한다(실측: `Host: 127.0.0.1:P`로 Core·MCP 모두 토큰 없이 200). opt-in 강화 모드 `RAVEN_REQUIRE_LOOPBACK_TOKEN=1`은 loopback에도 Bearer를 요구한다(같은 실측에서 401). 기본값은 바꾸지 않았으므로 기본 설치에서 이 경로는 열려 있다 — 기본 정책 전환은 #67 후속 작업이다.
 - loopback 이름으로 서빙되는 다른 로컬 웹 앱(같은 PC의 `http://localhost:3000` 등)의 페이지는 여전히 토큰 없이 호출할 수 있다 — loopback 프로세스 신뢰와 같은 부류의 승인된 잔여 위험이다.
 - 실제 브라우저에서의 DNS rebinding 재현과, 수정 후 브라우저 실측은 UNKNOWN(headless Chrome이 두 번째 실행부터 페이지를 열지 못함). 수정 후 동작은 브라우저가 보내는 것과 같은 Host/Origin 헤더로 HTTP 수준에서 검증했다.
