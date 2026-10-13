@@ -9,7 +9,7 @@
  * 사이드바에도 raw 탐색기가 있으므로 파일 viewer 안에 중복 탐색기를 넣지 않는다.
  * 빈 raw/이거나 404면 EmptyState.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   deleteRaw,
@@ -19,12 +19,11 @@ import {
   type RawContent,
   type RawItem,
 } from "../lib/api";
-import { resolveNewRawFile } from "../lib/rawPath";
 import { RawTree } from "../components/RawTree";
+import { RawCreateDialog } from "../components/RawCreateDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { EmptyIcon } from "../lib/emptyIcons";
 import { PageHeader } from "../components/ui/PageHeader";
-import { TextField } from "../components/ui/TextField";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 
@@ -44,8 +43,6 @@ export function RawPanel() {
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
-  const [newFileName, setNewFileName] = useState("");
-  const [newFileDir, setNewFileDir] = useState("raw");
 
   // raw list
   useEffect(() => {
@@ -131,37 +128,14 @@ export function RawPanel() {
     }
   };
 
-  const handleNewFile = async () => {
+  // Issue #2 B-4: 다이얼로그 구현은 RawCreateDialog 한 곳. 여기서는 생성 후
+  // 목록 갱신과 상세 이동만 담당한다.
+  const handleNewFile = async (rel: string) => {
     if (!vault) return;
-    setSaveError(null);
-    // v0.7.181: Sidebar raw ＋와 같은 검증 (rawPath.resolveNewRawFile).
-    // 기존 파일명을 입력하면 writeRaw(rel, "")가 내용을 날린다 — create-only
-    // 의미는 이 UI에만 있으므로 가드도 여기.
-    const { rel, error } = resolveNewRawFile({ name: newFileName, dir: newFileDir, items });
-    if (error || !rel) {
-      setSaveError(error);
-      return;
-    }
-    try {
-      await writeRaw(vault, rel, "");
-      setNewFileOpen(false);
-      setNewFileName("");
-      const list = await fetchRawList(vault);
-      setItems(list?.items ?? []);
-      navigate(`/raw/${vault}/${rel}`);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
-    }
+    const list = await fetchRawList(vault);
+    setItems(list?.items ?? []);
+    navigate(`/raw/${vault}/${rel}`);
   };
-
-  // parent dir 옵션 (root + 모든 dir)
-  const dirOptions = useMemo(() => {
-    const set = new Set<string>(["raw"]);
-    for (const it of items) {
-      if (it.type === "dir") set.add(it.path);
-    }
-    return [...set].sort();
-  }, [items]);
 
   if (loading) {
     return (
@@ -200,66 +174,12 @@ export function RawPanel() {
           description="이 vault의 raw/ 폴더에 파일이 없습니다. 새 파일을 만들거나 OS 파일관리자로 자료를 떨어뜨리세요."
         />
         {newFileOpen && (
-          <Modal open={newFileOpen} onClose={() => setNewFileOpen(false)}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>raw/ 새 파일</h3>
-              <TextField
-                label="파일명"
-                value={newFileName}
-                onChange={(e) => setNewFileName(e.target.value)}
-                placeholder="예: notes.md, source.txt"
-                helper="확장자 포함. 예: my-notes.md"
-              />
-              <TextField
-                label="부모 디렉토리"
-                value={newFileDir}
-                onChange={(e) => setNewFileDir(e.target.value)}
-                helper="기본 raw/. 다른 디렉토리 경로 입력 가능 (예: raw/articles)."
-              />
-              <details style={{ fontSize: 12, color: "var(--color-muted)" }}>
-                <summary style={{ cursor: "pointer" }}>기존 디렉토리 ({dirOptions.length})</summary>
-                <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                  {dirOptions.map((d) => (
-                    <li key={d} style={{ cursor: "pointer" }} onClick={() => setNewFileDir(d)}>
-                      {d}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-              {saveError && (
-                <div
-                  style={{
-                    background: "var(--color-danger-soft, #fee)",
-                    color: "var(--color-danger, #c00)",
-                    padding: "8px 12px",
-                    borderRadius: 6,
-                    fontSize: 12,
-                  }}
-                >
-                  ❌ {saveError}
-                </div>
-              )}
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="md"
-                  onClick={() => setNewFileOpen(false)}
-                >
-                  취소
-                </Button>
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="md"
-                  onClick={handleNewFile}
-                  disabled={!newFileName.trim()}
-                >
-                  만들기
-                </Button>
-              </div>
-            </div>
-          </Modal>
+          <RawCreateDialog
+            vault={vault}
+            items={items}
+            onClose={() => setNewFileOpen(false)}
+            onCreated={handleNewFile}
+          />
         )}
       </div>
     );
@@ -421,8 +341,8 @@ export function RawPanel() {
               {saveError && (
                 <div
                   style={{
-                    background: "var(--color-danger-soft, #fee)",
-                    color: "var(--color-danger, #c00)",
+                    background: "var(--color-danger-bg)",
+                    color: "var(--color-danger)",
                     padding: "8px 12px",
                     borderRadius: 6,
                     fontSize: 12,
@@ -466,66 +386,12 @@ export function RawPanel() {
       </div>
 
       {newFileOpen && (
-        <Modal open={newFileOpen} onClose={() => setNewFileOpen(false)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>raw/ 새 파일</h3>
-            <TextField
-              label="파일명"
-              value={newFileName}
-              onChange={(e) => setNewFileName(e.target.value)}
-              placeholder="예: notes.md, source.txt"
-              helper="확장자 포함. 예: my-notes.md"
-            />
-            <TextField
-              label="부모 디렉토리"
-              value={newFileDir}
-              onChange={(e) => setNewFileDir(e.target.value)}
-              helper="기본 raw/. 다른 디렉토리 경로 입력 가능 (예: raw/articles)."
-            />
-            <details style={{ fontSize: 12, color: "var(--color-muted)" }}>
-              <summary style={{ cursor: "pointer" }}>기존 디렉토리 ({dirOptions.length})</summary>
-              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                {dirOptions.map((d) => (
-                  <li key={d} style={{ cursor: "pointer" }} onClick={() => setNewFileDir(d)}>
-                    {d}
-                  </li>
-                ))}
-              </ul>
-            </details>
-            {saveError && (
-              <div
-                style={{
-                  background: "var(--color-danger-soft, #fee)",
-                  color: "var(--color-danger, #c00)",
-                  padding: "8px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                }}
-              >
-                ❌ {saveError}
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="md"
-                onClick={() => setNewFileOpen(false)}
-              >
-                취소
-              </Button>
-              <Button
-                type="button"
-                variant="primary"
-                size="md"
-                onClick={handleNewFile}
-                disabled={!newFileName.trim()}
-              >
-                만들기
-              </Button>
-            </div>
-          </div>
-        </Modal>
+        <RawCreateDialog
+          vault={vault}
+          items={items}
+          onClose={() => setNewFileOpen(false)}
+          onCreated={handleNewFile}
+        />
       )}
 
       {deleteConfirm && (

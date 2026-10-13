@@ -549,7 +549,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
                <span
                  style={{
                    fontSize: 12,
-                   color: "var(--color-warning, #c00)",
+                   color: "var(--color-warning-text)",
                    fontWeight: 700,
                    padding: "0 8px",
                    marginLeft: 4,

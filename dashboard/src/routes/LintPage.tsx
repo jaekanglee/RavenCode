@@ -199,7 +199,7 @@ export function LintPage() {
                   cursor: "pointer",
                   padding: "4px 8px",
                   borderRadius: "var(--radius-sm)",
-                  backgroundColor: isActive ? "var(--color-surface-soft, #f4f4f4)" : "transparent",
+                  backgroundColor: isActive ? "var(--color-surface-soft)" : "transparent",
                   transition: "background-color 0.15s ease",
                 }}
                 className="hover-bg-soft"
@@ -438,7 +438,7 @@ function SeverityCard({
         border: isActive ? "2px solid var(--color-primary)" : "1px solid var(--color-hairline)",
         borderRadius: "var(--radius-md)",
         padding: isActive ? "15px" : "16px",
-        background: isActive ? "var(--color-surface-soft, #f8f9fa)" : "var(--color-surface-soft)",
+        background: "var(--color-surface-soft)",
         cursor: "pointer",
         transition: "border-color 0.15s ease",
       }}

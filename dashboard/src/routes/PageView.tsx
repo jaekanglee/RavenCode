@@ -963,8 +963,8 @@ export function PageView() {
                                   style={{
                                     visibility: isHovered ? "visible" : "hidden",
                                     width: "280px",
-                                    backgroundColor: "#1f2937",
-                                    color: "#fff",
+                                    backgroundColor: "var(--graph-tooltip-bg)",
+                                    color: "var(--color-ink)",
                                     textAlign: "left",
                                     borderRadius: "8px",
                                     padding: "12px",
@@ -975,7 +975,7 @@ export function PageView() {
                                     marginLeft: "-140px",
                                     opacity: isHovered ? 1 : 0,
                                     transition: "opacity 0.2s, visibility 0.2s",
-                                    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                                    boxShadow: "var(--graph-tooltip-shadow)",
                                     fontSize: "12px",
                                     pointerEvents: "none",
                                     lineHeight: "1.4",
@@ -983,12 +983,12 @@ export function PageView() {
                                 >
                                   {rel.reason && (
                                     <div style={{ marginBottom: evidenceStr ? "6px" : "0" }}>
-                                      <strong style={{ color: "#93c5fd" }}>이유:</strong> {rel.reason}
+                                      <strong style={{ color: "var(--color-info-text)" }}>이유:</strong> {rel.reason}
                                     </div>
                                   )}
                                   {evidenceStr && (
                                     <div>
-                                      <strong style={{ color: "#34d399" }}>근거:</strong> {evidenceStr}
+                                      <strong style={{ color: "var(--color-success-text)" }}>근거:</strong> {evidenceStr}
                                     </div>
                                   )}
                                   <div
@@ -999,7 +999,7 @@ export function PageView() {
                                       marginLeft: "-6px",
                                       borderWidth: "6px",
                                       borderStyle: "solid",
-                                      borderColor: "#1f2937 transparent transparent transparent",
+                                      borderColor: "var(--graph-tooltip-bg) transparent transparent transparent",
                                     }}
                                   />
                                 </div>

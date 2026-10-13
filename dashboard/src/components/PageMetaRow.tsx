@@ -75,9 +75,9 @@ export function PageMetaRow({ type, slug, tags, updated, issueStatus, onStatusCh
             style={{
               padding: "2px 6px",
               borderRadius: "4px",
-              border: "1px solid var(--border-subtle, rgba(0,0,0,0.15))",
-              backgroundColor: "var(--bg-surface, #fff)",
-              color: "var(--fg-ink, #000)",
+              border: "1px solid var(--border-subtle)",
+              backgroundColor: "var(--bg-surface)",
+              color: "var(--fg-ink)",
               fontSize: "12px",
               outline: "none",
               cursor: "pointer",
