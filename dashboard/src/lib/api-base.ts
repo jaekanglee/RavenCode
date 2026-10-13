@@ -23,7 +23,15 @@
  * tokens and screen always refer to one host.
  */
 
-import { authHeaderFor, canonicalBase, clearHostToken, clearSessionCredential, requestAuth } from "./host-auth";
+import {
+  authHeaderFor,
+  canonicalBase,
+  clearHostToken,
+  isSessionAuth,
+  refreshSessionCredential,
+  releaseRefusedSession,
+  requestAuth,
+} from "./host-auth";
 
 let apiBase = "";
 
@@ -165,7 +173,7 @@ function withAuth(init: RequestInit | undefined, base: string): { init: RequestI
   return { init: { ...init, headers, redirect: init?.redirect ?? "error" }, auto: true };
 }
 
-function handleUnauthorized(res: Response, base: string, auto: boolean): void {
+function handleUnauthorized(res: Response, base: string, auto: boolean, sent: string | null = null): void {
   if (res.status !== 401) return;
   const challenge = res.headers.get("www-authenticate") || "";
   if (base === "" && /^session\s+realm="raven-dashboard"/i.test(challenge)) {
@@ -174,8 +182,13 @@ function handleUnauthorized(res: Response, base: string, auto: boolean): void {
     window.location.assign(`/__raven/login?next=${encodeURIComponent(next)}`);
   } else if (/^bearer\b/i.test(challenge)) {
     // The token we attached was refused (revoked or wrong): drop it, ask again.
-    // The desktop credential goes first, so a refused one falls back to the dialog.
-    if (auto && !clearSessionCredential(base)) clearHostToken(base);
+    // A refused desktop credential that was already replaced (a concurrent request after
+    // a Core restart) leaves the new one alone and asks nothing.
+    if (auto) {
+      const session = releaseRefusedSession(base, sent);
+      if (session === "stale") return;
+      if (session === "none") clearHostToken(base);
+    }
     requestAuth(base);
   }
 }
@@ -200,8 +213,19 @@ if (typeof window !== "undefined") {
       if (tabHost.error) return Promise.reject(new HostConfigError(tabHost.error));
       const targetBase = getActiveTargetBaseUrl();
       const { init: authed, auto } = withAuth(init, targetBase);
-      return origFetch(targetBase + input, authed).then((res) => {
-        handleUnauthorized(res, targetBase, auto);
+      const sent = auto ? new Headers(authed?.headers).get("authorization") : null;
+      const usedSession = auto && isSessionAuth(targetBase, sent);
+      return origFetch(targetBase + input, authed).then(async (res) => {
+        // Issue #67: a restarted desktop Core has a new credential. Fetch it from the shell
+        // and retry once (a body that can only be read once is not retried).
+        const replayable = init?.body === undefined || init?.body === null || typeof init?.body === "string";
+        if (res.status === 401 && usedSession && replayable && (await refreshSessionCredential(targetBase, sent))) {
+          const retry = withAuth(init, targetBase);
+          const again = await origFetch(targetBase + input, retry.init);
+          handleUnauthorized(again, targetBase, retry.auto, new Headers(retry.init?.headers).get("authorization"));
+          return again;
+        }
+        handleUnauthorized(res, targetBase, auto, sent);
         return res;
       });
     }
@@ -221,7 +245,7 @@ if (typeof window !== "undefined") {
         auto = true;
       }
       return origFetch(req).then((res) => {
-        if (isActive(base)) handleUnauthorized(res, base, auto);
+        if (isActive(base)) handleUnauthorized(res, base, auto, auto ? req.headers.get("authorization") : null);
         return res;
       });
     }
@@ -232,7 +256,7 @@ if (typeof window !== "undefined") {
       return origFetch(input, authed).then((res) => {
         // Only the active host prompts; a probe of another host (HostPicker test)
         // reports its own 401 instead of opening the global dialog.
-        if (isActive(base)) handleUnauthorized(res, base, auto);
+        if (isActive(base)) handleUnauthorized(res, base, auto, auto ? new Headers(authed?.headers).get("authorization") : null);
         return res;
       });
     }

@@ -82,6 +82,71 @@ export function setSessionCredential(base: string, token: string): void {
   sessionCredential = value ? { base: canonicalBase(base), token: value } : null;
 }
 
+// Every Core start has its own credential (a restarted Core refuses the old one), so the
+// desktop shell registers how to fetch the running Core's endpoint and credential
+// (Tauri IPC `core_session_token`, one snapshot of both).
+export type SessionSnapshot = { endpoint: string; token: string };
+let sessionRefresher: (() => Promise<SessionSnapshot | null>) | null = null;
+let refreshing: Promise<SessionSnapshot | null> | null = null;
+
+export function setSessionRefresher(fn: (() => Promise<SessionSnapshot | null>) | null): void {
+  sessionRefresher = fn;
+}
+
+/** True when `header` is the desktop credential this tab would send to `base`. */
+export function isSessionAuth(base: string, header: string | null): boolean {
+  return !!sessionCredential && sessionCredential.base === canonicalBase(base) && header === `Bearer ${sessionCredential.token}`;
+}
+
+/**
+ * After the Core refused the desktop credential `sent`: make sure the current one is newer.
+ * True → the caller retries once with `authHeaderFor(base)`; false → token dialog.
+ *  - another request already rotated it (current ≠ sent): no IPC, just retry;
+ *  - else ask the shell for its running Core (one shared call for concurrent 401s) and take
+ *    the credential only if that Core still serves `base` — after a port move the old port
+ *    may belong to another process, which must not receive the new credential.
+ */
+export async function refreshSessionCredential(base: string, sent: string | null): Promise<boolean> {
+  const key = canonicalBase(base);
+  if (!sessionCredential || sessionCredential.base !== key) return false;
+  if (sent !== `Bearer ${sessionCredential.token}`) return true;
+  if (!sessionRefresher) return false;
+  const stale = sessionCredential.token;
+  if (!refreshing) {
+    refreshing = sessionRefresher()
+      .catch(() => null)
+      .finally(() => {
+        refreshing = null;
+      });
+  }
+  const snap = await refreshing;
+  if (!snap || canonicalBase(snap.endpoint) !== key) return false;
+  const fresh = snap.token.trim();
+  if (!fresh || fresh === stale) return false;
+  if (sessionCredential && sessionCredential.base === key) sessionCredential = { base: key, token: fresh };
+  return sessionCredential?.token === fresh;
+}
+
+/**
+ * A 401 for `refused` (the Authorization the request carried) at `base`:
+ *  - "cleared": it was the current desktop credential — dropped, the token dialog takes over;
+ *  - "stale": it was an older desktop credential that was already replaced — keep the new one;
+ *  - "none": not the desktop credential (a stored host token, or none).
+ */
+export function releaseRefusedSession(base: string, refused: string | null): "cleared" | "stale" | "none" {
+  if (!refused || !/^bearer rvs_/i.test(refused)) {
+    return "none";
+  }
+  if (sessionCredential && sessionCredential.base === canonicalBase(base)) {
+    if (refused === `Bearer ${sessionCredential.token}`) {
+      sessionCredential = null;
+      return "cleared";
+    }
+    return "stale";
+  }
+  return "stale";
+}
+
 /** Drops the desktop credential (e.g. the Core refused it) so the token dialog can take over. */
 export function clearSessionCredential(base: string): boolean {
   if (sessionCredential && sessionCredential.base === canonicalBase(base)) {

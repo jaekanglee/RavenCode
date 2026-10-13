@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Default Core API bind host.
@@ -397,51 +397,42 @@ pub(crate) struct ManagedCore {
     pub id: u64,
     pub endpoint: String,
     pub mcp_endpoint: Option<String>,
+    /// The credential this Core got on stdin (Issue #67) — private, never logged or printed.
+    session: Option<String>,
+}
+
+impl ManagedCore {
+    /// This Core's webview credential, or `None` if it was started without one.
+    pub(crate) fn session_token(&self) -> Option<String> {
+        self.session.clone()
+    }
 }
 
 /// Env var telling `raven.desktop.runtime` to read the session credential from stdin.
 pub(crate) const SESSION_STDIN_ENV: &str = "RAVEN_DESKTOP_SESSION_STDIN";
 
-/// This shell's per-launch credential for its own webview (Issue #67).
+/// A fresh credential for one Core's webview (Issue #67), or `None` if the OS CSPRNG fails.
 ///
 /// The Core API needs a Bearer token from every source — loopback too, because macOS
 /// Docker Desktop forwards a container's `host.docker.internal` connection to the host's
-/// loopback. The shell makes one credential per app launch and keeps it in memory only:
-/// every Core it starts (restarts included, so the webview keeps working when the Core
-/// or its port changes) gets it on stdin, and the webview gets it over the
-/// `core_session_token` IPC command. It is never put in argv, the environment, a file,
-/// a log line, the readiness line or a URL, and dies with the app.
-pub fn session_token() -> &'static str {
-    static TOKEN: OnceLock<String> = OnceLock::new();
-    TOKEN.get_or_init(new_session_token)
+/// loopback. Every Core start (restarts included) gets its own credential, so a restarted
+/// Core never accepts the previous one. It reaches the Core on stdin and the webview over
+/// the `core_session_token` IPC command, lives only in memory, and is never put in argv,
+/// the environment, a file, a log line, the readiness line or a URL.
+///
+/// 32 bytes from the OS CSPRNG via `getrandom` (macOS `getentropy`, Linux `getrandom(2)`(없으면 `/dev/urandom`),
+/// Windows `ProcessPrng`), hex-encoded: `rvs_` + 64 hex = 256 bits. If the OS generator
+/// fails there is no weaker fallback: the Core starts without a session credential and
+/// the webview asks for an issued token instead (fail closed).
+pub(crate) fn new_session_token() -> Option<String> {
+    session_token_from(getrandom::fill)
 }
 
-fn new_session_token() -> String {
+fn session_token_from<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Option<String> {
     let mut bytes = [0u8; 32];
-    if !os_random(&mut bytes) {
-        // No /dev/urandom (Windows): std's RandomState keys come from the OS RNG
-        // (128 bits); SipHash under those secret keys stands in as the generator.
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        for (i, chunk) in bytes.chunks_mut(8).enumerate() {
-            let mut h = RandomState::new().build_hasher();
-            h.write_usize(i);
-            chunk.copy_from_slice(&h.finish().to_le_bytes());
-        }
-    }
+    fill(&mut bytes).ok()?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("rvs_{hex}")
-}
-
-#[cfg(unix)]
-fn os_random(buf: &mut [u8]) -> bool {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
-}
-
-#[cfg(not(unix))]
-fn os_random(_buf: &mut [u8]) -> bool {
-    false
+    Some(format!("rvs_{hex}"))
 }
 
 impl ManagedCore {
@@ -468,9 +459,17 @@ impl ManagedCore {
         for (key, value) in &spec.env {
             cmd.env(key, value);
         }
-        // Issue #67: the webview's credential goes to the Core on stdin (see session_token).
-        cmd.env(SESSION_STDIN_ENV, "1");
-        Self::launch_inner(cmd, CORE_READINESS_TIMEOUT, pending, events, Some(session_token()))
+        // Issue #67: a new credential for every Core, handed over on stdin (see new_session_token).
+        let session = new_session_token();
+        if session.is_some() {
+            cmd.env(SESSION_STDIN_ENV, "1");
+        } else {
+            // never inherit the flag from the launching environment: the Core would read
+            // whatever stdin it inherited (e.g. a terminal) as the credential
+            cmd.env_remove(SESSION_STDIN_ENV);
+            eprintln!("Raven: OS 난수 생성 실패 — 세션 자격 증명 없이 Core를 시작합니다 (대시보드가 토큰을 묻습니다)");
+        }
+        Self::launch_inner(cmd, CORE_READINESS_TIMEOUT, pending, events, session)
     }
 
     /// Spawn `cmd` and wait — at most `timeout` — for its readiness line.
@@ -501,7 +500,7 @@ impl ManagedCore {
         timeout: Duration,
         pending: &PendingStart,
         events: Option<EventSink>,
-        secret: Option<&str>,
+        secret: Option<String>,
     ) -> Result<Self, StartError> {
         let id = NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -514,7 +513,7 @@ impl ManagedCore {
                 Path::new(cmd.get_program()).display()
             ))
         })?;
-        if let (Some(secret), Some(mut stdin)) = (secret, child.stdin.take()) {
+        if let (Some(secret), Some(mut stdin)) = (secret.as_deref(), child.stdin.take()) {
             let _ = writeln!(stdin, "{secret}");
             // dropping `stdin` closes the pipe: the Core reads one line, then EOF
         }
@@ -652,6 +651,7 @@ impl ManagedCore {
             id,
             endpoint,
             mcp_endpoint,
+            session: secret,
         })
     }
 
@@ -664,7 +664,15 @@ impl ManagedCore {
             id: NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed),
             endpoint: endpoint.to_string(),
             mcp_endpoint: mcp_endpoint.map(str::to_string),
+            session: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_session(endpoint: &str, session: &str) -> Self {
+        let mut core = Self::for_test(endpoint, None);
+        core.session = Some(session.to_string());
+        core
     }
 
     #[cfg(test)]
@@ -965,43 +973,68 @@ mod tests {
         // Issue #67: the session credential reaches the Core on stdin (one line, then EOF)
         // and nowhere else; a Core that never reads stdin still starts.
         #[test]
-        fn session_secret_is_written_to_stdin_then_closed() {
+        fn session_secret_is_written_to_stdin_then_closed_and_kept_by_that_core() {
             let script = format!(
                 r#"IFS= read -r line; if [ "$line" = "rvs_test_secret" ] && ! read -r more; then echo '{READY}'; else echo "got [$line]" >&2; fi; exec sleep 30"#
             );
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(script);
-            let core = ManagedCore::launch_inner(cmd, Duration::from_secs(10), &PendingStart::default(), None, Some("rvs_test_secret"))
+            let core = ManagedCore::launch_inner(cmd, Duration::from_secs(10), &PendingStart::default(), None, Some("rvs_test_secret".into()))
                 .expect("the Core sees exactly the secret line, then EOF");
             assert_eq!(core.endpoint, "http://127.0.0.1:41000");
+            // what the webview is given (core_session_token) is exactly what this Core read
+            assert_eq!(core.session_token().as_deref(), Some("rvs_test_secret"));
         }
 
         #[test]
         fn a_core_that_ignores_stdin_still_starts_with_a_secret() {
             let (cmd, _pidfile) = core("nostdin", &format!("echo '{READY}'; exec sleep 30"));
-            let core = ManagedCore::launch_inner(cmd, Duration::from_secs(10), &PendingStart::default(), None, Some("rvs_x"));
+            let core = ManagedCore::launch_inner(cmd, Duration::from_secs(10), &PendingStart::default(), None, Some("rvs_x".into()));
             assert!(core.is_ok());
         }
 
         #[test]
-        fn session_token_is_random_hex_and_stable_for_the_launch() {
-            use crate::core::{new_session_token, session_token};
-            let token = session_token();
-            assert!(token.starts_with("rvs_") && token.len() == 4 + 64, "{token}");
-            assert!(token[4..].chars().all(|c| c.is_ascii_hexdigit()));
-            assert_eq!(session_token(), token, "one credential per app launch");
-            assert_ne!(new_session_token(), new_session_token());
+        fn a_core_without_a_secret_has_no_session_token() {
+            let (cmd, _pidfile) = core("nosecret", &format!("echo '{READY}'; exec sleep 30"));
+            let core = ManagedCore::launch(cmd, Duration::from_secs(10), &PendingStart::default()).unwrap();
+            assert_eq!(core.session_token(), None);
         }
 
         #[test]
-        fn start_hands_the_session_to_the_core_on_stdin_only() {
+        fn session_token_is_256_bits_of_hex_and_never_repeats() {
+            use crate::core::new_session_token;
+            let token = new_session_token().expect("the OS CSPRNG works here");
+            assert!(token.starts_with("rvs_") && token.len() == 4 + 64, "{token}");
+            assert!(token[4..].chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+            let many: std::collections::HashSet<String> = (0..2000).map(|_| new_session_token().unwrap()).collect();
+            assert_eq!(many.len(), 2000, "every Core start gets a different credential");
+            assert!(!many.contains(&token));
+        }
+
+        #[test]
+        fn a_failing_os_generator_gives_no_credential_and_no_weak_fallback() {
+            let token = crate::core::session_token_from(|_buf: &mut [u8]| Err::<(), ()>(()));
+            assert_eq!(token, None);
+            let src = include_str!("core.rs");
+            let start = src.find(concat!("pub(crate) fn new_session", "_token")).expect("fn");
+            let end = start + src[start..].find(concat!("impl Managed", "Core {")).expect("impl");
+            let body = &src[start..end];
+            for weak in [concat!("Random", "State"), concat!("/dev/", "urandom"), concat!("Sys", "Time"), concat!("process", "::id")] {
+                assert!(!body.contains(weak), "no non-CSPRNG source in the generator: {weak}");
+            }
+            assert!(body.contains(concat!("getrandom::", "fill")));
+        }
+
+        #[test]
+        fn start_makes_a_new_credential_per_core_and_passes_it_on_stdin_only() {
             let src = include_str!("core.rs");
             let start = src.find(concat!("pub(crate) fn ", "start(")).expect("start");
             let end = start + src[start..].find(concat!("pub(crate) fn ", "launch(")).expect("launch");
             let body = &src[start..end];
+            assert!(body.contains(concat!("let session = new_session_", "token();")), "fresh per start");
+            assert!(!src.contains(concat!("Once", "Lock<String>")), "no credential reused across Core starts");
             assert!(body.contains(concat!("cmd.env(SESSION_STDIN_ENV, ", "\"1\")")));
-            assert!(body.contains(concat!("Some(session_", "token())")));
-            assert!(!body.contains(concat!(".arg(session_", "token")), "never in argv");
+            assert!(!body.contains(concat!(".arg(session", "")), "never in argv");
             assert!(!body.contains(concat!("env(\"RAVEN_DESKTOP_SESSION", "_TOKEN")), "never in the environment");
         }
 

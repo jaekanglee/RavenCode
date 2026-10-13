@@ -1675,3 +1675,22 @@ macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스�
   - webview에서 스크립트가 실행되면(XSS) IPC로 세션 자격 증명을 얻어 앱이 켜져 있는 동안 같은 PC에서 Core API를 쓸 수 있다 — webview 스크립트는 원래 Core를 부를 수 있으므로 새 권한은 아니다. 같은 사용자의 다른 프로세스가 값을 얻으면 같은 PC에서 쓸 수 있다(운영체제 사용자 경계 밖은 범위 밖).
   - Windows의 비밀 생성은 `RandomState` 대체 경로다. `getrandom` 직접 의존성은 사용자 승인이 필요해 넣지 않았다.
   - OrbStack·Colima·Podman(이 Mac에 없음), Windows·Linux webview 실측은 UNKNOWN.
+
+## 67. 데스크톱 세션 자격 증명 — OS CSPRNG 직접 사용, Core마다 새로 발급 (Issue #67 후속)
+
+§66의 세션 자격 증명은 Unix에서 `/dev/urandom`을 읽고, 그 밖(Windows)에서는 OS로 시드된 std `RandomState`의 SipHash 출력으로 대신했다. Windows 경로는 OS CSPRNG의 출력이 아니라 키 128비트에서 늘린 값이라 보장이 부족했다. 또 앱 실행 동안 같은 값을 모든 Core 재시작에 재사용했다.
+
+- **생성** (`desktop/src-tauri/src/core.rs::new_session_token`): `getrandom::fill`로 32바이트(macOS `getentropy`, Linux `getrandom(2)`(없으면 `/dev/urandom`), Windows `ProcessPrng`) → `rvs_` + 64 hex(256비트). 실패하면 `None` — 약한 난수로 대신하지 않고, 그 Core는 세션 자격 증명 없이 떠서 대시보드가 발급 토큰을 묻는다(fail closed).
+  - 의존성: `getrandom = "0.3"`을 직접 의존성으로 추가(사용자 승인). tauri가 이미 쓰는 0.3.4라 새로 받는 crate는 없다(`Cargo.lock`에는 `raven-desktop` → `getrandom 0.3.4` 한 줄). 추가 feature 없음.
+- **수명**: Core를 시작할 때마다(재시작·포트 이동 포함) 새로 만든다. 값은 그 `ManagedCore`에만 있고(`session_token()`), IPC `core_session_token`은 지금 Core의 값을 준다(없으면 `Err`). 재시작한 Core는 이전 값을 거부한다.
+- **대시보드** (`dashboard/src/lib/host-auth.ts`, `api-base.ts`, `main.tsx`): 세션 자격 증명이 401을 받으면 셸에서 현재 값을 다시 받아(`setSessionRefresher` → IPC) 다른 값일 때만 한 번 재시도한다. 같거나 없으면 토큰 입력창. 한 번만 읽을 수 있는 본문(stream)은 재시도하지 않는다.
+- **검증**:
+  - Rust `cargo test` 86 passed(macOS). 신규: 256비트 hex 형식과 2000회 생성 중복 없음, 생성기 실패 시 `None`이고 생성 함수에 비-CSPRNG 소스(`RandomState`·`/dev/urandom`·시간·PID)가 없음, Core가 stdin으로 받은 값과 webview에 주는 값이 같음, 비밀 없이 띄운 Core는 값이 없음, `start`가 Core마다 새로 만들고 재사용 저장소(`OnceLock`)가 없으며 argv·환경 변수에 넣지 않음.
+  - pytest: `test_a_restarted_core_refuses_the_previous_credential`(실제 runtime 두 번 — 이전 값 401, 새 값 200).
+  - vitest: 회전 후 자동 재시도(입력창 없음), 이전 값을 다시 보내지 않음, 같은 값·IPC 실패 시 입력창, stream 본문 재시도 안 함, 동시 401 3건에 IPC 1회·입력창 없음, 늦게 도착한 이전 값의 401이 새 값을 지우지 않음, 포트가 바뀌었으면 새 값을 옛 포트로 보내지 않음.
+  - Rust: IPC가 한 Core의 endpoint와 자격 증명을 함께 준다(`SessionSnapshot`), 자격 증명이 없으면 `Err`.
+- **IPC 형태**: `core_session_token`은 `{endpoint, token}`을 준다(같은 Core에서 함께 읽음). 대시보드는 endpoint가 자기 Core일 때만 받는다 — 포트가 옮겨진 사이 옛 포트를 다른 프로세스가 잡아도 새 자격 증명이 그쪽으로 가지 않는다.
+- **동시 401**: 재시도 판단은 그 요청이 보낸 값으로 한다. 이미 다른 요청이 새 값을 받았으면 IPC 없이 새 값으로 재시도하고, 이전 값에 대한 401은 새 값을 지우지 않는다. 동시에 들어온 갱신은 IPC 한 번을 나눠 쓴다.
+- **CSPRNG 실패 시**: 셸은 `RAVEN_DESKTOP_SESSION_STDIN`을 Core 환경에서 지운다(상속된 값으로 Core가 터미널 등 다른 stdin을 자격 증명으로 읽지 않게).
+- **Windows**: 소스와 빌드로 확인 — getrandom 0.3.4 `backends/windows.rs`가 `bcryptprimitives.dll`의 `ProcessPrng`를 raw-dylib로 부른다(Windows 10+에서 실패하지 않음). `cargo check --target x86_64-pc-windows-gnu`(전체 crate) 통과. msvc 타깃 전체 check는 Linux 컨테이너에 MSVC C 툴체인이 없어 `ring` 빌드 스크립트에서 실패했다(이번 변경과 무관). getrandom만 쓰는 최소 crate는 msvc check 통과. **실제 Windows 실행은 UNKNOWN**(Windows 환경 없음).
+- **독립 리뷰**: blocker 없음. should-fix 2건(동시 401이 새 자격 증명을 지움, 포트 이동 중 옛 포트로 전송) 반영. nit 반영: 상속된 stdin 플래그 제거, 문구.

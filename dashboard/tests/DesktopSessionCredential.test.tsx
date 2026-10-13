@@ -1,4 +1,4 @@
-/* Issue #67 — the desktop shell's per-launch Core API credential in the webview.
+/* Issue #67 — the desktop shell's per-Core API credential in the webview.
  *
  *  The Core API needs `Authorization: Bearer` from loopback too. The desktop shell
  *  hands its webview one credential over Tauri IPC (`core_session_token`); the
@@ -130,5 +130,125 @@ describe("desktop session credential", () => {
     await import("../src/lib/api-base");
     await window.fetch("/api/vaults");
     expect(auth(0)).toBeNull();
+  });
+});
+
+describe("desktop session credential after a Core restart (rotation)", () => {
+  const realFetch = window.fetch;
+  let seen: (string | null)[];
+  let accept: string;
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    localStorage.clear();
+    vi.resetModules();
+    seen = [];
+    accept = "rvs_" + "b".repeat(64);
+    window.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      seen.push(auth);
+      return auth === `Bearer ${accept}`
+        ? new Response("{}", { status: 200 })
+        : new Response("{}", { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="raven"' } });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    window.fetch = realFetch;
+  });
+
+  async function desktop(refresh: () => Promise<{ endpoint: string; token: string } | null>) {
+    const hostAuth = await import("../src/lib/host-auth");
+    const apiBase = await import("../src/lib/api-base");
+    apiBase.setApiBase(CORE);
+    hostAuth.setSessionCredential(CORE, SECRET); // the old Core's credential
+    hostAuth.setSessionRefresher(refresh);
+    return hostAuth;
+  }
+
+  it("fetches the new credential from the shell and retries once — no dialog", async () => {
+    const hostAuth = await desktop(async () => ({ endpoint: CORE, token: accept }));
+    const asked: string[] = [];
+    window.addEventListener(hostAuth.AUTH_REQUIRED_EVENT, (e) => asked.push((e as CustomEvent).detail.base));
+    const res = await window.fetch("/api/vaults");
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([`Bearer ${SECRET}`, `Bearer ${accept}`]);
+    expect(hostAuth.authHeaderFor(CORE)).toBe(`Bearer ${accept}`);
+    expect(asked).toEqual([]);
+  });
+
+  it("the old credential is never sent again after rotation", async () => {
+    await desktop(async () => ({ endpoint: CORE, token: accept }));
+    await window.fetch("/api/vaults");
+    await window.fetch("/api/vaults");
+    expect(seen.slice(2)).toEqual([`Bearer ${accept}`]);
+  });
+
+  it("same credential from the shell (not a restart) → no retry, token dialog", async () => {
+    const hostAuth = await desktop(async () => ({ endpoint: CORE, token: SECRET }));
+    const asked: string[] = [];
+    window.addEventListener(hostAuth.AUTH_REQUIRED_EVENT, (e) => asked.push((e as CustomEvent).detail.base));
+    const res = await window.fetch("/api/vaults");
+    expect(res.status).toBe(401);
+    expect(seen.length).toBe(1);
+    expect(asked).toContain(CORE);
+  });
+
+  it("shell has no credential (CSPRNG failure / IPC error) → token dialog, one request", async () => {
+    const hostAuth = await desktop(async () => {
+      throw new Error("this Core has no session credential");
+    });
+    const asked: string[] = [];
+    window.addEventListener(hostAuth.AUTH_REQUIRED_EVENT, (e) => asked.push((e as CustomEvent).detail.base));
+    expect((await window.fetch("/api/vaults")).status).toBe(401);
+    expect(seen.length).toBe(1);
+    expect(asked).toContain(CORE);
+  });
+
+  it("concurrent 401s after a restart: one IPC call, the new credential survives, no dialog", async () => {
+    let calls = 0;
+    const hostAuth = await desktop(async () => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 5));
+      return { endpoint: CORE, token: accept };
+    });
+    const asked: string[] = [];
+    window.addEventListener(hostAuth.AUTH_REQUIRED_EVENT, (e) => asked.push((e as CustomEvent).detail.base));
+    const [a, b, c] = await Promise.all([window.fetch("/api/a"), window.fetch("/api/b"), window.fetch("/api/c")]);
+    expect([a.status, b.status, c.status]).toEqual([200, 200, 200]);
+    expect(calls).toBe(1);
+    expect(hostAuth.authHeaderFor(CORE)).toBe(`Bearer ${accept}`);
+    expect(asked).toEqual([]);
+  });
+
+  it("a late 401 for the old credential after rotation retries with the new one, IPC not asked", async () => {
+    let calls = 0;
+    const hostAuth = await desktop(async () => {
+      calls += 1;
+      return { endpoint: CORE, token: accept };
+    });
+    hostAuth.setSessionCredential(CORE, accept); // another request already rotated it
+    expect(await hostAuth.refreshSessionCredential(CORE, `Bearer ${SECRET}`)).toBe(true); // retry with current
+    expect(calls).toBe(0); // no IPC call for a stale 401
+    expect(hostAuth.releaseRefusedSession(CORE, `Bearer ${SECRET}`)).toBe("stale");
+    expect(hostAuth.authHeaderFor(CORE)).toBe(`Bearer ${accept}`); // the new one is not wiped
+    expect(hostAuth.releaseRefusedSession(CORE, `Bearer ${accept}`)).toBe("cleared");
+    expect(hostAuth.authHeaderFor(CORE)).toBeNull();
+  });
+
+  it("after a port move the new credential is not sent to whoever holds the old port", async () => {
+    const hostAuth = await desktop(async () => ({ endpoint: "http://127.0.0.1:54321", token: accept }));
+    const res = await window.fetch("/api/vaults");
+    expect(res.status).toBe(401);
+    expect(seen).toEqual([`Bearer ${SECRET}`]); // no retry to the old base
+    expect(hostAuth.authHeaderFor(CORE)).toBeNull(); // the refused one is dropped → dialog
+  });
+
+  it("a stream body is not replayed", async () => {
+    await desktop(async () => ({ endpoint: CORE, token: accept }));
+    const body = new ReadableStream();
+    const res = await window.fetch("/api/vaults/x/pages", { method: "POST", body, duplex: "half" } as RequestInit);
+    expect(res.status).toBe(401);
+    expect(seen.length).toBe(1);
   });
 });
