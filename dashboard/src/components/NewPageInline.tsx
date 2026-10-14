@@ -16,7 +16,7 @@ import { AITagSuggestion } from "./AITagSuggestion";
  * - Task 7: title text input (필수) + type select (8종) + tags (선택)
  *
  * 본문(markdown)은 인라인 폼에서는 빼고 단순화 — slug 정규화가 핵심이고
- * 본문은 페이지 진입 후 EditButton(인라인 편집)으로 작성하는 흐름.
+ * 본문은 페이지 진입 후 페이지 뷰의 인라인 편집으로 작성하는 흐름.
  */
 
 const TYPES = [

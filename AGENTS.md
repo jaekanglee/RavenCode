@@ -187,7 +187,7 @@ Codex 1라운드 critique 결과 (한국 원티드 사이트 레퍼런스 분석
 - **저장 토스트 600ms → 2400ms** — "✅ 저장 완료" 메시지 사용자가 읽을 시간 확보
 - **Vault 컨텍스트 헤더 표시** — Graph/Search/Lint 페이지에서 `in <vault>` 한 줄 표시
 - **EmptyState 컴포넌트 통일** — 빈 상태는 텍스트만 ❌, 일러스트 또는 CTA 포함
-- **인라인 편집 우선** — EditButton modal ❌, side sheet 인라인 편집 ⭕
+- **인라인 편집 우선** — 편집 modal ❌, side sheet 인라인 편집 ⭕ (구 EditButton 같은 편집 모달은 제거됨)
 
 ### 자가 사용 SOP (v0.6.10+, wiki-self-user 프로필)
 

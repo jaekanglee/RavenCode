@@ -532,7 +532,7 @@ raven build && raven link check
 │       └── __main__.py
 ├── dashboard/                        ← React 19 SPA
 │   ├── src/
-│   │   ├── components/              ← Sidebar, VaultPicker, EditButton, ...
+│   │   ├── components/              ← Sidebar, VaultPicker, RawTree, ...
 │   │   ├── routes/                  ← PageView, SearchPage, GraphPage
 │   │   └── lib/api.ts               ← fetch 헬퍼
 │   └── public/api/                  ← (legacy) 정적 JSON

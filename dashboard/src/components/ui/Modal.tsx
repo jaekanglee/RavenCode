@@ -1,7 +1,7 @@
 // Modal — 앱 공통 모달 (v0.6.26+).
 //
 // 사용자 원칙 (§13.1): "재사용 컴포넌트 우선". 여러 모달(NewPageButton/
-// DeleteButton/EditButton 등)이 같은 backdrop/dim-click/Escape/z-index
+// DeleteButton 등)이 같은 backdrop/dim-click/Escape/z-index
 // 패턴을 반복 — Modal로 추출.
 //
 // Contract:
