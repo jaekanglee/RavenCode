@@ -37,7 +37,6 @@ vi.mock("../src/components/MarkdownView", () => ({
   MarkdownView: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
 }));
 vi.mock("../src/components/BacklinksPanel", () => ({ BacklinksPanel: () => <div /> }));
-vi.mock("../src/components/EditButton", () => ({ EditButton: () => <button type="button">edit</button> }));
 vi.mock("../src/components/DeleteButton", () => ({ DeleteButton: () => <button type="button">delete</button> }));
 vi.mock("../src/components/PageMetaRow", () => ({ PageMetaRow: () => <div /> }));
 vi.mock("../src/components/FloatingGraphPanel", () => ({ FloatingGraphPanel: () => <div /> }));

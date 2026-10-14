@@ -28,10 +28,6 @@ vi.mock("../src/components/BacklinksPanel", () => ({
   BacklinksPanel: () => <div data-testid="backlinks" />,
 }));
 
-vi.mock("../src/components/EditButton", () => ({
-  EditButton: () => <button type="button">edit</button>,
-}));
-
 vi.mock("../src/components/DeleteButton", () => ({
   DeleteButton: () => <button type="button">delete</button>,
 }));
