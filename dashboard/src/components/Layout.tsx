@@ -8,6 +8,7 @@ import { Button } from "./ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
 import { ApiHttpError, fetchRawList, fetchVaults, fetchTree, getActiveHostUrl, getActiveVault, setActiveVault, type RawItem } from "../lib/api";
 import { useIsCompactNav, useIsDrawerMobile } from "../lib/useMediaQuery";
+import { applyColorMode, persistColorMode, readStoredColorMode } from "../lib/theme";
 import { useEffect, useRef, useState } from "react";
 import type { TreeNode, VaultMeta } from "../types";
 
@@ -129,28 +130,12 @@ export function Layout() {
   const pageMatch = useMatch("/page/:vault/*");
   const activeSlug = pageMatch?.params["*"] ?? null;
 
-  // theme state — 헤더에서 toggle
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    try {
-      const stored = window.localStorage.getItem("theme");
-      if (stored === "dark" || stored === "light") return stored;
-    } catch {}
-    if (window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
-    return "light";
-  });
+  // theme state — 헤더에서 toggle. 적용·저장의 소유자는 lib/theme (Issue #32 잔여).
+  const [theme, setTheme] = useState<"light" | "dark">(readStoredColorMode);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const root = window.document.documentElement;
-    if (theme === "dark") {
-      root.classList.add("dark");
-      root.setAttribute("data-color-mode", "dark");
-    } else {
-      root.classList.remove("dark");
-      root.setAttribute("data-color-mode", "light");
-    }
-    try { window.localStorage.setItem("theme", theme); } catch {}
+    applyColorMode(theme);
+    persistColorMode(theme);
   }, [theme]);
 
   useEffect(() => {
