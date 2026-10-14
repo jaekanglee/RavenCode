@@ -4,9 +4,10 @@
 // 잘못됐으면 api-base가 이 탭의 /api 요청을 모두 거절한다(로컬 Core로 조용히 보내지 않는다).
 // 여기서는 앱 화면(요청을 보내는 Layout·라우트)을 그리지 않고 이유를 알린다.
 // 로컬로 바꾸는 것은 사용자가 버튼을 눌렀을 때만 — 자동 전환하지 않는다.
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { getTabHostError } from "../lib/api-base";
 import { setActiveHostId } from "../lib/api";
+import { applyColorMode, readStoredColorMode } from "../lib/theme";
 import { EmptyState } from "./ui/EmptyState";
 import { Button } from "./ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
@@ -20,6 +21,13 @@ export function HostConfigGate({
 }) {
   const error = getTabHostError();
   const [switchFailed, setSwitchFailed] = useState(false);
+  // Issue #32 잔여: 이 화면은 Layout *대신* 그려지므로(Layout이 테마를 적용한다)
+  // 여기서 직접 색 모드를 적용한다 — 아니면 다크 사용자가 흰 오류 화면을 본다.
+  // 훅이므로 조기 return보다 먼저 호출하고, 정상 경로에서는 Layout이 소유자다.
+  useEffect(() => {
+    if (!error) return;
+    applyColorMode(readStoredColorMode());
+  }, [error]);
   if (!error) return <>{children}</>;
   return (
     // Layout(테마 적용)을 그리지 않으므로 화면 전체를 canvas로 채운다 — 부트 화면 배경과 섞이지 않게.
