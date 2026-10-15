@@ -1,6 +1,6 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file", "allow-save-download-file-as", "allow-app-version"]
+permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file", "allow-save-download-file-as", "allow-reveal-saved-export", "allow-app-version"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
@@ -41,3 +41,8 @@ commands.allow = ["save_download_file_as"]
 identifier = "allow-app-version"
 description = "Allow invoking the app_version command (관리 화면의 현재 버전 표시)."
 commands.allow = ["app_version"]
+
+[[permission]]
+identifier = "allow-reveal-saved-export"
+description = "Reveal only the last file successfully saved by Rust."
+commands.allow = ["reveal_saved_export", "begin_export"]

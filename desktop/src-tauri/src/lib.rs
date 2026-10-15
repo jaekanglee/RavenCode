@@ -602,6 +602,77 @@ fn resolve_download_target(dir: &std::path::Path, filename: &str) -> Result<std:
     Ok(target)
 }
 
+// Only Rust can authorize a reveal target. A new save attempt revokes the previous one,
+// including cancellation/failure; no webview-supplied path ever reaches the opener.
+#[derive(Default)]
+struct SavedExport(Mutex<(u64, Option<std::path::PathBuf>)>);
+
+impl SavedExport {
+    fn clear(&self) -> Result<u64, String> {
+        let mut slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        slot.0 = slot.0.wrapping_add(1);
+        slot.1 = None;
+        Ok(slot.0)
+    }
+
+    fn validate(&self, attempt: u64) -> Result<(), String> {
+        let slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        if slot.0 != attempt { return Err("다른 내보내기 요청이 시작됐습니다.".into()); }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn record(&self, path: &std::path::Path, attempt: u64) -> Result<(), String> {
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        let mut slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        if slot.0 != attempt { return Err("다른 내보내기 요청이 시작됐습니다.".into()); }
+        slot.1 = Some(path);
+        Ok(())
+    }
+
+    fn cancel(&self, attempt: u64) -> Result<(), String> {
+        let mut slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        if slot.0 == attempt {
+            slot.0 = slot.0.wrapping_add(1);
+            slot.1 = None;
+        }
+        Ok(())
+    }
+
+    fn write(&self, path: &std::path::Path, contents: &str, attempt: u64) -> Result<(), String> {
+        // Validate and write under one lock: a stale dialog must not write first
+        // and only discover its generation mismatch after overwriting a file.
+        let mut slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        if slot.0 != attempt { return Err("다른 내보내기 요청이 시작됐습니다.".into()); }
+        let result = std::fs::write(path, contents).map_err(|e| e.to_string())
+            .and_then(|_| path.canonicalize().map_err(|e| e.to_string()));
+        match result {
+            Ok(path) => { slot.1 = Some(path); Ok(()) }
+            Err(error) => { slot.0 = slot.0.wrapping_add(1); slot.1 = None; Err(error) }
+        }
+    }
+
+    fn reveal_with(&self, reveal: impl FnOnce(&std::path::Path) -> Result<(), String>) -> Result<(), String> {
+        let slot = self.0.lock().map_err(|_| "저장 상태를 읽지 못했습니다.")?;
+        let path = slot.1.as_ref().ok_or("저장한 파일이 없습니다.")?;
+        let current = path.canonicalize().map_err(|e| e.to_string())?;
+        if current != *path || !current.is_file() {
+            return Err("저장한 파일의 경로가 변경됐습니다.".into());
+        }
+        reveal(path)
+    }
+}
+
+#[command]
+fn begin_export(saved: State<'_, SavedExport>) -> Result<u64, String> {
+    saved.clear()
+}
+
+#[command]
+fn reveal_saved_export(saved: State<'_, SavedExport>) -> Result<(), String> {
+    saved.reveal_with(|path| tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| e.to_string()))
+}
+
 /// Writes an exported file (문서 .md 내보내기 등) into the user's Downloads
 /// folder and returns the saved path.
 ///
@@ -612,13 +683,14 @@ fn resolve_download_target(dir: &std::path::Path, filename: &str) -> Result<std:
 /// Raven의 창은 tauri.conf.json이 만들기 때문에 빌더 훅을 걸 수 없으므로,
 /// 파일 저장을 커맨드로 처리한다 (신규 의존성 ❌ — `dirs`는 이미 쓰고 있다).
 #[command]
-fn save_download_file(filename: String, contents: String) -> Result<String, String> {
+fn save_download_file(filename: String, contents: String, attempt: u64, saved: State<'_, SavedExport>) -> Result<String, String> {
+    saved.validate(attempt)?;
     let dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .ok_or_else(|| "다운로드 폴더를 찾지 못했습니다.".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("폴더를 만들지 못했습니다: {e}"))?;
     let target = resolve_download_target(&dir, &filename)?;
-    std::fs::write(&target, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))?;
+    saved.write(&target, &contents, attempt)?;
     Ok(target.display().to_string())
 }
 
@@ -638,7 +710,10 @@ async fn save_download_file_as(
     app: tauri::AppHandle,
     filename: String,
     contents: String,
+    attempt: u64,
+    saved: State<'_, SavedExport>,
 ) -> Result<Option<String>, String> {
+    saved.validate(attempt)?;
     use tauri_plugin_dialog::DialogExt;
 
     let suggested = safe_file_name(&filename)?;
@@ -652,13 +727,14 @@ async fn save_download_file_as(
 
     // 취소는 오류가 아니다 — "저장하지 않았다"는 사실만 돌려준다.
     let Some(picked) = picked else {
+        saved.cancel(attempt)?;
         return Ok(None);
     };
 
     let target = picked
         .into_path()
         .map_err(|e| format!("저장 경로를 읽지 못했습니다: {e}"))?;
-    std::fs::write(&target, contents).map_err(|e| format!("파일을 저장하지 못했습니다: {e}"))?;
+    saved.write(&target, &contents, attempt)?;
     Ok(Some(target.display().to_string()))
 }
 
@@ -709,6 +785,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
+        .manage(SavedExport::default())
         .manage(CoreState::default())
         .manage(RequestedExit::default())
         .invoke_handler(tauri::generate_handler![
@@ -719,7 +797,9 @@ pub fn run() {
             core_status,
             restart_core,
             save_download_file,
-            save_download_file_as
+            save_download_file_as,
+            reveal_saved_export,
+            begin_export
         ])
         .on_menu_event(|app, event| {
             if event.id.as_ref() == "reload" {
@@ -1216,7 +1296,7 @@ mod tests {
 
         assert_eq!(
             params,
-            vec!["app: tauri::AppHandle", "filename: String", "contents: String"],
+            vec!["app: tauri::AppHandle", "filename: String", "contents: String", "attempt: u64", "saved: State<'_", "SavedExport>"],
             "커맨드 인자가 바뀌었다 — 웹뷰가 경로를 넘기게 되면 파일명 정화를 우회한다"
         );
 
@@ -1244,7 +1324,7 @@ mod tests {
         // 커맨드 등록도 함께 지킨다.
         let src = include_str!("lib.rs");
         assert!(
-            src.contains(concat!("save_download_file", "_as\n        ])")),
+            src.contains(concat!("save_download_file", "_as,\n            reveal_saved_export,\n            begin_export\n        ])")),
             "invoke_handler에 save_download_file_as가 등록되지 않았다"
         );
     }
@@ -2001,6 +2081,93 @@ mod tests {
             let setup = src.find("spawn_core_event_loop(&handle)").expect("event loop wired in setup");
             let first_start = src.find("handle.state::<CoreState>().start(").expect("initial start");
             assert!(setup < first_start, "the sink must exist before the first Core starts");
+        }
+    }
+}
+
+#[cfg(test)]
+mod saved_export_tests {
+    use super::SavedExport;
+
+    #[test]
+    fn reveal_requires_successful_save_and_clear_revokes_it() {
+        let state = SavedExport::default();
+        let dir = std::env::temp_dir().join(format!("raven-reveal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("export.md");
+        std::fs::write(&file, "export").unwrap();
+        assert!(state.reveal_with(|_| panic!("must not open before save")).is_err());
+        state.record(&file, state.clear().unwrap()).unwrap();
+        state.reveal_with(|target| {
+            assert_eq!(target, file.canonicalize().unwrap());
+            Ok(())
+        }).unwrap();
+        assert!(state.reveal_with(|_| Err("OS failure".into())).is_err());
+        state.clear().unwrap();
+        assert!(state.reveal_with(|_| panic!("cancelled/failed save must revoke")).is_err());
+        state.record(&file, state.clear().unwrap()).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(state.reveal_with(|_| panic!("missing file must not open")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_symlink_cannot_redirect_reveal() {
+        let state = SavedExport::default();
+        let dir = std::env::temp_dir().join(format!("raven-reveal-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("export.md");
+        let other = dir.join("other.md");
+        std::fs::write(&file, "export").unwrap();
+        std::fs::write(&other, "other").unwrap();
+        state.record(&file, state.clear().unwrap()).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&other, &file).unwrap();
+        assert!(state.reveal_with(|_| panic!("must not follow replacement symlink")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn late_save_cannot_restore_revoked_or_newer_authorization() {
+        let state = SavedExport::default();
+        let file = std::env::temp_dir().join(format!("raven-export-order-{}", std::process::id()));
+        std::fs::write(&file, "export").unwrap();
+        let old = state.clear().unwrap();
+        let newer = state.clear().unwrap();
+        state.record(&file, newer).unwrap();
+        assert!(state.validate(old).is_err()); // late fetch cannot start a save
+        assert!(state.record(&file, old).is_err());
+        state.write(&file, "newer", newer).unwrap();
+        assert!(state.write(&file, "stale", old).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "newer");
+        state.cancel(old).unwrap();
+        state.reveal_with(|_| Ok(())).unwrap();
+        state.clear().unwrap(); // cancellation or a failed pre-save fetch
+        assert!(state.record(&file, newer).is_err());
+        assert!(state.reveal_with(|_| panic!("revoked")).is_err());
+        let attempt = state.clear().unwrap();
+        assert!(state.write(&file.join("missing"), "export", attempt).is_err());
+        assert!(state.reveal_with(|_| panic!("failed write")).is_err());
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn webview_has_no_generic_opener_authority() {
+        let caps: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = caps["permissions"].as_array().unwrap();
+        assert!(permissions.iter().any(|p| p == "allow-reveal-saved-export"));
+        assert!(!permissions.iter().any(|p| p.as_str().unwrap().starts_with("opener:")));
+        let src = include_str!("lib.rs");
+        let start = src.find(concat!("fn reveal_", "saved_export(")).unwrap();
+        let signature = &src[start..start + src[start..].find(" ->").unwrap()];
+        assert_eq!(signature, concat!("fn reveal_", "saved_export(saved: State<'_, SavedExport>)"));
+        assert!(src.contains(".open_js_links_on_click(false)"));
+        for name in ["fn save_download_file(", "async fn save_download_file_as("] {
+            let start = src.find(name).unwrap();
+            let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+            assert!(body.find("saved.validate(attempt)?").unwrap() < body.find("saved.write(").unwrap());
+
         }
     }
 }

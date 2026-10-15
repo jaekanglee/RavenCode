@@ -56,11 +56,13 @@ export interface SavedFile {
 export async function saveTextFile(
   filename: string,
   text: string,
-  mime: string
+  mime: string,
+  attempt?: unknown
 ): Promise<SavedFile> {
   const invoke = tauriInvoke();
   if (invoke) {
-    const path = await invoke("save_download_file", { filename, contents: text });
+    const generation = attempt ?? await invoke("begin_export");
+    const path = await invoke("save_download_file", { filename, contents: text, attempt: generation });
     return { filename, path: typeof path === "string" ? path : null };
   }
   const blob = new Blob([text], { type: mime });
@@ -91,11 +93,13 @@ export async function saveTextFile(
 export async function saveTextFileAs(
   filename: string,
   text: string,
-  mime: string
+  mime: string,
+  attempt?: unknown
 ): Promise<SavedFile | null> {
   const invoke = tauriInvoke();
   if (!invoke) return saveTextFile(filename, text, mime);
-  const path = await invoke("save_download_file_as", { filename, contents: text });
+  const generation = attempt ?? await invoke("begin_export");
+  const path = await invoke("save_download_file_as", { filename, contents: text, attempt: generation });
   // 취소는 저장이 아니다 — 빈 경로/비문자열은 "저장 안 함"으로 본다.
   if (typeof path !== "string" || !path) return null;
   return { filename, path };
@@ -106,7 +110,9 @@ async function fetchPageMarkdownText(
   vault: string,
   slug: string,
   opts: { frontmatter?: boolean } = {}
-): Promise<string> {
+): Promise<{ text: string; attempt?: unknown }> {
+  const invoke = tauriInvoke();
+  const attempt = invoke ? await invoke("begin_export") : undefined;
   const res = await apiFetch(pageMarkdownUrl(vault, slug, opts));
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
@@ -114,7 +120,7 @@ async function fetchPageMarkdownText(
       detail ? `내보내기 실패 (HTTP ${res.status}): ${detail.slice(0, 200)}` : `내보내기 실패 (HTTP ${res.status})`
     );
   }
-  return res.text();
+  return { text: await res.text(), attempt };
 }
 
 export async function downloadPageMarkdown(
@@ -122,8 +128,8 @@ export async function downloadPageMarkdown(
   slug: string,
   opts: { frontmatter?: boolean } = {}
 ): Promise<SavedFile> {
-  const text = await fetchPageMarkdownText(vault, slug, opts);
-  return saveTextFile(markdownFilename(slug), text, "text/markdown;charset=utf-8");
+  const { text, attempt } = await fetchPageMarkdownText(vault, slug, opts);
+  return saveTextFile(markdownFilename(slug), text, "text/markdown;charset=utf-8", attempt);
 }
 
 /** 저장 위치를 골라 내보낸다. 사용자가 취소하면 null. */
@@ -132,6 +138,13 @@ export async function downloadPageMarkdownAs(
   slug: string,
   opts: { frontmatter?: boolean } = {}
 ): Promise<SavedFile | null> {
-  const text = await fetchPageMarkdownText(vault, slug, opts);
-  return saveTextFileAs(markdownFilename(slug), text, "text/markdown;charset=utf-8");
+  const { text, attempt } = await fetchPageMarkdownText(vault, slug, opts);
+  return saveTextFileAs(markdownFilename(slug), text, "text/markdown;charset=utf-8", attempt);
+}
+
+/** Reveal only Rust's last successful export, never a webview path or URL. */
+export async function revealSavedExport(): Promise<void> {
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("데스크톱에서만 폴더를 열 수 있습니다.");
+  await invoke("reveal_saved_export");
 }

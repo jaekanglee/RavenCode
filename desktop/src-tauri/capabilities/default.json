@@ -12,6 +12,7 @@
     "allow-restart-core",
     "allow-save-download-file",
     "allow-save-download-file-as",
+    "allow-reveal-saved-export",
     "allow-app-version",
     "updater:default",
     "process:allow-restart",
