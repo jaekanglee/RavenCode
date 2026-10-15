@@ -28,12 +28,12 @@ export const PRIMARY_NAV: SectionNavEntry[] = [
   { to: "/", label: "홈", icon: "🏠", match: (p) => p === "/" },
   { to: "/search", label: "검색", icon: "🔍", match: (p) => p.startsWith("/search") },
   { to: "/graph", label: "그래프", icon: "🕸", match: (p) => p.startsWith("/graph") },
-  { to: "/garden", label: "정원", icon: "🌱", match: (p) => p.startsWith("/garden") },
+  { to: "/log", label: "로그", icon: "📋", match: (p) => p.startsWith("/log") },
 ];
 
-// 운영 도구는 매일 쓰는 탐색이 아니다 → 더보기 메뉴 하위로.
+// Issue #3: 승인된 일상 동선은 로그 우선. 정원과 운영 도구는 더보기로.
 export const MORE_NAV: SectionNavEntry[] = [
-  { to: "/log", label: "로그", icon: "📋", match: (p) => p.startsWith("/log") },
+  { to: "/garden", label: "정원", icon: "🌱", match: (p) => p.startsWith("/garden") },
   { to: "/lint", label: "린트", icon: "🛠", match: (p) => p.startsWith("/lint") },
   { to: "/workspace", label: "워크스페이스", icon: "💻", match: (p) => p.startsWith("/workspace") },
   { to: "/vault/manage", label: "관리", icon: "⚙", match: (p) => p.startsWith("/vault/manage") },
@@ -242,7 +242,7 @@ export function Layout() {
   }, []);
 
   // /vault/new 이동은 *성공한* 빈 목록에서만 (Issue #30).
-  if (loaded && !vaultsError && vaults.length === 0 && location.pathname !== "/vault/new") {
+  if (loaded && !vaultsError && vaults.length === 0 && location.pathname !== "/vault/new" && location.pathname !== "/vault/manage") {
     return <Navigate to="/vault/new" replace />;
   }
 
@@ -491,7 +491,7 @@ export function Layout() {
           )}
           {/* 목록을 한 번도 못 받았으면 하위 페이지를 띄우지 않는다 — vault 없는 화면이
               "등록된 vault가 없습니다"로 오인되는 것을 막는다. 이전 목록이 있으면 유지. */}
-          {(!vaultsError || vaults.length > 0) && (
+          {(!vaultsError || vaults.length > 0 || location.pathname === "/vault/manage") && (
             <Outlet
               context={{
                 vault,

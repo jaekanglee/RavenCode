@@ -114,7 +114,8 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
     fireEvent.click(navLink(/홈/));
     await screen.findByText("HOME-PAGE-OK");
     ctl.garden = "ok";
-    fireEvent.click(navLink(/정원/));
+    fireEvent.click(screen.getByRole("button", { name: /더보기/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /정원/ }));
     expect(await screen.findByText("GARDEN-PAGE-OK")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -227,7 +228,8 @@ describe("App — 라우트 ErrorBoundary (Issue #1 A-1)", () => {
   it("정상 라우트는 기존대로 렌더된다 (회귀 없음)", async () => {
     await renderAppAt("/");
     expect(await screen.findByText("HOME-PAGE-OK")).toBeTruthy();
-    fireEvent.click(navLink(/정원/));
+    fireEvent.click(screen.getByRole("button", { name: /더보기/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /정원/ }));
     expect(await screen.findByText("GARDEN-PAGE-OK")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     await expectShellAlive();

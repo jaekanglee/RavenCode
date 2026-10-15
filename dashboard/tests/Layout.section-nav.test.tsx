@@ -23,11 +23,11 @@ describe("전역 섹션 nav 정보구조", () => {
     }
   });
 
-  it("로그·린트·관리·워크스페이스는 더보기 하위로 내려간다", () => {
+  it("정원·린트·관리·워크스페이스는 더보기 하위로 내려간다", () => {
     const primaryPaths = PRIMARY_NAV.map((t) => t.to);
-    expect(primaryPaths).toEqual(["/", "/search", "/graph", "/garden"]);
+    expect(primaryPaths).toEqual(["/", "/search", "/graph", "/log"]);
     expect(MORE_NAV.map((t) => t.to)).toEqual([
-      "/log",
+      "/garden",
       "/lint",
       "/workspace",
       "/vault/manage",

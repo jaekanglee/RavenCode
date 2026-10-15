@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getHosts,
   getActiveHostId,
@@ -13,11 +13,21 @@ import {
 import { TextField } from "./ui/TextField";
 import { getHostToken, setHostToken } from "../lib/host-auth";
 import { Button } from "./ui/Button";
+import { Modal } from "./ui/Modal";
+import { Link } from "react-router-dom";
 
-export function HostPicker() {
+export function HostPicker({ management = false, onNavigate, reload = () => { window.location.href = "/"; } }: { management?: boolean; onNavigate?: () => void; reload?: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [hosts, setHosts] = useState<HostConnection[]>([]);
   const [activeId, setActiveId] = useState<string>("local");
   const [modalOpen, setModalOpen] = useState(false);
+  useEffect(() => {
+    if (!modalOpen) return;
+    const previous = document.activeElement;
+    dialogRef.current?.focus();
+    return () => { if (previous instanceof HTMLElement) previous.focus(); };
+  }, [modalOpen]);
+
   const [hostName, setHostName] = useState("");
   const [endpoint, setEndpoint] = useState("");
   // Issue #24: 원격 호스트(tailnet 포함)는 토큰 필수. sessionStorage에만 보관된다.
@@ -80,7 +90,7 @@ export function HostPicker() {
     setActiveHostId(id);
     setActiveId(id);
     // Reload dashboard to apply active host endpoint across all stores
-    window.location.href = "/";
+    reload();
   }
 
   function handleRemove(id: string) {
@@ -89,7 +99,7 @@ export function HostPicker() {
       setHosts(getHosts());
       setActiveId(getActiveHostId());
       if (activeId === id) {
-        window.location.href = "/";
+        reload();
       }
     }
   }
@@ -160,7 +170,7 @@ export function HostPicker() {
         >
           호스트 PC ({hosts.length})
         </span>
-        <button
+        {management && <button
           type="button"
           onClick={() => setModalOpen(true)}
           style={{
@@ -174,9 +184,11 @@ export function HostPicker() {
           title="새 호스트 연결 추가"
         >
           + 추가
-        </button>
+        </button>}
       </div>
 
+      <details open={management || undefined}>
+        <summary style={{ cursor: "pointer", fontSize: 13 }}>{currentHost.name} · 전환</summary>
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
         <select
           className="input-base"
@@ -192,7 +204,7 @@ export function HostPicker() {
             </option>
           ))}
         </select>
-        {!currentHost.isLocal && (
+        {management && !currentHost.isLocal && (
           <button
             type="button"
             onClick={() => handleRemove(currentHost.id)}
@@ -204,6 +216,8 @@ export function HostPicker() {
           </button>
         )}
       </div>
+      </details>
+      {!management && <Link onClick={onNavigate} to="/vault/manage#hosts" style={{ fontSize: 11 }}>호스트 관리</Link>}
 
       <div style={{ marginTop: 6, paddingLeft: 4, display: "flex", alignItems: "center", gap: 6 }}>
         {activeStatus === "checking" && (
@@ -333,34 +347,19 @@ export function HostPicker() {
         )}
       </div>
 
-      {modalOpen && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.4)",
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-          }}
-        >
-          <div
-            style={{
-              background: "var(--color-canvas)",
-              border: "1px solid var(--color-hairline)",
-              borderRadius: "var(--radius-lg)",
-              padding: 24,
-              width: "100%",
-              maxWidth: 440,
-              boxShadow: "var(--shadow-overlay)",
-            }}
-          >
-            <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>원격 Raven 호스트 추가</h2>
+      <Modal open={management && modalOpen} onClose={() => setModalOpen(false)} maxWidth={440}>
+        <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="host-dialog-title" onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled)"));
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
+            event.preventDefault(); last?.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault(); first?.focus();
+          }
+        }}>
+            <h2 id="host-dialog-title" style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>원격 Raven 호스트 추가</h2>
             <p style={{ fontSize: 13, color: "var(--color-muted)", marginBottom: 16 }}>
               다른 PC에서 실행 중인 Raven 백엔드(IP/Port)를 연결하여 해당 기기의 ~/Raven/ 보관소들을 열람합니다.
             </p>
@@ -457,9 +456,8 @@ export function HostPicker() {
                 </Button>
               </div>
             </div>
-          </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }
