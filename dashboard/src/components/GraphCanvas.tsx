@@ -936,24 +936,29 @@ export function GraphCanvas({
       .linkDirectionalParticles(0)
       .linkDirectionalParticleWidth(0)
       .linkDirectionalParticleSpeed(0.016)
+      // Issue #85: 툴팁은 캔버스가 아니라 force-graph가 문서에 붙이는 DOM 오버레이라,
+      // 문서 루트의 [data-color-mode]를 따라가는 그래프 토큰을 그대로 쓸 수 있다
+      // (PageView의 그래프 툴팁과 같은 경로). 고정 hex였을 때는 라이트 테마에서도 툴팁만
+      // dark 배경/흰 글자로 남았다. §13.2 구조적 팔레트 예외와는 무관하다 — 여기 색은
+      // theme별로 값이 바뀌는 의미 토큰이지 동적 팔레트가 아니다.
       .nodeLabel((node: any) => {
         const typeLabelStr = typeLabel(node.type);
         const typeBadge = typeLabelStr
-          ? `<span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.15); margin-left: 6px;">${typeLabelStr}</span>`
+          ? `<span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--cds-tag-neutral-bg); color: var(--cds-tag-neutral-text); margin-left: 6px;">${typeLabelStr}</span>`
           : "";
         return `
           <div style="
             padding: 6px 10px; 
-            background: rgba(15, 23, 42, 0.95); 
-            border: 1px solid rgba(255, 255, 255, 0.12); 
+            background: var(--graph-tooltip-bg);
+            border: 1px solid var(--graph-tooltip-border);
             border-radius: 4px; 
-            color: #fff; 
+            color: var(--graph-text);
             font-size: 12px;
             pointer-events: none;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
           ">
             <strong>${node.title || node.id}</strong>${typeBadge}
-            <div style="font-size: 10px; color: #94a3b8; margin-top: 2px;">${node.id}</div>
+            <div style="font-size: 10px; color: var(--graph-text-muted); margin-top: 2px;">${node.id}</div>
           </div>
         `;
       })
@@ -984,23 +989,23 @@ export function GraphCanvas({
         return `
           <div style="
             padding: 8px 12px; 
-            background: rgba(15, 23, 42, 0.95); 
-            border: 1px solid rgba(255, 255, 255, 0.15); 
+            background: var(--graph-tooltip-bg);
+            border: 1px solid var(--graph-tooltip-border);
             border-radius: 6px; 
-            color: #fff; 
+            color: var(--graph-text);
             font-size: 12px; 
             max-width: 280px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            box-shadow: var(--graph-tooltip-shadow);
             pointer-events: none;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
           ">
-            <div style="font-weight: 600; color: #818cf8; margin-bottom: 4px;">
+            <div style="font-weight: 600; color: var(--accent); margin-bottom: 4px;">
               ${relLabel}
             </div>
             <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
-              <span style="color: #cbd5e1; font-weight: 500;">${sourceTitle}</span>
-              <span style="color: #64748b;">➔</span>
-              <span style="color: #cbd5e1; font-weight: 500;">${targetTitle}</span>
+              <span style="color: var(--graph-text); font-weight: 500;">${sourceTitle}</span>
+              <span style="color: var(--graph-text-muted);">➔</span>
+              <span style="color: var(--graph-text); font-weight: 500;">${targetTitle}</span>
             </div>
             ${evidenceHtml}
             ${reasonHtml}
