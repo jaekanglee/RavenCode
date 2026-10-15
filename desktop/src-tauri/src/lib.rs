@@ -742,6 +742,48 @@ fn startup_failure_message(error: &dyn std::fmt::Display) -> String {
     format!("Raven failed to start:\n{error}")
 }
 
+/// The process exit code for a start that failed (Issue #41/#42): a launcher, script or shell
+/// must see the failure as a non-zero status, not as a clean exit.
+const EXIT_STARTUP_FAILURE: i32 = 1;
+
+/// Issue #41: `Builder::build()` can fail before any event loop or `AppHandle` exists. Then
+/// `tauri_plugin_dialog` (AppHandle-driven) cannot present anything, so a GUI user saw the
+/// process simply disappear. rfd needs no Tauri runtime — it talks to the OS toolkit directly
+/// (`NSAlert` / `MessageBoxW` / GTK) — so it can present the failure at exactly this point.
+///
+/// Called on the main thread: rfd's macOS backend runs the modal inline only there (off the main
+/// thread without a running `NSApplication` it panics).
+fn show_native_error_dialog(message: &str) {
+    // Linux/BSD only: rfd's GTK backend runs the dialog on its own GTK thread and then waits on a
+    // condvar with no timeout (`backend/gtk3/utils.rs::run_blocking`). When GTK can't initialize —
+    // no `DISPLAY`/`WAYLAND_DISPLAY`, i.e. a headless or remote launch — that thread returns
+    // without ever signalling, so `show()` never returns and the process would hang instead of
+    // exiting 1. Ask for the dialog only when a display exists; stderr already has the reason.
+    // macOS (`NSAlert`) and Windows (`MessageBoxW`) have no such hazard.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return;
+    }
+
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Raven")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Issue #41: report a build failure that happened before any `AppHandle` existed, then give back
+/// the exit code. Returning it (instead of exiting here) keeps the message and the code assertable
+/// without opening a window. The reason goes to stderr *first*: a headless launch (CI, ssh, no
+/// display) may have no dialog to read it from.
+fn announce_build_failure(error: &dyn std::fmt::Display, announce: impl FnOnce(&str)) -> i32 {
+    let message = startup_failure_message(error);
+    eprintln!("{message}");
+    announce(&message);
+    EXIT_STARTUP_FAILURE
+}
+
 /// Tells the user the Python Core didn't start, then exits with code 1 once they acknowledge it.
 ///
 /// Issue #1 A-3: this used to shell out to macOS-only `osascript` and wait on its `.status()`,
@@ -760,7 +802,7 @@ fn report_startup_failure_and_exit(app: &tauri::AppHandle, error: &str) {
         .title("Raven")
         .kind(MessageDialogKind::Error)
         .buttons(MessageDialogButtons::Ok)
-        .show(move |_| exit_handle.exit(1));
+        .show(move |_| exit_handle.exit(EXIT_STARTUP_FAILURE));
 }
 
 /// The exit code `AppHandle::exit(N)` asked for, recorded when the runtime hands it over
@@ -926,9 +968,10 @@ pub fn run() {
         }
         Err(e) => {
             // No event loop or AppHandle exists yet, so tauri_plugin_dialog can't show anything
-            // here (Issue #1 A-3) — report on stderr and keep the exit code.
-            eprintln!("{}", startup_failure_message(&e));
-            std::process::exit(1);
+            // here (Issue #1 A-3). Issue #41: rfd can, so the GUI user is told instead of just
+            // seeing the process disappear — stderr keeps the reason for headless launches, and
+            // the exit code stays non-zero.
+            std::process::exit(announce_build_failure(&e, show_native_error_dialog));
         }
     }
 }
@@ -1498,6 +1541,90 @@ mod tests {
             src.contains(".dialog()"),
             "tauri_plugin_dialog 경로가 사라졌다"
         );
+    }
+
+    // Issue #41: `Builder::build()` 실패는 이벤트 루프/AppHandle 이 생기기 전이라
+    // tauri_plugin_dialog 로는 알릴 수 없었다. 사유를 사용자에게 보여주고, 원문은 stderr 에 먼저
+    // 남기며(다이얼로그를 못 띄우는 headless 실행 포함), 종료 코드는 non-zero 로 유지한다.
+    #[test]
+    fn build_failure_before_any_app_handle_keeps_message_and_non_zero_code() {
+        let err = "Failed to initialize webview: no display";
+        let mut shown: Option<String> = None;
+        let code = super::announce_build_failure(&err, |message| shown = Some(message.to_owned()));
+        assert_eq!(code, 1, "실패한 시작은 0으로 끝나면 안 된다");
+        assert_eq!(code, super::EXIT_STARTUP_FAILURE);
+        assert_eq!(
+            shown.as_deref(),
+            Some(super::startup_failure_message(&err).as_str()),
+            "사용자 문구는 startup_failure_message 한 곳에서 나와야 한다"
+        );
+        assert!(shown.unwrap().contains(err), "원문 사유가 그대로 남아야 한다");
+    }
+
+    // Issue #41: 이 다이얼로그는 AppHandle 이전에 동작해야 한다 — 서명에 Tauri 타입이 들어오면
+    // build 실패 시점에 다시 못 띄운다.
+    #[test]
+    fn pre_window_failure_dialog_takes_no_tauri_handle() {
+        let src = include_str!("lib.rs");
+        let start = src.find("fn show_native_error_dialog(").expect("pre-window 다이얼로그가 사라졌다");
+        let head = &src[start..start + 200];
+        assert!(!head.contains("AppHandle"), "AppHandle 없이 동작해야 한다: {head}");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("함수 끝을 못 찾음")];
+        assert!(body.contains("rfd::MessageDialog"), "rfd 다이얼로그 경로가 사라졌다");
+        assert!(body.contains("set_description(message)"), "사용자에게 사유를 보여야 한다");
+        assert!(body.contains("set_buttons(rfd::MessageButtons::Ok)"), "확인 후 종료 안내여야 한다");
+        assert!(!body.contains(".dialog()"), "AppHandle 구동 플러그인이 이 시점에 끼어들면 안 된다");
+    }
+
+    // Issue #41: 리눅스 rfd(GTK)는 다이얼로그를 GTK 스레드로 넘기고 타임아웃 없는 condvar 로
+    // 기다린다(rfd `backend/gtk3/utils.rs::run_blocking`). GTK 초기화가 실패하면(디스플레이 없음)
+    // 그 스레드가 신호 없이 반환해 영구 대기 — 종료 대신 멈춘다. 디스플레이가 있을 때만 시도하는지
+    // 소스로 지킨다 (리눅스 전용 경로라 macOS 실행 검증이 없다).
+    #[test]
+    fn the_gtk_dialog_is_skipped_when_no_display_exists() {
+        let src = include_str!("lib.rs");
+        let start = src.find("fn show_native_error_dialog(").expect("pre-window 다이얼로그가 사라졌다");
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        assert!(
+            body.contains(r#"#[cfg(not(any(target_os = "macos", target_os = "windows")))]"#),
+            "디스플레이 가드는 리눅스/BSD 에만 걸려야 한다"
+        );
+        assert!(body.contains(r#"std::env::var_os("DISPLAY").is_none()"#));
+        assert!(body.contains(r#"std::env::var_os("WAYLAND_DISPLAY").is_none()"#));
+        let guard = body.find("return;").expect("디스플레이 가드가 사라졌다");
+        let dialog = body.find("rfd::MessageDialog::new()").expect("rfd 다이얼로그가 사라졌다");
+        assert!(guard < dialog, "가드는 다이얼로그 시도 앞에 있어야 한다");
+    }
+
+    // Issue #41: rfd 피처가 tauri-plugin-dialog 와 어긋나면 cargo 피처 유니피케이션이
+    // xdg-portal/gtk3/async-std 같은 두 번째 백엔드를 끌어와 리눅스 빌드가 plugin 과 달라진다.
+    #[test]
+    fn rfd_dependency_matches_the_dialog_plugin() {
+        let manifest = include_str!("../Cargo.toml");
+        let line = manifest
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("rfd "))
+            .expect("rfd 의존성이 사라졌다");
+        assert!(line.contains("default-features = false"), "{line}");
+        assert!(line.contains(r#""common-controls-v6""#), "{line}");
+        for second_backend in ["xdg-portal", "async-std", "tokio", "gtk3"] {
+            assert!(!line.contains(second_backend), "두 번째 백엔드 유입: {line}");
+        }
+    }
+
+    // Issue #41: 이 경로를 타는 곳은 run() 의 Err arm 하나뿐이어야 한다 — 정상 시작은 run_return 그대로.
+    #[test]
+    fn only_a_failed_build_takes_the_pre_window_notice() {
+        let src = include_str!("lib.rs");
+        let start = src.find(concat!("pub fn ", "run()")).expect("run() is gone");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("run() has no end")];
+        assert!(
+            body.contains("std::process::exit(announce_build_failure(&e, show_native_error_dialog))"),
+            "Err arm 이 rfd 안내 후 종료하는 경로를 타야 한다"
+        );
+        assert!(body.contains("app.run_return("), "정상 경로는 run_return 그대로여야 한다");
+        assert_eq!(body.matches("announce_build_failure").count(), 1, "Err arm 한 곳에서만 부른다");
     }
 
     // Issue #40: `RunEvent::Reopen`은 Tauri에서 macOS 전용 variant다. cfg 없이 매칭하면
