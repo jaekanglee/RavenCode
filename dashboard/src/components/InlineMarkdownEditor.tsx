@@ -255,6 +255,8 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
      setLegacyOpen(false);
    }, [legacyKey, content]);
 
+   const hasHostDraft = recoverableDraft !== null;
+
    const discardLegacyDraft = useCallback(() => {
      try {
        localStorage.removeItem(legacyKey);
@@ -263,6 +265,36 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
      }
      setLegacyDraft(null);
    }, [legacyKey]);
+
+   const importLegacyDraft = useCallback(() => {
+     if (!legacyOpen || legacyDraft === null || hasHostDraft) return;
+     let existing: string | null = null;
+     try {
+       existing = localStorage.getItem(draftKey);
+     } catch {
+       setToast("❌ 초안 가져오기에 실패했습니다.");
+       setToastType("error");
+       return;
+     }
+     if (existing !== null && existing !== content) {
+       setRecoverableDraft(existing);
+       return;
+     }
+     try {
+       localStorage.setItem(draftKey, legacyDraft);
+       if (localStorage.getItem(draftKey) !== legacyDraft) {
+         throw new Error("storage write mismatch");
+       }
+     } catch {
+       setToast("❌ 초안 가져오기에 실패했습니다.");
+       setToastType("error");
+       return;
+     }
+     setRecoverableDraft(null);
+     setDraft(legacyDraft);
+     setLegacyOpen(false);
+     setMode("edit");
+   }, [legacyOpen, legacyDraft, hasHostDraft, draftKey, content]);
 
    useEffect(() => {
      if (mode !== "edit") return;
@@ -627,7 +659,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <span>
             어느 호스트에서 작성됐는지 알 수 없는 이전 초안이 있습니다. 다른 호스트의 내용으로 이 페이지를 덮지
-            않도록 편집기로 불러오지 않습니다. 필요한 부분은 내용을 보고 직접 옮기세요.
+            않도록 편집기로 불러오지 않습니다. 내용을 확인한 뒤 이 호스트로 가져올 수 있습니다.
           </span>
           <Button
             type="button"
@@ -638,10 +670,25 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
           >
             {legacyOpen ? "숨기기" : "내용 보기"}
           </Button>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            onClick={importLegacyDraft}
+            disabled={!legacyOpen || hasHostDraft}
+            aria-label="이 호스트로 가져오기"
+          >
+            이 호스트로 가져오기
+          </Button>
           <Button type="button" variant="ghost" size="sm" onClick={discardLegacyDraft} aria-label="이전 초안 버리기">
             버리기
           </Button>
         </div>
+        {hasHostDraft && (
+          <div style={{ marginTop: 8, fontSize: 13, color: "var(--color-warning-text)" }}>
+            현재 호스트에 저장하지 않은 초안이 이미 있어 덮어쓰지 않습니다. 기존 초안을 먼저 복구하거나 버리세요.
+          </div>
+        )}
         {legacyOpen && (
           <div style={{ marginTop: 12 }}>
             <TextField label="이전 초안 내용 (읽기 전용)" multiline rows={8} readOnly value={legacyDraft} />
