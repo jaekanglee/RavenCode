@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
-import { downloadPageMarkdown, downloadPageMarkdownAs } from "../lib/pageExport";
+import { downloadPageMarkdown, downloadPageMarkdownAs, revealSavedExport } from "../lib/pageExport";
 import { Button } from "./ui/Button";
 
 // 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
@@ -223,14 +223,26 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
   // 데스크톱은 저장 경로를 돌려주므로 어디에 떨어졌는지 알려준다.
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
+  const [canReveal, setCanReveal] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+
+  async function handleReveal() {
+    setRevealing(true);
+    setExportError(null);
+    try { await revealSavedExport(); }
+    catch (e) { setExportError(e instanceof Error ? e.message : String(e)); }
+    finally { setRevealing(false); }
+  }
+
   async function handleExportMarkdown() {
     setExporting(true);
     setExportError(null);
     setSavedPath(null);
+    setCanReveal(false);
     try {
       const saved = await downloadPageMarkdown(vault, slug);
       setSavedPath(saved.path ?? saved.filename);
-      setTimeout(() => setSavedPath(null), 6000);
+      setCanReveal(Boolean(saved.path));
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -243,11 +255,12 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
     setExporting(true);
     setExportError(null);
     setSavedPath(null);
+    setCanReveal(false);
     try {
       const saved = await downloadPageMarkdownAs(vault, slug);
       if (saved) {
         setSavedPath(saved.path ?? saved.filename);
-        setTimeout(() => setSavedPath(null), 6000);
+        setCanReveal(Boolean(saved.path));
       }
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
@@ -340,7 +353,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
                 variant="secondary"
                 size="sm"
                 fullWidth
-                disabled={exporting}
+                disabled={exporting || revealing}
                 onClick={() => void handleExportMarkdown()}
                 aria-label="Markdown 파일로 저장"
                 style={{ justifyContent: "flex-start", gap: 8 }}
@@ -353,7 +366,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
                 variant="ghost"
                 size="sm"
                 fullWidth
-                disabled={exporting}
+                disabled={exporting || revealing}
                 onClick={() => void handleExportMarkdownAs()}
                 aria-label="저장 위치 선택"
                 style={{ justifyContent: "flex-start", gap: 8 }}
@@ -361,8 +374,13 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
                 {exporting ? "내보내는 중…" : "저장 위치 선택…"}
               </Button>
             </div>
+            {canReveal && savedPath && (
+              <Button type="button" size="sm" variant="secondary" disabled={exporting || revealing} onClick={() => void handleReveal()} aria-label="폴더에서 보기">
+                폴더에서 보기
+              </Button>
+            )}
             {exportError ? (
-              <div className="share-export-error">{exportError}</div>
+              <div role="alert" className="share-export-error">{exportError}</div>
             ) : savedPath ? (
               <div className="share-export-saved">✅ 저장됨: {savedPath}</div>
             ) : null}

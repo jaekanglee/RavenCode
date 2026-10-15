@@ -20,6 +20,7 @@ import {
   pageMarkdownUrl,
   saveTextFile,
   saveTextFileAs,
+  revealSavedExport,
 } from "../src/lib/pageExport";
 import { ShareButton } from "../src/components/ShareButton";
 
@@ -107,6 +108,7 @@ describe("ShareButton 내보내기 섹션", () => {
     const calls = (globalThis.fetch as any).mock.calls.map((c: any[]) => String(c[0]));
     expect(calls.some((u: string) => u.includes("/export.md"))).toBe(true);
     expect(createObjectURL).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "폴더에서 보기" })).toBeNull();
   });
 
   it("PDF 버튼은 없다 (데스크톱에서 조용히 실패하던 인쇄 경로 제거)", async () => {
@@ -130,6 +132,7 @@ describe("ShareButton 내보내기 섹션", () => {
         expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
           filename: "시험-문서.md",
           contents: RAW_MD,
+          attempt: expect.anything(),
         })
       );
       await waitFor(() =>
@@ -137,10 +140,32 @@ describe("ShareButton 내보내기 섹션", () => {
           "/Users/me/Documents/시험-문서.md"
         )
       );
+      await act(async () => { screen.getByRole("button", { name: "폴더에서 보기" }).click(); });
+      expect(invoke).toHaveBeenCalledWith("reveal_saved_export");
       // 저장 위치 선택 경로는 Blob 다운로드를 타지 않는다.
       expect(clicked).toEqual([]);
     } finally {
       delete (window as any).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("OS reveal failure is visible and cancellation revokes the previous action", async () => {
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === "reveal_saved_export") throw new Error("OS denied");
+      if (cmd === "save_download_file_as") return null;
+      return "/tmp/export.md";
+    });
+    Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+    try {
+      await openPopover();
+      await act(async () => { screen.getByLabelText("Markdown 파일로 저장").click(); });
+      await act(async () => { screen.getByRole("button", { name: "폴더에서 보기" }).click(); });
+      expect(screen.getByRole("alert").textContent).toContain("OS denied");
+      await act(async () => { screen.getByLabelText("저장 위치 선택").click(); });
+      expect(screen.queryByRole("button", { name: "폴더에서 보기" })).toBeNull();
+      expect(document.querySelector(".share-export-saved")).toBeNull();
+    } finally {
+      Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     }
   });
 
@@ -158,6 +183,8 @@ describe("ShareButton 내보내기 섹션", () => {
       const popover = screen.getByTestId("share-popover");
       expect(popover.textContent).not.toContain("/Users/me/Documents");
       expect(popover.querySelector(".share-export-error")).toBeNull();
+      expect(popover.querySelector(".share-export-saved")).toBeNull();
+      expect(screen.queryByRole("button", { name: "폴더에서 보기" })).toBeNull();
       expect(clicked).toEqual([]);
     } finally {
       delete (window as any).__TAURI_INTERNALS__;
@@ -187,6 +214,7 @@ describe("데스크톱(Tauri) 저장 경로", () => {
     expect(invoke).toHaveBeenCalledWith("save_download_file", {
       filename: "시험-문서.md",
       contents: "본문",
+      attempt: expect.anything(),
     });
     expect(saved.path).toBe("/Users/me/Downloads/시험-문서.md");
     // 데스크톱에서는 취소되는 Blob 다운로드 경로를 타지 않아야 한다.
@@ -253,6 +281,7 @@ describe("데스크톱 저장 위치 선택 (#4 D-2)", () => {
     expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
       filename: "시험-문서.md",
       contents: "본문",
+      attempt: expect.anything(),
     });
     expect(saved).toEqual({
       filename: "시험-문서.md",
@@ -269,7 +298,7 @@ describe("데스크톱 저장 위치 선택 (#4 D-2)", () => {
     await saveTextFileAs("../../etc/passwd", "본문", "text/markdown");
 
     const args = invoke.mock.calls[0][1] as Record<string, unknown>;
-    expect(Object.keys(args).sort()).toEqual(["contents", "filename"]);
+    expect(Object.keys(invoke.mock.calls.find((c) => c[0] === "save_download_file_as")?.[1] ?? {}).sort()).toEqual(["attempt", "contents", "filename"]);
   });
 
   it("사용자가 취소하면 null을 돌려주고 오류로 보지 않는다", async () => {
@@ -314,6 +343,7 @@ describe("데스크톱 저장 위치 선택 (#4 D-2)", () => {
     expect(invoke).toHaveBeenCalledWith("save_download_file_as", {
       filename: "시험-문서.md",
       contents: RAW_MD,
+          attempt: expect.anything(),
     });
     expect(saved?.path).toBe("/Users/me/Documents/시험-문서.md");
   });
@@ -327,5 +357,54 @@ describe("데스크톱 저장 위치 선택 (#4 D-2)", () => {
     );
 
     expect(await downloadPageMarkdownAs("v", "content/a")).toBeNull();
+  });
+});
+
+describe("reveal IPC boundary", () => {
+  afterEach(() => { Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); });
+  it("never passes a path or URL from the webview", async () => {
+    const invoke = vi.fn(async () => undefined);
+    Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+    await revealSavedExport();
+    expect(invoke.mock.calls).toEqual([["reveal_saved_export"]]);
+  });
+});
+
+describe("export attempt authorization", () => {
+  afterEach(() => { Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); vi.unstubAllGlobals(); });
+  it("revokes Rust reveal authority before even a failed Markdown fetch", async () => {
+    const events: string[] = [];
+    const invoke = vi.fn(async (cmd: string) => { events.push(cmd); });
+    Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+    vi.stubGlobal("fetch", vi.fn(async () => { events.push("fetch"); return new Response("denied", { status: 503 }); }));
+    await expect(downloadPageMarkdownAs("v", "content/a")).rejects.toThrow();
+    expect(events).toEqual(["begin_export", "fetch"]);
+    expect(invoke).not.toHaveBeenCalledWith("save_download_file_as", expect.anything());
+  });
+});
+
+describe("overlapping fetch and cancelled save", () => {
+  afterEach(() => { Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); vi.unstubAllGlobals(); });
+  it("carries the original generation so late fetch cannot reauthorize a cancelled export", async () => {
+    let generation = 0;
+    let resolveOld!: (response: Response) => void;
+    const oldFetch = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "begin_export") return ++generation;
+      if (cmd === "save_download_file_as") {
+        if (args?.attempt !== generation) throw new Error("stale attempt");
+        generation++; // user cancels the newer dialog
+        return null;
+      }
+      throw new Error("unexpected IPC");
+    });
+    Object.assign(window, { __TAURI_INTERNALS__: { invoke } });
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => String(url).includes("old") ? oldFetch : new Response("new")));
+    const old = downloadPageMarkdownAs("v", "old");
+    const oldResult = expect(old).rejects.toThrow("stale attempt");
+    expect(await downloadPageMarkdownAs("v", "new")).toBeNull();
+    resolveOld(new Response("old"));
+    await oldResult;
+    expect(invoke).toHaveBeenLastCalledWith("save_download_file_as", { filename: "old.md", contents: "old", attempt: 1 });
   });
 });
