@@ -306,6 +306,108 @@ describe("문서 트리·페이지 캐시 (Issue #32 B)", () => {
   });
 });
 
+describe("접두어 단위 무효화는 무관한 진행 중 요청·캐시를 건드리지 않는다 (Issue #87)", () => {
+  // 이전 구현은 무효화마다 전역 세대 카운터를 올려서, 무관한 vault의 쓰기 한 번에도 그 시점
+  // 진행 중이던 모든 요청의 결과가 캐시에서 버려졌다(다음 호출이 다시 받아옴). 무효화는 이제
+  // 대상 key의 진행 중 항목만 지우고, 나머지 요청은 결과를 캐시에 남긴다.
+
+  it("무관한 접두어를 무효화해도 진행 중 요청은 결과를 캐시에 남긴다 (동시 호출은 하나로 합쳐진다)", async () => {
+    storeActiveHost("local");
+    const { api } = await loadTab();
+    const slow = deferred();
+    let treeCalls = 0;
+    respond = () => {
+      treeCalls += 1;
+      return treeCalls === 1
+        ? slow.promise
+        : json(200, { tree: { type: "dir", path: "tree-other-2", children: [] } });
+    };
+    const first = api.fetchTree("other");
+    const second = api.fetchTree("other"); // 동시 호출 — 진행 중 요청에 합류한다
+    expect(calls).toHaveLength(1);
+    api.invalidateCache("pages:notes"); // 다른 vault의 페이지 쓰기
+    api.invalidateCache("tree:notes");
+    slow.resolve(json(200, { tree: { type: "dir", path: "tree-other", children: [] } }));
+    expect((await first)?.path).toBe("tree-other");
+    expect(await second).toBe(await first);
+    expect(calls).toHaveLength(1);
+    // 무효화 이전에 시작된 이 요청의 결과가 캐시에 남아 다시 받지 않는다
+    expect((await api.fetchTree("other"))?.path).toBe("tree-other");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("A vault 쓰기(mutation 경로)는 B vault의 진행 중 트리 요청을 취소하지 않는다", async () => {
+    storeActiveHost("local");
+    const { api } = await loadTab();
+    const slow = deferred();
+    let treeCalls = 0;
+    respond = (_url, method) => {
+      if (method === "POST") return json(200, { ok: true });
+      treeCalls += 1;
+      return treeCalls === 1
+        ? slow.promise
+        : json(200, { tree: { type: "dir", path: "tree-b-2", children: [] } });
+    };
+    const inflight = api.fetchTree("b");
+    await api.createPage("a", { slug: "s", title: "t", content: "c", type: "note", tags: [] });
+    slow.resolve(json(200, { tree: { type: "dir", path: "tree-b", children: [] } }));
+    expect((await inflight)?.path).toBe("tree-b");
+    expect((await api.fetchTree("b"))?.path).toBe("tree-b"); // 캐시 적중 — 다시 받지 않는다
+    expect(calls).toHaveLength(2); // 트리 1회 + 쓰기 1회
+  });
+
+  it("무효화된 접두어의 진행 중 요청은 늦게 끝나도 캐시에 남지 않는다", async () => {
+    storeActiveHost("local");
+    const { api } = await loadTab();
+    const slow = deferred();
+    respond = () => slow.promise;
+    const before = api.fetchTree("notes");
+    api.invalidateCache("tree:notes"); // 이 쓰기로 tree:notes 캐시는 신선하지 않다
+    respond = () => json(200, { tree: { type: "dir", path: "tree-after", children: [] } });
+    const after = await api.fetchTree("notes"); // 합류하지 않고 새로 요청한다
+    expect(after?.path).toBe("tree-after");
+    slow.resolve(json(200, { tree: { type: "dir", path: "tree-before", children: [] } }));
+    expect((await before)?.path).toBe("tree-before");
+    expect((await api.fetchTree("notes"))?.path).toBe("tree-after"); // 늦은 응답이 캐시를 덮지 않음
+    expect(calls).toHaveLength(2);
+  });
+
+  it("다른 호스트 key를 무효화해도 이 탭의 진행 중 요청 결과는 캐시에 남는다 (호스트 격리 유지)", async () => {
+    storeActiveHost("a");
+    const { api } = await loadTab();
+    const slow = deferred();
+    let treeCalls = 0;
+    respond = () => {
+      treeCalls += 1;
+      return treeCalls === 1
+        ? slow.promise
+        : json(200, { tree: { type: "dir", path: "tree-A-2", children: [] } });
+    };
+    const inflight = api.fetchTree("notes");
+    api.invalidateCache(`tree:notes@${B}`); // 다른 호스트의 같은 vault
+    slow.resolve(json(200, { tree: { type: "dir", path: "tree-A", children: [] } }));
+    expect((await inflight)?.path).toBe("tree-A");
+    expect((await api.fetchTree("notes"))?.path).toBe("tree-A"); // 이 탭 호스트의 캐시는 살아 있다
+    expect(calls).toHaveLength(1);
+  });
+  it("제목 수정(updatePage)도 그 vault의 tree 캐시를 무효화한다 (rename → 옛 제목 재사용 방지)", async () => {
+    storeActiveHost("local");
+    const { api } = await loadTab();
+    let treeCalls = 0;
+    respond = (_url, method) => {
+      if (method === "PUT") return json(200, { ok: true });
+      treeCalls += 1;
+      return json(200, {
+        tree: { type: "dir", path: treeCalls === 1 ? "t" : "renamed", children: [] },
+      });
+    };
+    expect((await api.fetchTree("notes"))?.path).toBe("t");
+    await api.updatePage("notes", "hello", { content: "x", title: "새 제목" });
+    expect((await api.fetchTree("notes"))?.path).toBe("renamed"); // 캐시를 재사용하지 않는다
+    expect(calls.map((c) => c.method)).toEqual(["GET", "PUT", "GET"]);
+  });
+});
+
 describe("편집 초안은 호스트별로 분리된다 (Issue #32 D — 다른 호스트 내용 저장 방지)", () => {
   it("초안 키에는 항상 호스트가 들어간다 (원격 = endpoint, 로컬 = local)", async () => {
     storeActiveHost("a");
