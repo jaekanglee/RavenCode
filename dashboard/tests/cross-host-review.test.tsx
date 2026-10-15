@@ -353,7 +353,11 @@ describe("정상 로컬 선택은 막지 않는다 (회귀)", () => {
 // ─── P2 ───────────────────────────────────────────────────────────────
 
 describe("P2 부분 무효화는 관련 없는 키의 진행 중 요청 결과를 틀리게 만들지 않는다", () => {
-  it("tree 무효화 중 진행되던 pages 요청: 합류한 호출은 같은 결과를 받고, 다음 조회는 다시 요청한다(성능만 영향)", async () => {
+  // Issue #87: 이 테스트는 원래 "관련 없는 키의 진행 중 요청은 캐시에 남지 않는다(성능만 영향)"를
+  // 고정했다 — 전역 무효화 세대가 무관한 vault의 쓰기 한 번에도 진행 중 요청 결과를 전부 버렸기
+  // 때문이다. 무효화가 이제 대상 key로 한정되므로 그 결과는 캐시에 남는다(정확성은 동일, 재요청만
+  // 줄어든다). 아래는 그 정확성(합류한 호출이 같은 결과를 받음)과 새 동작(캐시 적중)을 함께 지킨다.
+  it("tree 무효화 중 진행되던 pages 요청: 합류한 호출은 같은 결과를 받고, 그 결과는 캐시에 남는다 (Issue #87)", async () => {
     storeHosts("local", undefined);
     const { api } = await loadTab();
     let release!: (r: Response) => void;
@@ -365,8 +369,8 @@ describe("P2 부분 무효화는 관련 없는 키의 진행 중 요청 결과�
     release(json(200, { pages: [{ slug: "p1" }] }));
     expect(await first).toEqual(await joined);
     expect(calls.filter((c) => /\/pages/.test(c.url))).toHaveLength(1);
-    respond = () => json(200, { pages: [{ slug: "p2" }] });
-    expect((await api.fetchPages(VAULT)).map((p: { slug: string }) => p.slug)).toEqual(["p2"]); // 캐시에 안 남아 재요청
-    expect(calls.filter((c) => /\/pages/.test(c.url))).toHaveLength(2);
+    // 진행 중이던 이 요청은 무효화 대상이 아니므로 결과가 캐시에 남는다 → 재요청 없음
+    expect((await api.fetchPages(VAULT)).map((p: { slug: string }) => p.slug)).toEqual(["p1"]);
+    expect(calls.filter((c) => /\/pages/.test(c.url))).toHaveLength(1);
   });
 });

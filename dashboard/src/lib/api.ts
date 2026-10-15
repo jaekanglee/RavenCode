@@ -15,20 +15,25 @@ interface CacheEntry<T> {
   ts: number;
 }
 const _cache = new Map<string, CacheEntry<unknown>>();
+// 진행 중 요청. 이 map의 항목 자체가 "그 key의 현재 요청"이라는 표시라, 무효화가 항목을
+// 지우면 그 요청은 늦게 끝나도 캐시에 쓰지 못한다 (아래 cachedFetch 참조).
 const _inflight = new Map<string, Promise<unknown>>();
-// Issue #32: 무효화 세대. 무효화 이전에 시작된 요청은 늦게 끝나도 캐시에 쓰지 않고,
-// 무효화 뒤의 호출이 그 요청에 합류하지도 않는다 (쓰기 직전 상태가 15초간 되살아나는 것 방지).
-let _generation = 0;
 
 function cachedFetch<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
   const hit = _cache.get(key);
   if (hit && Date.now() - hit.ts < ttlMs) return Promise.resolve(hit.data as T);
   const pending = _inflight.get(key);
   if (pending) return pending as Promise<T>;
-  const gen = _generation;
   const p = fn().then((data) => {
-    if (gen === _generation) _cache.set(key, { data, ts: Date.now() });
-    if (_inflight.get(key) === p) _inflight.delete(key);
+    // Issue #87: 이 요청이 아직 그 key의 현재 요청일 때만 캐시에 쓴다. 무효화는 대상 key(들)를
+    // _inflight에서 지우므로, 무효화 이전에 시작된 응답은 여기서 걸러진다 (쓰기 직전 상태가
+    // 15초간 되살아나는 것 방지 — Issue #32). 반대로 접두어가 다른 진행 중 요청은 항목이
+    // 그대로 남아 결과를 캐시에 남긴다. 이전 구현은 전역 세대 카운터를 올려서, 무관한 vault의
+    // 쓰기 한 번에 그 시점 진행 중이던 모든 요청의 결과가 버려졌다 (매번 다시 받아옴).
+    if (_inflight.get(key) === p) {
+      _cache.set(key, { data, ts: Date.now() });
+      _inflight.delete(key);
+    }
     return data;
   }).catch((err) => {
     if (_inflight.get(key) === p) _inflight.delete(key);
@@ -38,9 +43,12 @@ function cachedFetch<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promi
   return p;
 }
 
-/** mutation 후 호출 — 해당 key 또는 전체 캐시 무효화. 진행 중인 해당 요청도 캐시에 쓰지 못하게 한다. */
+/**
+ * mutation 후 호출 — 해당 key 접두어만 또는 전체 캐시를 무효화한다. 대상 key의 진행 중
+ * 요청도 캐시에 쓰지 못하게 하고(뒤따르는 호출은 그 요청에 합류하지 않고 새로 받는다),
+ * 접두어가 다른 진행 중 요청은 취소하지 않는다 — 결과가 캐시에 그대로 남는다 (Issue #87).
+ */
 export function invalidateCache(keyPrefix?: string): void {
-  _generation += 1;
   if (!keyPrefix) { _cache.clear(); _inflight.clear(); return; }
   for (const k of _cache.keys()) {
     if (k.startsWith(keyPrefix)) _cache.delete(k);
@@ -459,6 +467,10 @@ export async function updatePage(
     throw new Error(detail ? String(detail) : `update failed: ${r.status}`);
   }
   invalidateCache(`pages:${vault}`);
+  // Issue #87: 제목 수정은 이 vault 트리에 보이는 노드 제목도 바꾼다. create/delete와 달리 여기만
+  // tree를 무효화하지 않아, 이미 캐시된 트리는 TTL(15초)까지, 진행 중이던 tree 응답은 이번 변경으로
+  // 캐시에 남아 옛 제목을 보일 수 있었다. 무효화 범위를 create/delete와 맞춘다.
+  invalidateCache(`tree:${vault}`);
   return r.json();
 }
 
