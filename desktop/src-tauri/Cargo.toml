@@ -20,6 +20,12 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
+# Issue #41: `Builder::build()` 실패는 AppHandle 이 생기기 전이라 tauri-plugin-dialog 로는 알릴 수
+# 없다(플러그인은 AppHandle 로 구동된다). rfd 는 Tauri 런타임 없이 OS 툴킷에 직접 말을 걸어
+# (macOS NSAlert / Windows MessageBoxW / GTK) 이 시점에도 다이얼로그를 띄운다.
+# 피처는 tauri-plugin-dialog 와 똑같이 맞춘다 — 다르면 cargo 피처 유니피케이션이
+# xdg-portal/async-std 같은 두 번째 rfd 백엔드를 끌어와 리눅스 빌드가 plugin 과 달라진다.
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
 # Issue #67: the desktop session credential comes straight from the OS CSPRNG
 # (macOS getentropy, Linux getrandom(2), else /dev/urandom, Windows ProcessPrng). Already in the tree via tauri.
 getrandom = "0.3"
