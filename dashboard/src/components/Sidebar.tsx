@@ -496,7 +496,7 @@ export function Sidebar({
       )}
 
       {/* Host selector */}
-      <HostPicker />
+      <HostPicker onNavigate={onClose} />
 
       {/* Vault selector */}
       {vaults.length > 0 && (

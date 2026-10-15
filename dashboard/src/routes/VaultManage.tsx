@@ -1,3 +1,4 @@
+import { HostPicker } from "../components/HostPicker";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
@@ -303,6 +304,10 @@ export function VaultManage() {
           <Button variant="pillPrimary" onClick={() => navigate("/vault/new")}>새 vault 만들기</Button>
         </div>
       </div>
+
+      <section id="hosts" aria-label="호스트 관리" style={{ marginBottom: 24 }}>
+        <HostPicker management />
+      </section>
 
       {error && <p role="alert" style={{ color: "var(--color-danger-text)", fontSize: 13 }}>{error}</p>}
       {loading ? (

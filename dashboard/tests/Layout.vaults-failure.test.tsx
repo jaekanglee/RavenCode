@@ -52,16 +52,17 @@ function LocationProbe() {
   return <div data-testid="location">{useLocation().pathname}</div>;
 }
 
-async function mount() {
+async function mount(path = "/") {
   // api-base는 module-load 시점에 window.fetch를 감싼다 → stub 설치 후 import.
   await import("../src/lib/api-base");
   const { Layout } = await import("../src/components/Layout");
   const { AuthTokenDialog } = await import("../src/components/AuthTokenDialog");
   return render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<div>HOME-OUTLET</div>} />
+          <Route path="/vault/manage" element={<div data-testid="host-management-outlet" />} />
           <Route path="/vault/new" element={<div>NEW-VAULT-PAGE</div>} />
         </Route>
       </Routes>
@@ -162,6 +163,18 @@ describe("Layout — vault 목록 실패 vs 빈 목록 (Issue #30)", () => {
     await screen.findByRole("alert");
     fireEvent.click(screen.getByRole("button", { name: "다시 시도" }));
     expect(await screen.findByText("NEW-VAULT-PAGE")).toBeTruthy();
+  });
+});
+
+describe("관리 페이지 복구 경로 (Issue #3)", () => {
+  it.each([503, 200])("vault 목록이 실패하거나 비어도 관리에 접근할 수 있다 (%s)", async (code) => {
+    vaultReplies = [code === 200 ? ok([]) : status(code)];
+    await mount("/vault/manage");
+    await waitFor(() => expect(vaultCalls).toBeGreaterThan(0));
+    if (code !== 200) await screen.findByRole("alert");
+    expect(screen.getByTestId("host-management-outlet")).toBeTruthy();
+    expect(location()).toBe("/vault/manage");
+    expect(screen.getByRole("combobox", { name: "호스트 PC 선택" })).toBeTruthy();
   });
 });
 
