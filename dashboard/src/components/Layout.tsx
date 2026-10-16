@@ -3,6 +3,8 @@ import clsx from "clsx";
 import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "./CommandPalette";
 import { UpdateChecker } from "./UpdateChecker";
+import { GuestBanner } from "./GuestBanner";
+import { usePendingGuestCount, useGuestMe } from "../lib/guest";
 import { EmptyState } from "./ui/EmptyState";
 import { Button } from "./ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
@@ -54,6 +56,30 @@ export function planSectionNav(width: number): SectionNavPlan {
     compact: width <= 390,
     railItems: PRIMARY_NAV.length + 1,
   };
+}
+
+// 손님에게 숨기는 더보기 항목 — 화면이 쓰는 API가 운영자 전용이다.
+export const GUEST_HIDDEN_NAV = new Set(["/vault/manage", "/workspace"]);
+
+function PendingBadge({ count }: { count: number }) {
+  return (
+    <span
+      aria-label={`입장 요청 ${count}건`}
+      style={{
+        marginLeft: 4,
+        minWidth: 16,
+        padding: "0 5px",
+        borderRadius: 8,
+        fontSize: 11,
+        lineHeight: "16px",
+        textAlign: "center",
+        color: "var(--color-on-primary)",
+        background: "var(--color-danger)",
+      }}
+    >
+      {count}
+    </span>
+  );
 }
 
 export function isMoreNavActive(pathname: string): boolean {
@@ -109,6 +135,9 @@ function describeVaultsFailure(f: VaultsFailure): { title: string; description: 
 }
 
 export function Layout() {
+  // 손님 입장 (spec 2026-10-16-guest-access-design): 조기 return보다 먼저 — 훅 순서 고정.
+  const guestMe = useGuestMe();
+  const pendingGuests = usePendingGuestCount();
   const [vault, setVault] = useState<string>(() => getActiveVault() || "");
   const [vaults, setVaults] = useState<VaultMeta[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -252,6 +281,9 @@ export function Layout() {
   // 팔레트가 그 이름으로 B에 요청하지 않게.
   const listedVault = vaults.some((v) => v.name === vault) ? vault : "";
   const navPlan = planSectionNav(compactNav ? 390 : 1024);
+  // 손님 입장 (spec 2026-10-16-guest-access-design): 손님에겐 운영자 전용 화면을 숨기고,
+  // 운영자에겐 대기 중인 입장 요청 수를 더보기·관리에 표시한다.
+  const moreNav = guestMe ? navPlan.more.filter((t) => !GUEST_HIDDEN_NAV.has(t.to)) : navPlan.more;
   const moreActive = isMoreNavActive(location.pathname);
 
   return (
@@ -442,10 +474,11 @@ export function Layout() {
             >
               <span aria-hidden style={{ fontSize: 14 }}>⋯</span>
               <span>더보기</span>
+              {pendingGuests > 0 && <PendingBadge count={pendingGuests} />}
             </button>
             {moreOpen && (
               <div className="section-nav-more-panel" role="menu" aria-label="운영 도구">
-                {navPlan.more.map((t) => {
+                {moreNav.map((t) => {
                   const isActive = t.match(location.pathname);
                   return (
                     <Link
@@ -458,6 +491,7 @@ export function Layout() {
                     >
                       <span aria-hidden style={{ fontSize: 14 }}>{t.icon}</span>
                       <span>{t.label}</span>
+                      {t.to === "/vault/manage" && pendingGuests > 0 && <PendingBadge count={pendingGuests} />}
                     </Link>
                   );
                 })}
@@ -465,6 +499,7 @@ export function Layout() {
             )}
           </div>
         </nav>
+        <GuestBanner me={guestMe} />
 
         <div
           className="page-content flex-1 overflow-y-auto"

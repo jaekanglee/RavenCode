@@ -4,6 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { UpdatePanel } from "../components/UpdatePanel";
 import { BackupPanel } from "../components/BackupPanel";
+import { GuestAccessPanel } from "../components/GuestAccessPanel";
+import { isOwnerTab } from "../lib/guest";
 import { useAppUpdater } from "../lib/useAppUpdater";
 import { describeBindExposure } from "../lib/bind-exposure";
 import { describeTailnetAccess } from "../lib/network-status";
@@ -481,6 +483,9 @@ export function VaultManage() {
           경로는 이 PC의 대화상자로 고르므로 로컬 호스트일 때만 보인다.
           원격 core에 연결돼 있으면 그 경로를 원격 PC의 디스크에서 읽고 쓰게 된다. */}
       {isTauri && getActiveHost().isLocal && <BackupPanel onImported={() => void loadVaults()} />}
+
+      {/* ── 손님 입장 (spec 2026-10-16-guest-access-design): 운영자 탭에서만 ── */}
+      {isOwnerTab() && <GuestAccessPanel vaults={vaults.map((v) => v.name)} />}
 
       {/* ── 내 PC 및 서버 & API / MCP 환경 정보 ── */}
       <div style={{ marginTop: 32, borderTop: "2px solid var(--color-hairline)", paddingTop: 24 }}>

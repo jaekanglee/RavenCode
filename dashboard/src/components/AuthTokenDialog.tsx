@@ -9,11 +9,15 @@
 //  - 통과한 토큰만 host-auth(sessionStorage)에 저장 → onVerified (기본: 새로고침).
 //    저장이 거부되면(사생활 보호 모드 등) 성공으로 처리하지 않는다.
 //  - 거절되면 저장하지 않고, 오류 문구에 입력값을 넣지 않는다.
-import { useEffect, useState } from "react";
+//  - 손님 입장 (spec 2026-10-16-guest-access-design): 대시보드가 온 호스트 자신(base "")이면
+//    먼저 입장 요청 화면(GuestEntryForm)을 보여 준다 — 링크를 받은 동료는 토큰이 없다.
+//    "토큰 직접 입력"으로 위의 토큰 입력으로 바꾼다. 원격 호스트(HostPicker)는 토큰 입력부터.
+import { useEffect, useRef, useState } from "react";
 import { Modal } from "./ui/Modal";
 import { TextField } from "./ui/TextField";
 import { Button } from "./ui/Button";
-import { AUTH_REQUIRED_EVENT, setHostToken, takePendingAuth } from "../lib/host-auth";
+import { GuestEntryForm } from "./GuestEntryForm";
+import { AUTH_REQUIRED_EVENT, setHostToken, takeGuestRefusal, takePendingAuth } from "../lib/host-auth";
 
 export interface AuthTokenDialogProps {
   /** 토큰이 검증·저장된 뒤 호출. 기본은 화면 새로고침. */
@@ -25,15 +29,25 @@ export function AuthTokenDialog({ onVerified = () => window.location.reload() }:
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [mode, setMode] = useState<"guest" | "token">("token");
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const opened = useRef(false);
 
   useEffect(() => {
+    const open = (next: string) => {
+      if (opened.current) return;
+      opened.current = true;
+      setMode(next === "" ? "guest" : "token");
+      setRefusal(takeGuestRefusal());
+      setBase(next);
+    };
     // A 401 may have landed before this mounted (first /api call races the render).
     const pending = takePendingAuth();
-    if (pending !== null) setBase(pending);
+    if (pending !== null) open(pending);
     const onRequired = (e: Event) => {
       const detail = (e as CustomEvent<{ base: string }>).detail;
       takePendingAuth();
-      setBase((current) => current ?? detail?.base ?? "");
+      open(detail?.base ?? "");
     };
     window.addEventListener(AUTH_REQUIRED_EVENT, onRequired);
     return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onRequired);
@@ -41,6 +55,7 @@ export function AuthTokenDialog({ onVerified = () => window.location.reload() }:
 
   function close() {
     takePendingAuth();
+    opened.current = false;
     setBase(null);
     setToken("");
     setError(null);
@@ -73,6 +88,19 @@ export function AuthTokenDialog({ onVerified = () => window.location.reload() }:
     } finally {
       setChecking(false);
     }
+  }
+
+  if (base !== null && mode === "guest") {
+    return (
+      <Modal open onClose={close} maxWidth={440} zIndex={1100}>
+        <div role="dialog" aria-labelledby="guest-entry-title" style={{ display: "grid", gap: 12 }}>
+          <h2 id="guest-entry-title" style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>
+            입장 요청
+          </h2>
+          <GuestEntryForm base={base} refusal={refusal} onEntered={onVerified} onUseToken={() => setMode("token")} />
+        </div>
+      </Modal>
+    );
   }
 
   return (

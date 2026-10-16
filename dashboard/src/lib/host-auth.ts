@@ -8,6 +8,12 @@
  * Storage: sessionStorage only — it survives the reloads the host switcher does,
  * and is gone when the window closes. Never localStorage, never a URL, never a
  * log line. Revoke on the server with `raven mcp token revoke <name>`.
+ *
+ * Guest tokens (`rvg_`, spec 2026-10-16-guest-access-design) are the one exception:
+ * they live in localStorage so an approved colleague gets back in after closing the
+ * window. They only work from this browser's device id and the IP the owner approved,
+ * and the owner revokes them in the 관리 tab. Every request that carries one also
+ * sends `X-Raven-Device`.
  */
 
 const KEY_PREFIX = "raven:host-token:";
@@ -156,13 +162,104 @@ export function clearSessionCredential(base: string): boolean {
   return false;
 }
 
-/** `Bearer <token>` for a host, or null: the desktop credential for its own Core, else the stored token. */
+/** `Bearer <token>` for a host, or null: the desktop credential for its own Core, else the stored token, else a guest token. */
 export function authHeaderFor(base: string): string | null {
   if (sessionCredential && sessionCredential.base === canonicalBase(base)) {
     return `Bearer ${sessionCredential.token}`;
   }
-  const token = getHostToken(base);
+  const token = getHostToken(base) || getGuestToken(base);
   return token ? `Bearer ${token}` : null;
+}
+
+/** Headers that authenticate a request to `base`, or null: Authorization, plus X-Raven-Device for a guest token. */
+export function authHeadersFor(base: string): Record<string, string> | null {
+  const auth = authHeaderFor(base);
+  if (!auth) return null;
+  return isGuestAuth(auth) ? { Authorization: auth, "X-Raven-Device": deviceId() } : { Authorization: auth };
+}
+
+// ─── guest access (spec 2026-10-16-guest-access-design) ───────────────
+
+const GUEST_KEY_PREFIX = "raven:guest-token:";
+const DEVICE_KEY = "raven:device-id";
+let memoryDeviceId: string | null = null;
+
+function persistent(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** True when an Authorization value carries a guest token. */
+export function isGuestAuth(header: string | null): boolean {
+  return !!header && /^bearer rvg_/i.test(header);
+}
+
+/** This browser's device id (`d_` + 32 random URL-safe chars), created on first use. */
+export function deviceId(): string {
+  try {
+    const stored = persistent()?.getItem(DEVICE_KEY);
+    if (stored && /^d_[A-Za-z0-9_-]{22,64}$/.test(stored)) return stored;
+  } catch {
+    /* fall through */
+  }
+  if (!memoryDeviceId) {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    memoryDeviceId = "d_" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  try {
+    persistent()?.setItem(DEVICE_KEY, memoryDeviceId);
+  } catch {
+    /* memory only — a reload makes a new device, the owner approves again */
+  }
+  return memoryDeviceId;
+}
+
+export function getGuestToken(base: string): string | null {
+  try {
+    return persistent()?.getItem(GUEST_KEY_PREFIX + canonicalBase(base)) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stores an approved guest token; false when blank or the browser refused to keep it. */
+export function setGuestToken(base: string, token: string): boolean {
+  const value = token.trim();
+  if (!value) return false;
+  try {
+    const s = persistent();
+    if (!s) return false;
+    s.setItem(GUEST_KEY_PREFIX + canonicalBase(base), value);
+    return s.getItem(GUEST_KEY_PREFIX + canonicalBase(base)) === value;
+  } catch {
+    return false;
+  }
+}
+
+export function clearGuestToken(base: string): void {
+  try {
+    persistent()?.removeItem(GUEST_KEY_PREFIX + canonicalBase(base));
+  } catch {
+    /* ignore */
+  }
+}
+
+// Why the Core refused this tab's guest token (revoked / expired / device_mismatch /
+// ip_changed); the entry dialog shows it once.
+let guestRefusal: string | null = null;
+
+export function setGuestRefusal(reason: string | null): void {
+  guestRefusal = reason;
+}
+
+export function takeGuestRefusal(): string | null {
+  const reason = guestRefusal;
+  guestRefusal = null;
+  return reason;
 }
 
 export const AUTH_REQUIRED_EVENT = "raven:auth-required";

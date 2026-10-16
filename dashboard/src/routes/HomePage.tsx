@@ -1,4 +1,5 @@
 import { Link, useNavigate } from "react-router-dom";
+import { canGuest, useGuestMe } from "../lib/guest";
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
@@ -185,6 +186,7 @@ export function HomePage() {
   const [showScratch, setShowScratch] = useState(false);
   // Plan v1 묶음 B (Tasks 5-7): 인라인 폼 트리거.
   const [showNewPageForm, setShowNewPageForm] = useState(false);
+  const guestMe = useGuestMe();
   const navigate = useNavigate();
 
   // ─── viewport ────────────────────────────────────────
@@ -199,13 +201,13 @@ export function HomePage() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "n") return;
-      if (!activeVault) return;
+      if (!activeVault || !canGuest(guestMe, activeVault, "create")) return;
       e.preventDefault();
       setShowNewPageForm(true);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [activeVault]);
+  }, [activeVault, guestMe]);
 
   // ─── data fetch: vaults + per-vault stats ─────────────
   useEffect(() => {
@@ -354,7 +356,7 @@ export function HomePage() {
         >
           <NewPageCard
             isMobile={isMobile}
-            disabled={!activeVault}
+            disabled={!activeVault || !canGuest(guestMe, activeVault, "create")}
             active={showNewPageForm}
             primary={Boolean(activeVault)}
             onToggle={() => setShowNewPageForm((v) => !v)}

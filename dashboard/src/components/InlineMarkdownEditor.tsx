@@ -124,6 +124,10 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
    precondition?: string;
    metaRow?: React.ReactNode;
    filePathRow?: React.ReactNode;
+   /** 손님 모드에서 수정 권한이 없으면 false — 편집 버튼·Cmd+E를 숨긴다 (서버 403이 원칙). */
+   canEdit?: boolean;
+   /** 손님 모드면 false — 삭제는 운영자만. */
+   canDelete?: boolean;
  }
  
  // textarea와 FindBackdrop이 글자 위치를 1:1로 맞추기 위해 공유하는 배치 스타일.
@@ -151,6 +155,8 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
    precondition,
    metaRow,
    filePathRow,
+   canEdit = true,
+   canDelete = true,
  }: InlineMarkdownEditorProps) {
    const [mode, setMode] = useState<"view" | "edit">("view");
    // edit 모드 draft = 전체 MD 원본 (content).
@@ -216,6 +222,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
        }
        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "e") {
          e.preventDefault();
+         if (!canEdit) return;
          setMode((m) => (m === "view" ? "edit" : "view"));
        } else if (e.key === "Escape" && mode === "edit") {
          e.preventDefault();
@@ -229,7 +236,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
      document.addEventListener("keydown", onKey);
      return () => document.removeEventListener("keydown", onKey);
      // eslint-disable-next-line react-hooks/exhaustive-deps
-   }, [mode, draft, titleVal]);
+   }, [mode, draft, titleVal, canEdit]);
 
    const dirty = draft !== content || titleVal !== title;
 
@@ -527,6 +534,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
          {mode === "view" ? (
            <>
              <ShareButton vault={vault} slug={slug} />
+             {canEdit && (
              <Button
                type="button"
                variant="primary"
@@ -538,6 +546,8 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
              >
                <Icon.Edit />
              </Button>
+             )}
+             {canDelete && (
              <Button
                type="button"
                variant="ghost"
@@ -550,6 +560,7 @@ import { applyFindHighlights, clearFindHighlights, collectTextRanges, scrollRang
              >
                <Icon.Trash />
              </Button>
+             )}
            </>
          ) : (
            <>

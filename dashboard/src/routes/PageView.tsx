@@ -11,6 +11,7 @@ import { Button } from "../components/ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
 import { deletePage, fetchPage, getActiveVault, sendPageFeedback, updatePage, deletePageFeedback, updatePageFeedback, fetchRecommendations, commitDraft, deleteDraft , apiFetch} from "../lib/api";
 import { PropertiesPanel } from "../components/PropertiesPanel";
+import { canGuest, useGuestMe } from "../lib/guest";
 import type { Graph, Page, Recommendation } from "../types";
 
 interface Ctx {
@@ -199,6 +200,7 @@ export function PageView() {
   // slug/vault haven't changed — otherwise the article stays stale until
   // the user navigates away and back.
   const [reloadKey, setReloadKey] = useState(0);
+  const guestMe = useGuestMe();
   const [copied, setCopied] = useState(false);
   const [hoveredRelKey, setHoveredRelKey] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -500,6 +502,8 @@ export function PageView() {
           onDeleted={() => {
             ctx?.refresh?.();
           }}
+          canEdit={canGuest(guestMe, vault, "update")}
+          canDelete={guestMe === null}
           filePathRow={
             page.filePath ? (
               <div

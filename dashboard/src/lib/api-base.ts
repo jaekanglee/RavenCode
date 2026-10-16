@@ -24,13 +24,16 @@
  */
 
 import {
-  authHeaderFor,
+  authHeadersFor,
   canonicalBase,
+  clearGuestToken,
   clearHostToken,
+  isGuestAuth,
   isSessionAuth,
   refreshSessionCredential,
   releaseRefusedSession,
   requestAuth,
+  setGuestRefusal,
 } from "./host-auth";
 
 let apiBase = "";
@@ -165,11 +168,11 @@ function isApiPath(input: unknown): input is string {
 // was meant for this host only, and stripping Authorization on a cross-origin hop is
 // left to each browser engine (the Core API itself never redirects /api calls).
 function withAuth(init: RequestInit | undefined, base: string): { init: RequestInit | undefined; auto: boolean } {
-  const auth = authHeaderFor(base);
+  const auth = authHeadersFor(base);
   if (!auth) return { init, auto: false };
   const headers = new Headers(init?.headers);
   if (headers.has("authorization")) return { init, auto: false };
-  headers.set("Authorization", auth);
+  for (const [k, v] of Object.entries(auth)) headers.set(k, v);
   return { init: { ...init, headers, redirect: init?.redirect ?? "error" }, auto: true };
 }
 
@@ -184,6 +187,18 @@ function handleUnauthorized(res: Response, base: string, auto: boolean, sent: st
     // The token we attached was refused (revoked or wrong): drop it, ask again.
     // A refused desktop credential that was already replaced (a concurrent request after
     // a Core restart) leaves the new one alone and asks nothing.
+    if (auto && isGuestAuth(sent)) {
+      // spec 2026-10-16-guest-access-design: the guest token stopped working (revoked,
+      // expired, another device or IP) — drop it and ask to enter again, saying why.
+      clearGuestToken(base);
+      void res
+        .clone()
+        .json()
+        .then((body) => setGuestRefusal(typeof body?.reason === "string" ? body.reason : null))
+        .catch(() => setGuestRefusal(null))
+        .finally(() => requestAuth(base));
+      return;
+    }
     if (auto) {
       const session = releaseRefusedSession(base, sent);
       if (session === "stale") return;
@@ -237,10 +252,10 @@ if (typeof window !== "undefined") {
       const merged = new Request(input, init);
       let auto = false;
       let req = merged;
-      const auth = authHeaderFor(base);
+      const auth = authHeadersFor(base);
       if (auth && !merged.headers.has("authorization")) {
         const headers = new Headers(merged.headers);
-        headers.set("Authorization", auth);
+        for (const [k, v] of Object.entries(auth)) headers.set(k, v);
         req = new Request(merged, { headers, redirect: merged.redirect === "follow" ? "error" : merged.redirect });
         auto = true;
       }
@@ -269,7 +284,7 @@ if (typeof window !== "undefined") {
       if (!isApiPath(url)) return origBeacon(url, data);
       if (tabHost.error) return false;
       const targetBase = getActiveTargetBaseUrl();
-      const auth = authHeaderFor(targetBase);
+      const auth = authHeadersFor(targetBase);
       if (auth) {
         // Beacons cannot carry headers; keepalive fetch survives unload the same way.
         void origFetch(targetBase + url, {
@@ -277,7 +292,7 @@ if (typeof window !== "undefined") {
           body: data ?? null,
           keepalive: true,
           redirect: "error",
-          headers: { Authorization: auth },
+          headers: auth,
         }).catch(() => {});
         return true;
       }

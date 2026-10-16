@@ -135,7 +135,10 @@ describe("Layout — vault 목록 실패 vs 빈 목록 (Issue #30)", () => {
   it("401: 이동 없음 + 기존 토큰 입력창 1개만 (중복 인증 모달 없음)", async () => {
     vaultReplies = [status(401, { "www-authenticate": 'Bearer realm="raven"' })];
     await mount();
-    // 기존 흐름: api-base 래퍼 → requestAuth → AuthTokenDialog
+    // 기존 흐름: api-base 래퍼 → requestAuth → AuthTokenDialog (같은 호스트는 입장 요청부터)
+    expect(await screen.findByText("입장 요청", { selector: "h2" })).toBeTruthy();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "토큰 직접 입력" }));
     expect(await screen.findByText("접근 토큰이 필요합니다")).toBeTruthy();
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/인증이 필요합니다/);

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPage, fetchTree, getActiveVault } from "../lib/api";
+import { canGuest, useGuestMe } from "../lib/guest";
 import type { TreeNode } from "../types";
 import { TextField } from "./ui/TextField";
 import { Modal } from "./ui/Modal";
@@ -61,7 +62,14 @@ interface NewPageButtonProps {
   onOpen?: () => void;
 }
 
-export function NewPageButton({
+// 손님 입장 (spec 2026-10-16-guest-access-design): 작성 권한 없는 손님에겐 버튼을 숨긴다.
+export function NewPageButton(props: NewPageButtonProps) {
+  const me = useGuestMe();
+  if (!canGuest(me, props.vault || getActiveVault() || "default", "create")) return null;
+  return <NewPageButtonInner {...props} />;
+}
+
+function NewPageButtonInner({
   vault: vaultProp,
   variant = "pill",
   label = "새 페이지",

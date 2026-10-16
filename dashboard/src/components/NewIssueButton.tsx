@@ -1,6 +1,7 @@
 import { useEffect, useState, type JSX } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPage, fetchTree, getActiveVault } from "../lib/api";
+import { canGuest, useGuestMe } from "../lib/guest";
 import type { TreeNode } from "../types";
 import { TextField } from "./ui/TextField";
 import { Modal } from "./ui/Modal";
@@ -95,7 +96,14 @@ function buildIssueSlug(args: { folder: string; title: string }): string {
   return `${prefix}/${today}-${safe}`;
 }
 
-export function NewIssueButton({
+// 손님 입장 (spec 2026-10-16-guest-access-design): 작성 권한 없는 손님에겐 버튼을 숨긴다.
+export function NewIssueButton(props: NewIssueButtonProps) {
+  const me = useGuestMe();
+  if (!canGuest(me, props.vault || getActiveVault() || "default", "create")) return null;
+  return <NewIssueButtonInner {...props} />;
+}
+
+function NewIssueButtonInner({
   vault: vaultProp,
   initialSlug = "content/issues",
   onOpen,

@@ -244,6 +244,8 @@ describe("AuthTokenDialog", () => {
     await window.fetch("/api/vaults"); // 401 → auth required, nobody listening yet
     const { AuthTokenDialog } = await import("../src/components/AuthTokenDialog");
     render(<AuthTokenDialog onVerified={() => {}} />);
+    // same-origin host: the guest entry screen first, the token form one click away
+    fireEvent.click(await screen.findByRole("button", { name: "토큰 직접 입력" }));
     expect(await screen.findByLabelText("토큰")).toBeTruthy();
   });
 
@@ -255,6 +257,7 @@ describe("AuthTokenDialog", () => {
     act(() => {
       window.dispatchEvent(new CustomEvent("raven:auth-required", { detail: { base: "" } }));
     });
+    fireEvent.click(await screen.findByRole("button", { name: "토큰 직접 입력" }));
     fireEvent.change(await screen.findByLabelText("토큰"), { target: { value: "rvn_bad_token" } });
     fireEvent.click(screen.getByRole("button", { name: /확인/ }));
     expect(await screen.findByRole("alert")).toBeTruthy();
