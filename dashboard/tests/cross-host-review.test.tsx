@@ -162,6 +162,174 @@ describe("P1-1 레거시 초안은 다른 호스트의 페이지에 저장되지
     fireEvent.click(await screen.findByRole("button", { name: "초안 복구" }));
     expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe("로컬에서 쓰던 초안");
   });
+
+  it("내용 보기로 레거시 내용을 확인하기 전에는 이 호스트로 가져오기가 비활성화되어 가져올 수 없다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    const importBtn = (await screen.findByRole("button", { name: "이 호스트로 가져오기" })) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(true);
+    fireEvent.click(importBtn);
+
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull();
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+  });
+
+  it("내용 보기 후 명시적으로 이 호스트로 가져오기를 클릭하면 현재 호스트 키에만 복사되고 레거시 원본은 보존된다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    const importBtn = screen.getByRole("button", { name: "이 호스트로 가져오기" }) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(false);
+
+    fireEvent.click(importBtn);
+
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(REMOTE_DRAFT);
+    expect(localStorage.getItem(`raven:draft@a:${VAULT}:${SLUG}`)).toBeNull();
+    // 복사 성공 후에도 레거시 원본은 자동 삭제하지 않는다.
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+
+    const editor = document.querySelector("textarea") as HTMLTextAreaElement | null;
+    expect(editor).toBeTruthy();
+    expect(editor!.readOnly).toBe(false);
+    expect(editor!.value).toBe(REMOTE_DRAFT);
+  });
+
+  it("원격 호스트에서 가져온 초안은 원격 호스트 키에만 기록되고 로컬 호스트 초안 키로 기록되지 않는다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("a", HOSTS_OK);
+    const { api } = await loadTab();
+    expect(api.draftStorageKey(VAULT, SLUG)).toBe(`raven:draft@${A}:${VAULT}:${SLUG}`);
+    const view = await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    fireEvent.click(screen.getByRole("button", { name: "이 호스트로 가져오기" }));
+
+    expect(localStorage.getItem(`raven:draft@${A}:${VAULT}:${SLUG}`)).toBe(REMOTE_DRAFT);
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull();
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+
+    // 이후 로컬 탭으로 열어도 원격에서 가져온 초안이 로컬 초안 복구로 뜨지 않는다.
+    view.unmount();
+    reloadTab();
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+    expect(await screen.findByText(/어느 호스트에서 작성됐는지 알 수 없는 이전 초안/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "초안 복구" })).toBeNull();
+  });
+
+  it("현재 호스트에 기존 초안이 있으면 덮어쓰지 않고 가져오기 버튼을 비활성화하며 이유를 안내한다", async () => {
+    const EXISTING_LOCAL = "이미 작성 중이던 로컬 초안";
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    localStorage.setItem(`raven:draft@local:${VAULT}:${SLUG}`, EXISTING_LOCAL);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    expect(
+      await screen.findByText(/현재 호스트에 저장하지 않은 초안이 이미 있어 덮어쓰지 않습니다/),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "이전 초안 내용 보기" }));
+    const importBtn = screen.getByRole("button", { name: "이 호스트로 가져오기" }) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(true);
+    fireEvent.click(importBtn);
+
+    // 기존 호스트 초안이 덮어써지지 않고 그대로 유지된다.
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(EXISTING_LOCAL);
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+
+    // 기존 초안을 버리면 가져오기가 활성화되어 정상 동작한다.
+    fireEvent.click(screen.getByRole("button", { name: "초안 버리기" }));
+    expect(importBtn.disabled).toBe(false);
+    fireEvent.click(importBtn);
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(REMOTE_DRAFT);
+  });
+
+  it("localStorage 쓰기가 실패하면 성공으로 처리하지 않고 편집기로 전환하지 않는다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    const setItemSpy = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("QuotaExceededError", "QuotaExceededError");
+    });
+
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "이 호스트로 가져오기" }));
+
+      expect(await screen.findByText(/초안 가져오기에 실패했습니다/)).toBeTruthy();
+      // 편집 모드로 전환되지 않고 읽기 전용 미리보기만 유지된다.
+      expect(screen.queryByLabelText("저장")).toBeNull();
+      const preview = screen.getByLabelText("이전 초안 내용 (읽기 전용)") as HTMLTextAreaElement;
+      expect(preview.readOnly).toBe(true);
+    } finally {
+      setItemSpy.mockRestore();
+    }
+
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull();
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+  });
+
+  it("가져오기 → 편집 → 저장 후에는 호스트 초안 키만 정리되고 레거시 원본은 보존된다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    fireEvent.click(screen.getByRole("button", { name: "이 호스트로 가져오기" }));
+
+    const editor = document.querySelector("textarea") as HTMLTextAreaElement;
+    expect(editor.value).toBe(REMOTE_DRAFT);
+    fireEvent.change(editor, { target: { value: REMOTE_DRAFT + " + 추가 편집" } });
+    await waitFor(() =>
+      expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(REMOTE_DRAFT + " + 추가 편집"),
+    );
+
+    fireEvent.click(await screen.findByLabelText("저장"));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(JSON.parse(put.body!).content).toBe(REMOTE_DRAFT + " + 추가 편집");
+
+    // 저장 성공 후 호스트 초안 키는 정리되고, 레거시 원본은 자동 삭제되지 않는다.
+    await waitFor(() => expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull());
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+  });
+
+  it("마운트 이후 다른 탭이 현재 호스트 초안 키에 먼저 기록한 경우 덮어쓰지 않고 기존 초안 복구 상태로 전환한다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    const importBtn = screen.getByRole("button", { name: "이 호스트로 가져오기" }) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(false);
+
+    // 다른 탭이 같은 호스트 스코프 키에 초안을 기록한 동시 변경 상황 시뮬레이션
+    const CONCURRENT_DRAFT = "다른 탭에서 방금 작성한 로컬 초안";
+    localStorage.setItem(`raven:draft@local:${VAULT}:${SLUG}`, CONCURRENT_DRAFT);
+
+    fireEvent.click(importBtn);
+
+    // 덮어쓰지 않고 다른 탭의 초안을 보존하며, 복구 배너와 비활성화 안내가 표시된다.
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(CONCURRENT_DRAFT);
+    expect(await screen.findByRole("button", { name: "초안 복구" })).toBeTruthy();
+    expect(
+      await screen.findByText(/현재 호스트에 저장하지 않은 초안이 이미 있어 덮어쓰지 않습니다/),
+    ).toBeTruthy();
+    expect(importBtn.disabled).toBe(true);
+  });
 });
 
 // ─── P1-2 ─────────────────────────────────────────────────────────────
