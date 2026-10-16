@@ -279,6 +279,57 @@ describe("P1-1 레거시 초안은 다른 호스트의 페이지에 저장되지
     expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull();
     expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
   });
+
+  it("가져오기 → 편집 → 저장 후에는 호스트 초안 키만 정리되고 레거시 원본은 보존된다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    fireEvent.click(screen.getByRole("button", { name: "이 호스트로 가져오기" }));
+
+    const editor = document.querySelector("textarea") as HTMLTextAreaElement;
+    expect(editor.value).toBe(REMOTE_DRAFT);
+    fireEvent.change(editor, { target: { value: REMOTE_DRAFT + " + 추가 편집" } });
+    await waitFor(() =>
+      expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(REMOTE_DRAFT + " + 추가 편집"),
+    );
+
+    fireEvent.click(await screen.findByLabelText("저장"));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(JSON.parse(put.body!).content).toBe(REMOTE_DRAFT + " + 추가 편집");
+
+    // 저장 성공 후 호스트 초안 키는 정리되고, 레거시 원본은 자동 삭제되지 않는다.
+    await waitFor(() => expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBeNull());
+    expect(localStorage.getItem(LEGACY_KEY)).toBe(REMOTE_DRAFT);
+  });
+
+  it("마운트 이후 다른 탭이 현재 호스트 초안 키에 먼저 기록한 경우 덮어쓰지 않고 기존 초안 복구 상태로 전환한다", async () => {
+    localStorage.setItem(LEGACY_KEY, REMOTE_DRAFT);
+    storeHosts("local", HOSTS_OK);
+    await loadTab();
+    await renderEditor();
+
+    fireEvent.click(await screen.findByRole("button", { name: "이전 초안 내용 보기" }));
+    const importBtn = screen.getByRole("button", { name: "이 호스트로 가져오기" }) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(false);
+
+    // 다른 탭이 같은 호스트 스코프 키에 초안을 기록한 동시 변경 상황 시뮬레이션
+    const CONCURRENT_DRAFT = "다른 탭에서 방금 작성한 로컬 초안";
+    localStorage.setItem(`raven:draft@local:${VAULT}:${SLUG}`, CONCURRENT_DRAFT);
+
+    fireEvent.click(importBtn);
+
+    // 덮어쓰지 않고 다른 탭의 초안을 보존하며, 복구 배너와 비활성화 안내가 표시된다.
+    expect(localStorage.getItem(`raven:draft@local:${VAULT}:${SLUG}`)).toBe(CONCURRENT_DRAFT);
+    expect(await screen.findByRole("button", { name: "초안 복구" })).toBeTruthy();
+    expect(
+      await screen.findByText(/현재 호스트에 저장하지 않은 초안이 이미 있어 덮어쓰지 않습니다/),
+    ).toBeTruthy();
+    expect(importBtn.disabled).toBe(true);
+  });
 });
 
 // ─── P1-2 ─────────────────────────────────────────────────────────────
