@@ -58,9 +58,9 @@ impl Drop for StartSlot<'_> {
 }
 
 impl CoreState {
-    fn start(&self, mcp: bool, resource_dir: Option<std::path::PathBuf>) -> Result<bool, core::StartError> {
+    fn start(&self, mcp: bool, lan: bool, resource_dir: Option<std::path::PathBuf>) -> Result<bool, core::StartError> {
         let events = self.3.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        self.start_with(|pending| core::ManagedCore::start(mcp, resource_dir, pending, events))
+        self.start_with(|pending| core::ManagedCore::start(mcp, lan, resource_dir, pending, events))
     }
 
     /// Replace the running Core (if any) with a new one; `Ok(true)` when its API
@@ -292,7 +292,63 @@ fn core_status(state: State<'_, CoreState>) -> CoreStatus {
 fn do_restart_core(app: &tauri::AppHandle) -> Result<bool, core::StartError> {
     let resource_dir = app.path().resource_dir().ok();
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
-    app.state::<CoreState>().start(mcp_enabled, resource_dir)
+    let lan = read_lan_access(settings_path(app).as_deref());
+    app.state::<CoreState>().start(mcp_enabled, lan, resource_dir)
+}
+
+// ─── 내부망 공개 스위치 (spec 2026-10-16-desktop-lan-toggle-design) ───────────
+
+/// `<app_config_dir>/desktop-settings.json` — the shell's own settings.
+fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|dir| dir.join("desktop-settings.json"))
+}
+
+/// The saved LAN switch. Missing, unreadable or malformed → off (this PC only).
+fn read_lan_access(path: Option<&std::path::Path>) -> bool {
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("lan_access").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Saves the LAN switch, keeping any other keys in the file.
+fn write_lan_access(path: &std::path::Path, enabled: bool) -> Result<(), String> {
+    let mut settings = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["lan_access"] = serde_json::Value::Bool(enabled);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("설정 폴더를 만들 수 없습니다: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("설정을 저장할 수 없습니다: {e}"))
+}
+
+#[derive(serde::Serialize)]
+struct LanAccessStatus {
+    /// The saved switch.
+    enabled: bool,
+    /// `RAVEN_DESKTOP_HOST`/`RAVEN_HOST` is set: it decides the bind and the switch has no effect.
+    env_override: bool,
+}
+
+#[command]
+fn lan_access_status(app: tauri::AppHandle) -> LanAccessStatus {
+    LanAccessStatus {
+        enabled: read_lan_access(settings_path(&app).as_deref()),
+        env_override: core::env_bind_host().is_some(),
+    }
+}
+
+/// Saves the switch and restarts the Core with it. Nothing restarts if saving fails.
+/// Like `restart_core`, the dashboard reloads itself when the endpoint moved.
+#[command]
+async fn set_lan_access(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let path = settings_path(&app).ok_or_else(|| "앱 설정 폴더를 찾을 수 없습니다".to_string())?;
+    write_lan_access(&path, enabled)?;
+    off_runtime(move || do_restart_core(&app).map(|_| ()).map_err(|e| e.to_string())).await
 }
 
 /// What the tray tells the user after "Restart Backend" (Issue #44): it used to
@@ -924,6 +980,8 @@ pub fn run() {
             app_version,
             core_status,
             restart_core,
+            lan_access_status,
+            set_lan_access,
             save_download_file,
             save_download_file_as,
             reveal_saved_export,
@@ -942,12 +1000,13 @@ pub fn run() {
             // unwind 불가)으로 처리하므로, 여기서 실패를 직접 흡수해 다이얼로그 후 종료한다.
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
+            let lan = read_lan_access(settings_path(&handle).as_deref());
             // Before the first start, so that Core's events are delivered too.
             spawn_core_event_loop(&handle);
             // Issue #43: the readiness wait blocks (bounded by CORE_READINESS_TIMEOUT),
             // so it runs on the blocking pool rather than an async runtime worker.
             tauri::async_runtime::spawn_blocking(move || {
-                match handle.state::<CoreState>().start(mcp_enabled, resource_dir) {
+                match handle.state::<CoreState>().start(mcp_enabled, lan, resource_dir) {
                     Ok(_) => {}
                     // App exit, or a tray restart got in first and owns the start — not a failure.
                     Err(e @ (core::StartError::Cancelled | core::StartError::Busy)) => {
@@ -1457,6 +1516,43 @@ mod tests {
             src.contains(concat!("save_download_file", "_as,\n            reveal_saved_export,\n            begin_export\n        ])")),
             "invoke_handler에 save_download_file_as가 등록되지 않았다"
         );
+    }
+
+    #[test]
+    fn lan_switch_setting_round_trips_and_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("raven-lan-{}", std::process::id()));
+        let path = dir.join("nested").join("desktop-settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!super::read_lan_access(None));
+        assert!(!super::read_lan_access(Some(&path)), "missing file → off");
+        super::write_lan_access(&path, true).unwrap();
+        assert!(super::read_lan_access(Some(&path)));
+        // other keys survive a write
+        std::fs::write(&path, r#"{"lan_access": true, "other": 1}"#).unwrap();
+        super::write_lan_access(&path, false).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["other"], 1);
+        assert!(!super::read_lan_access(Some(&path)));
+        for broken in ["{not json", "[]", r#"{"lan_access": "yes"}"#] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(!super::read_lan_access(Some(&path)), "{broken}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lan_switch_commands_are_registered_and_allowed() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let perms: Vec<&str> = caps["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str()).collect();
+        for perm in ["allow-lan-access-status", "allow-set-lan-access"] {
+            assert!(perms.contains(&perm), "{perm} 권한 누락");
+        }
+        let toml = include_str!("../permissions/default.toml");
+        assert!(toml.contains(r#"commands.allow = ["lan_access_status"]"#));
+        assert!(toml.contains(r#"commands.allow = ["set_lan_access"]"#));
+        let src = include_str!("lib.rs");
+        assert!(src.contains(concat!("restart_core,\n            lan_access_status,\n            set_lan_access,")));
     }
 
     #[test]

@@ -10,6 +10,8 @@
     "allow-mcp-endpoint",
     "allow-core-status",
     "allow-restart-core",
+    "allow-lan-access-status",
+    "allow-set-lan-access",
     "allow-save-download-file",
     "allow-save-download-file-as",
     "allow-reveal-saved-export",

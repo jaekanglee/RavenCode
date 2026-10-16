@@ -34,6 +34,38 @@ pub(crate) struct RuntimeLaunchSpec {
 /// machine — leaving MCP opt-in meant the endpoint was silently absent (the
 /// GUI is launched from Finder/Dock, so it never sees a shell-exported
 /// `RAVEN_DESKTOP_MCP=1` either). Opt out with `RAVEN_DESKTOP_MCP=0`.
+/// Where the Core binds, from the environment and the desktop LAN switch
+/// (spec 2026-10-16-desktop-lan-toggle-design).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BindChoice {
+    /// `--host` for the Core.
+    pub(crate) host: String,
+    /// Set `RAVEN_ALLOW_REMOTE=1` for the Core: the switch itself is the opt-in.
+    pub(crate) allow_remote: bool,
+    /// Keep MCP on loopback (`RAVEN_MCP_HOST=127.0.0.1`): the switch shares the dashboard,
+    /// not the admin-mode MCP.
+    pub(crate) mcp_loopback: bool,
+}
+
+/// `RAVEN_DESKTOP_HOST` → `RAVEN_HOST` (non-empty). Set, it wins over the LAN switch.
+pub(crate) fn env_bind_host() -> Option<String> {
+    env::var("RAVEN_DESKTOP_HOST")
+        .ok()
+        .or_else(|| env::var("RAVEN_HOST").ok())
+        .filter(|h| !h.trim().is_empty())
+}
+
+/// An environment host is used as is (its own `RAVEN_ALLOW_REMOTE` rules apply). Otherwise
+/// the LAN switch picks `0.0.0.0` with remote access allowed, or loopback. A user-set
+/// `RAVEN_MCP_HOST` (`user_mcp_host`) is never overridden.
+pub(crate) fn resolve_bind(env_host: Option<String>, user_mcp_host: bool, lan: bool) -> BindChoice {
+    match env_host {
+        Some(host) => BindChoice { host, allow_remote: false, mcp_loopback: false },
+        None if lan => BindChoice { host: "0.0.0.0".into(), allow_remote: true, mcp_loopback: !user_mcp_host },
+        None => BindChoice { host: DEFAULT_API_HOST.into(), allow_remote: false, mcp_loopback: false },
+    }
+}
+
 pub(crate) fn mcp_enabled_from_env(raw: Option<String>) -> bool {
     match raw {
         None => true,
@@ -459,19 +491,22 @@ fn session_token_from<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Optio
 impl ManagedCore {
     pub(crate) fn start(
         mcp: bool,
+        lan: bool,
         resource_dir: Option<PathBuf>,
         pending: &PendingStart,
         events: Option<EventSink>,
     ) -> Result<Self, StartError> {
         let (python, python_path) = resolve_python(resource_dir.as_deref());
-        let host = env::var("RAVEN_DESKTOP_HOST")
-            .ok()
-            .or_else(|| env::var("RAVEN_HOST").ok())
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| DEFAULT_API_HOST.to_string());
+        let bind = resolve_bind(env_bind_host(), env::var_os("RAVEN_MCP_HOST").is_some(), lan);
         let mcp_mode = mcp_mode_from_env(env::var("RAVEN_DESKTOP_MCP_MODE").ok());
-        let spec = runtime_launch_spec(python, mcp, python_path, Some(host), Some(mcp_mode));
+        let spec = runtime_launch_spec(python, mcp, python_path, Some(bind.host), Some(mcp_mode));
         let mut cmd = Command::new(&spec.program);
+        if bind.allow_remote {
+            cmd.env("RAVEN_ALLOW_REMOTE", "1");
+        }
+        if bind.mcp_loopback {
+            cmd.env("RAVEN_MCP_HOST", DEFAULT_API_HOST);
+        }
         // Issue #23: lets the Core shut itself down if this shell dies without
         // reaching RunEvent::Exit (SIGTERM/SIGHUP, crash) — see runtime.py PARENT_PID_ENV.
         cmd.env("RAVEN_DESKTOP_PARENT_PID", std::process::id().to_string());
@@ -848,6 +883,40 @@ mod tests {
     fn mcp_without_its_own_host_follows_the_api_host() {
         let (_, mcp) = endpoints(r#"{"host":"127.0.0.1","port":41000,"bind_host":"127.0.0.1","mcp_port":8766}"#).unwrap();
         assert_eq!(mcp.as_deref(), Some("http://127.0.0.1:8766/mcp"));
+    }
+
+    mod bind {
+        use super::super::{resolve_bind, BindChoice};
+
+        #[test]
+        fn the_environment_wins_over_the_switch() {
+            for lan in [false, true] {
+                assert_eq!(
+                    resolve_bind(Some("100.64.1.2".into()), false, lan),
+                    BindChoice { host: "100.64.1.2".into(), allow_remote: false, mcp_loopback: false }
+                );
+            }
+        }
+
+        #[test]
+        fn the_switch_opens_the_api_and_keeps_mcp_local() {
+            assert_eq!(
+                resolve_bind(None, false, true),
+                BindChoice { host: "0.0.0.0".into(), allow_remote: true, mcp_loopback: true }
+            );
+            assert_eq!(
+                resolve_bind(None, true, true),
+                BindChoice { host: "0.0.0.0".into(), allow_remote: true, mcp_loopback: false }
+            );
+        }
+
+        #[test]
+        fn off_is_loopback() {
+            assert_eq!(
+                resolve_bind(None, false, false),
+                BindChoice { host: "127.0.0.1".into(), allow_remote: false, mcp_loopback: false }
+            );
+        }
     }
 
     mod events {

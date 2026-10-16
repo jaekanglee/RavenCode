@@ -1,6 +1,6 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-save-download-file", "allow-save-download-file-as", "allow-reveal-saved-export", "allow-app-version"]
+permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-lan-access-status", "allow-set-lan-access", "allow-save-download-file", "allow-save-download-file-as", "allow-reveal-saved-export", "allow-app-version"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
@@ -26,6 +26,16 @@ commands.allow = ["core_status"]
 identifier = "allow-restart-core"
 description = "Allow invoking the restart_core command."
 commands.allow = ["restart_core"]
+
+[[permission]]
+identifier = "allow-lan-access-status"
+description = "Allow invoking the lan_access_status command (내부망 공개 스위치 상태)."
+commands.allow = ["lan_access_status"]
+
+[[permission]]
+identifier = "allow-set-lan-access"
+description = "Allow invoking the set_lan_access command (내부망 공개 켜고 끄기 + Core 재시작)."
+commands.allow = ["set_lan_access"]
 
 [[permission]]
 identifier = "allow-save-download-file"
