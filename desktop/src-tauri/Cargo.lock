@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "raven-desktop"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "dirs",
  "getrandom 0.3.4",
