@@ -239,7 +239,11 @@ def test_health_check_answers_without_a_token_and_says_nothing(vaults, app_facto
 @pytest.mark.parametrize("app_factory", [_core, _mcp])
 @pytest.mark.parametrize("method,path", [("POST", "/healthz"), ("GET", "/healthz/"), ("GET", "/healthz/x"),
                                          ("GET", "/api/healthz"), ("GET", "/HEALTHZ"), ("DELETE", "/healthz")])
-def test_only_get_healthz_exactly_is_public(vaults, app_factory, method, path):
+def test_only_get_healthz_exactly_is_public(vaults, app_factory, method, path, monkeypatch):
+    # The healthz exception alone: a local dashboard build would open non-API GETs as static
+    # files (tested on its own below), which made this depend on whether dashboard/dist exists.
+    from raven.api import server
+    monkeypatch.setattr(server, "_DASHBOARD_DIST", None)
     assert _call(app_factory(), method=method, path=path).status_code == 401, (method, path)
 
 

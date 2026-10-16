@@ -40,6 +40,8 @@ from raven.core import policy as policy_module
 from raven.core.vault import Vault
 from raven.core import backup as backup_module
 from raven.core.access import TokenGate, route_path
+from raven.api import guest_api, guest_routes
+from raven.api.guest_api import guest_actor, guest_of
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
 from raven import __version__ as raven_version
@@ -133,7 +135,13 @@ def _is_public_static(scope) -> bool:
 # 세션 자격 증명) 필수, 발급 0개면 전부 401. 예외는 `GET /healthz`와 위의 대시보드 정적 파일.
 # 판정 로직은 MCP와 공유한다 (`raven/core/access.py`). CORS보다 먼저 add → CORS가 바깥:
 # 브라우저 preflight는 CORS가 직접 응답해 핸들러에 닿지 않고, 401 응답에도 CORS 헤더가 붙는다.
-app.add_middleware(TokenGate, public=_is_public_static)
+# 손님 입장 (spec 2026-10-16-guest-access-design): 입장 요청·상태 조회 2종은 공개, 손님 토큰(`rvg_`)은
+# `guest_routes.ROUTES`로 vault별 권한을 판정한다. MCP 게이트에는 이 훅이 없다.
+app.add_middleware(
+    TokenGate,
+    public=lambda scope: _is_public_static(scope) or guest_routes.is_public(app, scope),
+    guest=lambda scope, token: guest_routes.authorize(app, scope, token),
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -144,6 +152,7 @@ app.add_middleware(
     # the browser hides the challenge and the token prompt can't tell why it failed.
     expose_headers=["WWW-Authenticate"],
 )
+guest_api.install(app)  # SPA fallback보다 먼저
 
 
 # ────────────────────────── helpers ──────────────────────────
@@ -350,7 +359,7 @@ def system_info():
 
 
 @app.get("/api/vaults")
-def list_vaults():
+def list_vaults(request: Request):
     """All registered vaults (with metadata).
 
     v0.6.3+: also returns the resolved `vaults_root` so the dashboard
@@ -362,7 +371,10 @@ def list_vaults():
     reg_data = registry()._data.get("vaults", {})
     out = []
     is_docker = (str(runtime_root.resolve()) == "/vaults" or os.path.exists("/.dockerenv"))
+    guest = guest_of(request)
     for v in registry().list():
+        if guest is not None and v.name not in guest["vaults"]:
+            continue
         raw_meta = reg_data.get(v.name, {})
         display_path = raw_meta.get("path") if isinstance(raw_meta, dict) else None
         
@@ -2024,7 +2036,7 @@ def delete_vault(name: str, request: Request, force: bool = False):
 
 
 @app.post("/api/vaults/{name}/pages")
-def create_page(name: str, payload: PageCreate):
+def create_page(name: str, payload: PageCreate, request: Request):
     """Create a new page.
 
     Slug handling (v0.3+):
@@ -2046,6 +2058,7 @@ def create_page(name: str, payload: PageCreate):
         extra_meta=payload.extra_meta,
         overwrite=False,  # create-only: 409 on exists (matches pre-v0.6.2)
         enforce_protected_paths=True,
+        log_actor=guest_actor(request),
     )
     if not result.ok:
         if result.error == "exists":
@@ -2058,7 +2071,7 @@ def create_page(name: str, payload: PageCreate):
 
 
 @app.post("/api/vaults/{name}/relations")
-def add_relation(name: str, payload: RelationAddPayload):
+def add_relation(name: str, payload: RelationAddPayload, request: Request):
     """Add a semantic relation between two pages."""
     v = _vault_or_404(name)
     try:
@@ -2075,7 +2088,7 @@ def add_relation(name: str, payload: RelationAddPayload):
             confidence=payload.confidence,
             verified_by=payload.verified_by,
             ctx=ctx,
-            actor=payload.actor,
+            actor=guest_actor(request) or payload.actor,
             precondition=payload.precondition,
         )
         if not result.get("ok"):
@@ -2096,7 +2109,7 @@ def add_relation(name: str, payload: RelationAddPayload):
 
 
 @app.put("/api/vaults/{name}/pages/{slug:path}")
-def update_page(name: str, slug: str, payload: PageUpdate):
+def update_page(name: str, slug: str, payload: PageUpdate, request: Request):
     """Update an existing page.
 
     Slug is validated (v0.3+). 'created' is preserved from existing frontmatter
@@ -2130,6 +2143,7 @@ def update_page(name: str, slug: str, payload: PageUpdate):
         overwrite=True,
         enforce_protected_paths=True,
         precondition=payload.precondition,
+        log_actor=guest_actor(request),
     )
     if not result.ok:
         if result.error == "permission_denied":
@@ -2152,7 +2166,7 @@ def update_page(name: str, slug: str, payload: PageUpdate):
 
 
 @app.post("/api/vaults/{name}/pages/{slug:path}/feedback")
-def add_page_feedback(name: str, slug: str, payload: FeedbackPayload):
+def add_page_feedback(name: str, slug: str, payload: FeedbackPayload, request: Request):
     """Add a user feedback / correction instruction to a page.
 
     This appends a feedback comment block under ## 피드백 section in the markdown body,
@@ -2196,7 +2210,8 @@ def add_page_feedback(name: str, slug: str, payload: FeedbackPayload):
 
     # Format feedback comment
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    feedback_line = f"* **{now_str} ({payload.actor})**: {payload.feedback}"
+    author = guest_actor(request) or payload.actor
+    feedback_line = f"* **{now_str} ({author})**: {payload.feedback}"
 
     # Search for ## 피드백 heading in body
     body_lines = body.splitlines()
@@ -2231,6 +2246,7 @@ def add_page_feedback(name: str, slug: str, payload: FeedbackPayload):
         overwrite=True,
         enforce_protected_paths=True,
         precondition=payload.precondition,
+        log_actor=guest_actor(request),
     )
 
     if not result.ok:
@@ -2658,7 +2674,7 @@ class ResolveContradictionPayload(BaseModel):
 
 
 @app.post("/api/vaults/{name}/lint/contradictions/resolve")
-def resolve_contradiction_api(name: str, payload: ResolveContradictionPayload):
+def resolve_contradiction_api(name: str, payload: ResolveContradictionPayload, request: Request):
     v = _vault_or_404(name)
     from raven.mcp.tools import VaultContext, WRITE
     from raven.mcp.tools.write import wiki_relation_add
@@ -2682,7 +2698,7 @@ def resolve_contradiction_api(name: str, payload: ResolveContradictionPayload):
         evidence=payload.evidence,
         reason=payload.reason,
         ctx=ctx,
-        actor="ai-contradiction-resolver"
+        actor=guest_actor(request) or "ai-contradiction-resolver"
     )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("message", "Failed to resolve contradiction"))

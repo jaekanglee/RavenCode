@@ -22,7 +22,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
 | **CLI** (사람/자동화) | Typer 7 top-level commands + 12 subcommand groups | `raven/cli/` |
-| **API** (HTTP) | FastAPI 70 endpoints | `raven/api/` |
+| **API** (HTTP) | FastAPI 78 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 25 tools + 4 resources | `raven/mcp/` |
 
@@ -252,7 +252,7 @@ raven mcp token add|list|revoke <name>          # 원격(tailnet·내부망) MCP
 
 ---
 
-## HTTP API (70 endpoints)
+## HTTP API (78 endpoints)
 
 ```bash
 # vault 관리
@@ -281,6 +281,16 @@ GET    /api/vaults/{name}/link-check[?slug=X]
 # 엔진
 POST   /api/vaults/{name}/build                  # wiki.db 재빌드 + lint
 POST   /api/vaults/{name}/export                 # GUI 정적 JSON
+
+# 손님 입장 (내부망 동료, 기기·IP 바인딩 + vault별 read/create/update)
+POST   /api/guest/requests                       # 공개 — body: {name, device_id} → 확인 코드
+GET    /api/guest/requests/{id}                  # 공개 — X-Raven-Claim/X-Raven-Device, 승인 후 1회 토큰
+GET    /api/guest/me                             # 손님 — 내 권한
+GET    /api/guest/requests                       # 운영자 — 대기 목록
+POST   /api/guest/requests/{id}/approve          # 운영자 — body: {vaults, ttl_days: 7|30|null}
+POST   /api/guest/requests/{id}/deny             # 운영자
+GET    /api/guest/grants                         # 운영자 — 승인된 기기
+DELETE /api/guest/grants/{id}                    # 운영자 — 내보내기
 ```
 
 전부 `{ok: true, ...}` 또는 `{ok: false, error: "..."}` 형식.
@@ -632,12 +642,13 @@ cd dashboard && npm install
 
 ## 라이선스 / 상태
 
+- v0.7.183 (내부망 손님 입장 — 입장 요청·운영자 승인·기기/IP 바인딩·vault별 read/create/update)
 - v0.7.182 (모바일 저장이 PC 편집을 덮지 않게 precondition 전속 + 충돌 사용자 알림)
 - v0.7.181 (모바일 보관소 전체 검색 + 대시보드 전역 탭 5칸 + 홈 작업대 전환)
 - v0.7.180 (precondition 토큰 내용 해시화 + 테스트 baseline 전면 green)
 - v0.7.179 (REST 관례 정리 + 에러 envelope 분류 + link 스캔 중복 제거)
 - v0.7.178 (동시 편집 precondition + 열화 정직화 + 선언-실제 재정합)
-- **전제 = 신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)**. auth/ACL은 여전히 non-goal이므로, 이 API에 도달할 수 있는 사람은 vault를 읽고 쓰고 지울 수 있다 — tailnet을 남과 공유하지 말 것.
+- **전제 = 신뢰된 단일 사용자 네트워크(localhost 또는 본인 tailnet)**. 계정·ACL은 여전히 non-goal이다: 운영자 토큰(데스크톱 세션·`raven mcp token add`)을 가진 사람은 vault를 읽고 쓰고 지울 수 있다 — tailnet을 남과 공유하지 말 것. 예외는 v0.7.183 손님 입장뿐이다(운영자가 승인한 기기·IP에 vault별 read/create/update, 삭제 불가).
 - **⚠️ Breaking change (Issue #67) — 같은 PC(loopback)도 토큰 필요**: Core API와 MCP는 이제 **모든 출처**에 Bearer 토큰을 요구한다. 이전에는 같은 PC의 직접 연결이 토큰 없이 받아졌는데(#28부터는 loopback Host·Origin일 때만), macOS Docker Desktop은 컨테이너의 `host.docker.internal` 연결을 호스트 loopback으로 넘기고 Host·Origin은 컨테이너가 정하므로, 같은 PC의 아무 컨테이너나 토큰 없이 vault를 읽고 쓰고 admin MCP를 쓸 수 있었다. 결정: [`_meta/decisions/adr-2026-10-13-loopback-token-required.md`](_meta/decisions/adr-2026-10-13-loopback-token-required.md). 인증을 끄는 설정은 없다(#69의 `RAVEN_REQUIRE_LOOPBACK_TOKEN`은 이제 기본 동작이라 없어졌다 — 설정해 두어도 아무 효과가 없다).
   - **데스크톱 앱**: 바꿀 것이 없다. 셸이 Core를 시작할 때마다 자격 증명을 하나 만들어 그 Core(stdin)와 자기 webview(Tauri IPC)에만 준다. webview는 그것을 메모리에만 두고 자기 Core에만 보낸다. Core를 시작할 때마다(재시작·포트 이동 포함) 새로 만들고 이전 값은 거부되며, 대시보드가 자동으로 새 값을 받는다. 생성은 OS CSPRNG(`getrandom`)이고 실패하면 약한 난수로 대신하지 않는다(토큰 입력창으로 넘어감). 이 자격 증명은 Core API 전용이고 같은 PC 출처에서만 받는다 — MCP나 다른 PC에서는 401이다.
   - **vite 개발 대시보드** (`./raven.sh start`): 같은 PC에서 열어도 첫 요청의 401에서 토큰 입력창이 뜬다. `raven mcp token add <이름>`으로 만든 토큰을 넣는다(탭을 닫으면 지워짐). vite 프록시는 토큰을 대신 붙이지 않는다 — 붙이면 vite에 닿는 누구나(같은 PC의 컨테이너 포함) 인증된 셈이 된다.

@@ -137,6 +137,7 @@ def write_page(
     extra_meta: Optional[dict] = None,
     append_log: bool = True,
     precondition: Optional[str] = None,
+    log_actor: Optional[str] = None,
 ) -> WriteResult:
     """Create or overwrite a markdown page through the shared write contract.
 
@@ -183,6 +184,10 @@ def write_page(
             returned — this is what stops a lost update. `""` asserts the page
             does not exist yet. `None` (default) skips the check entirely, so
             existing callers are unaffected.
+        log_actor: Who to name in the log.md entry (`actor=<log_actor>`) when
+            `actor` gives no name. Log only — unlike `actor` it adds no
+            frontmatter provenance and triggers no agent policy (allowlist,
+            strict schema). The Core API passes `guest:<name>` for guest writes.
 
     Returns:
         WriteResult — `ok=True` on success, `ok=False` + `error` on
@@ -339,6 +344,7 @@ def write_page(
                         name_val = actor.get("name")
                         if isinstance(name_val, str):
                             actor_name = name_val
+                    actor_name = actor_name or log_actor or ""
                     log_module.append(
                         vault,
                         action="create" if is_create else "update",

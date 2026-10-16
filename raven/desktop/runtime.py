@@ -23,6 +23,7 @@ via the ``core_endpoint`` / ``mcp_endpoint`` commands.
     {"event": "mcp_endpoint", "mcp_host": ..., "mcp_port": ...}   advertised MCP moved
     {"event": "alert", "kind": "guard_blocked", "listener": ..., "address": ...}
     {"event": "rebind", "bound": ..., "tailscale_ip": ..., "target": ...}
+    {"event": "guest_request", "name": ..., "ip": ..., "code": ...}   guest asked to enter
   ``rebind`` asks the shell for a restart (``--host tailscale`` only: its sockets
   cannot follow a new address). The readiness line itself is unchanged.
 
@@ -781,6 +782,10 @@ def main() -> int:
     from raven.desktop import netwatch
 
     events = netwatch.EventStream.take_stdout()
+    # 손님 입장 요청 → 셸의 macOS 알림 (spec 2026-10-16-guest-access-design).
+    from raven.core import guest_access
+
+    guest_access.requests.emit = events
     api_listener = None
     if bind_host == "0.0.0.0":
         api_listener = netwatch.Listener("API", api_server, api_port, api_target, probe_nonce, held=api_held)

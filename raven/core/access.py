@@ -293,6 +293,12 @@ def _bearer_token(scope) -> str | None:
     return None
 
 
+# Guest tokens (raven/core/guest_access.py) — judged by the Core API's ``guest`` hook, never
+# by ``verify_token``. A passed guest's grant lands in ``scope["state"][GUEST_STATE_KEY]``.
+GUEST_TOKEN_PREFIX = "rvg_"
+GUEST_STATE_KEY = "raven_guest"
+
+
 def _is_session_token(token: str) -> bool:
     digest = _session_digest
     return digest is not None and hmac.compare_digest(hashlib.sha256(token.encode("utf-8")).digest(), digest)
@@ -355,9 +361,12 @@ class TokenGate:
         "(raven mcp token add <name>)."
     )
 
-    def __init__(self, app, public=None):
+    def __init__(self, app, public=None, guest=None):
         self.app = app
         self._public = public
+        # Core API only: judges guest tokens (``rvg_``, raven/api/guest_routes.py::authorize).
+        # MCP passes none, so a guest token there is just an unknown token → 401.
+        self._guest = guest
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
@@ -377,11 +386,20 @@ class TokenGate:
         # The desktop session credential belongs to the webview on this PC: it is never
         # accepted from a LAN/tailnet/unknown source, so a copy is useless off this machine.
         session_ok = self.accept_session_token and is_loopback_client(source)
-        if public or has_valid_bearer(scope, session_ok=session_ok):
+        token = _bearer_token(scope)
+        guest = None
+        if not public and self._guest is not None and token and token.startswith(GUEST_TOKEN_PREFIX):
+            allowed, guest = self._guest(scope, token)
+            if not allowed:
+                await self._deny_guest(scope, send, guest)
+                return
+        if public or guest is not None or has_valid_bearer(scope, session_ok=session_ok):
             client = scope.get("client")
             if source is None or not client or client[0] != source:
                 port = client[1] if client else 0
                 scope = dict(scope, client=(source or UNKNOWN_CLIENT, port))
+            if guest is not None:
+                scope = dict(scope, state={**scope.get("state", {}), GUEST_STATE_KEY: guest})
             await self.app(scope, receive, send)
             return
         if scope["type"] == "websocket":
@@ -412,6 +430,20 @@ class TokenGate:
         })
         await send({"type": "http.response.body", "body": body})
 
+
+    async def _deny_guest(self, scope, send, decision: dict) -> None:
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        status = decision.get("status", 401)
+        body = json.dumps({"ok": False, **{k: v for k, v in decision.items() if k != "status"}},
+                          ensure_ascii=False).encode("utf-8")
+        headers = [(b"content-type", b"application/json; charset=utf-8"),
+                   (b"content-length", str(len(body)).encode())]
+        if status == 401:
+            headers.append((b"www-authenticate", f'Bearer realm="{self.realm}"'.encode()))
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 # ─── bind 정책 ────────────────────────────────────────────────
 
