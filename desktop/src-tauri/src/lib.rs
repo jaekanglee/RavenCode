@@ -359,6 +359,8 @@ enum EventAction {
     Nothing,
     /// Tell the user (non-blocking warning dialog).
     Notify(String),
+    /// A guest asked to enter: an OS notification (not a dialog — it must not interrupt).
+    GuestNotify(String),
     /// Restart the Core through the #44 path (then reload if the endpoint moved).
     Restart,
     /// Restart at this time, if this Core is still the running one then.
@@ -445,6 +447,21 @@ fn handle_core_event(
             eprintln!("[core] Core bound to {bound}, tailnet address now {target}");
             restarts.due(std::time::Instant::now())
         }
+        core::CoreEvent::GuestRequest { name, ip, code } => EventAction::GuestNotify(guest_notice(&name, &ip, &code)),
+    }
+}
+
+/// Body of the guest-request notification. The owner approves in 관리 → 손님 입장 (the
+/// desktop notification plugin has no click action, so it says where to go).
+fn guest_notice(name: &str, ip: &str, code: &str) -> String {
+    format!("{name}님이 입장을 요청했어요 ({ip} · {code}). 관리 탭의 손님 입장에서 승인하세요.")
+}
+
+fn show_guest_notification(app: &tauri::AppHandle, body: String) {
+    use tauri_plugin_notification::NotificationExt;
+    eprintln!("[guest] {body}");
+    if let Err(error) = app.notification().builder().title("Raven 입장 요청").body(body).show() {
+        eprintln!("[guest] notification failed: {error}");
     }
 }
 
@@ -532,6 +549,7 @@ fn spawn_core_event_loop(app: &tauri::AppHandle) {
             for action in actions {
                 match action {
                     EventAction::Notify(notice) => show_warning(&app, &EVENT_NOTICE_OPEN, notice),
+                    EventAction::GuestNotify(body) => show_guest_notification(&app, body),
                     EventAction::Restart => {
                         deferred = None;
                         let result = do_restart_core(&app);
@@ -894,6 +912,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(SavedExport::default())
         .manage(CoreState::default())
@@ -2155,6 +2174,16 @@ mod tests {
         }
 
         #[test]
+        fn a_guest_request_becomes_a_notification() {
+            let (state, id) = running(None);
+            let event = CoreEvent::GuestRequest { name: "김동료".into(), ip: "10.10.81.12".into(), code: "K7-3F".into() };
+            assert_eq!(
+                handle_core_event(&state, id, event, &mut NetworkRestarts::default()),
+                EventAction::GuestNotify("김동료님이 입장을 요청했어요 (10.10.81.12 · K7-3F). 관리 탭의 손님 입장에서 승인하세요.".into())
+            );
+        }
+
+        #[test]
         fn events_from_a_replaced_core_are_ignored() {
             let (state, id) = running(Some("http://127.0.0.1:8766/mcp"));
             let stale = id - 1;
@@ -2271,7 +2300,7 @@ mod tests {
         fn the_event_loop_restarts_off_the_main_thread_and_reloads_on_a_move() {
             let src = include_str!("lib.rs");
             let start = src.find(concat!("fn spawn_core_event_loop", "(")).expect("spawn_core_event_loop");
-            let body = &src[start..start + 3500];
+            let body = &src[start..start + 4000];
             assert!(body.contains("std::thread::Builder::new()"), "events must be handled on their own thread");
             assert!(body.contains("do_restart_core(&app)") && body.contains("Ok(true)") && body.contains("location.reload()"));
             let setup = src.find("spawn_core_event_loop(&handle)").expect("event loop wired in setup");

@@ -30,6 +30,8 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 # (macOS getentropy, Linux getrandom(2), else /dev/urandom, Windows ProcessPrng). Already in the tree via tauri.
 getrandom = "0.3"
 tauri-plugin-opener = "2"
+# 손님 입장 요청 알림 (spec 2026-10-16-guest-access-design). Rust 쪽에서만 쓴다 — 웹뷰 권한(capability) 불필요.
+tauri-plugin-notification = "2"
 
 # 릴리스 빌드(`cargo build --release --features custom-protocol`)에서만 켠다.
 # 이 피처가 켜지면 프론트엔드가 dashboard/dist로 임베드되고 devUrl을 무시하므로,

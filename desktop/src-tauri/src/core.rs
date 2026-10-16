@@ -173,6 +173,9 @@ pub(crate) enum CoreEvent {
     /// The Core is bound to a tailnet address that is gone or has changed
     /// (`--host tailscale`); only a restart can move its sockets.
     Rebind { bound: String, target: String },
+    /// A colleague asked to enter as a guest (spec 2026-10-16-guest-access-design).
+    /// `name` is what they typed — cleaned by `guest_name` before it reaches a notification.
+    GuestRequest { name: String, ip: String, code: String },
 }
 
 /// Events from the Core with this id; ids are never reused within the shell.
@@ -190,6 +193,19 @@ struct EventLine {
     address: Option<String>,
     bound: Option<String>,
     target: Option<String>,
+    name: Option<String>,
+    ip: Option<String>,
+    code: Option<String>,
+}
+
+/// Longest guest name shown in a notification (the Core enforces the same limit).
+const GUEST_NAME_MAX: usize = 40;
+
+/// A guest's self-typed name, safe to show: control characters dropped, at most 40 chars.
+fn guest_name(raw: &str) -> Option<String> {
+    let name: String = raw.chars().filter(|c| !c.is_control()).take(GUEST_NAME_MAX).collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Parse one post-readiness stdout line. Anything that is not a known, complete
@@ -203,6 +219,11 @@ pub(crate) fn parse_event(line: &str) -> Option<CoreEvent> {
             address: line.address?,
         }),
         "rebind" => Some(CoreEvent::Rebind { bound: line.bound?, target: line.target? }),
+        "guest_request" => Some(CoreEvent::GuestRequest {
+            name: guest_name(line.name.as_deref()?)?,
+            ip: line.ip?,
+            code: line.code?,
+        }),
         _ => None,
     }
 }
@@ -846,6 +867,32 @@ mod tests {
                 parse_event(r#"{"event": "rebind", "bound": "100.64.1.2", "tailscale_ip": null, "target": "127.0.0.1"}"#),
                 Some(CoreEvent::Rebind { bound: "100.64.1.2".into(), target: "127.0.0.1".into() })
             );
+        }
+
+        #[test]
+        fn guest_request_is_parsed_with_a_clean_name() {
+            assert_eq!(
+                parse_event(r#"{"event": "guest_request", "name": "김동료", "ip": "10.10.81.12", "code": "K7-3F"}"#),
+                Some(CoreEvent::GuestRequest { name: "김동료".into(), ip: "10.10.81.12".into(), code: "K7-3F".into() })
+            );
+            let long = "가".repeat(60);
+            let line = format!(r#"{{"event": "guest_request", "name": "a\u0007b\n{long}", "ip": "1", "code": "AB-CD"}}"#);
+            match parse_event(&line) {
+                Some(CoreEvent::GuestRequest { name, .. }) => {
+                    assert!(name.starts_with("ab"));
+                    assert!(!name.chars().any(char::is_control));
+                    assert_eq!(name.chars().count(), 40);
+                }
+                other => panic!("{other:?}"),
+            }
+            for line in [
+                r#"{"event": "guest_request", "ip": "1", "code": "AB-CD"}"#,
+                r#"{"event": "guest_request", "name": "   ", "ip": "1", "code": "AB-CD"}"#,
+                r#"{"event": "guest_request", "name": "a", "code": "AB-CD"}"#,
+                r#"{"event": "guest_request", "name": "a", "ip": "1"}"#,
+            ] {
+                assert_eq!(parse_event(line), None, "{line}");
+            }
         }
 
         #[test]
