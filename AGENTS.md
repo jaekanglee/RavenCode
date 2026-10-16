@@ -77,6 +77,7 @@ standalone `raven.mcp.cli`(`./raven.sh start`, team launchd, Docker `mcp-http`)�
 대시보드에서 입장 요청 → 운영자가 관리 탭에서 승인 → 기기 ID·IP에 묶인 vault별 read/create/update 권한.
 라우트 판정 표는 `raven/api/guest_routes.py::ROUTES` — **새 API를 추가하면 여기에 분류**해야 한다(빠지면 테스트 실패, 미분류는 운영자 전용).
 MCP는 손님 토큰을 받지 않는다.
+데스크톱 앱은 관리 → 내부망 공개 스위치(`desktop-settings.json` `lan_access`)로 API만 `0.0.0.0`에 연다 — MCP는 loopback 유지, `RAVEN_DESKTOP_HOST`/`RAVEN_HOST`가 있으면 그쪽이 우선.
 `./raven.sh start`는 서버/헤드리스 배포용이고, 포트가 이미 점유돼 있으면 건너뛴다.
 MCP SDK는 `mcp>=2.0`(`mcp.server.mcpserver.MCPServer`)이며 핀은 `requirements.txt` 한 곳에만 둔다.
 
