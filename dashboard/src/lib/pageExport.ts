@@ -123,6 +123,17 @@ async function fetchPageMarkdownText(
   return { text: await res.text(), attempt };
 }
 
+/** 클립보드 복사용 본문 텍스트. 파일 저장이 아니므로 begin_export 세대를 건드리지 않는다. */
+export async function fetchPageText(
+  vault: string,
+  slug: string,
+  opts: { frontmatter?: boolean } = {}
+): Promise<string> {
+  const res = await apiFetch(pageMarkdownUrl(vault, slug, opts));
+  if (!res.ok) throw new Error(`본문 가져오기 실패 (HTTP ${res.status})`);
+  return res.text();
+}
+
 export async function downloadPageMarkdown(
   vault: string,
   slug: string,

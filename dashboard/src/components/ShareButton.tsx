@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
-import { downloadPageMarkdown, downloadPageMarkdownAs, revealSavedExport } from "../lib/pageExport";
+import { downloadPageMarkdown, downloadPageMarkdownAs, fetchPageText, revealSavedExport } from "../lib/pageExport";
 import { Button } from "./ui/Button";
 
 // 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
@@ -223,6 +223,22 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
   // 데스크톱은 저장 경로를 돌려주므로 어디에 떨어졌는지 알려준다.
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
+  // 본문 전체를 순수 텍스트(frontmatter 제외)로 클립보드에 복사.
+  const [bodyCopy, setBodyCopy] = useState<"idle" | "done" | "failed">("idle");
+
+  async function handleCopyBody() {
+    setExportError(null);
+    try {
+      const text = await fetchPageText(vault, slug, { frontmatter: false });
+      const ok = await copyToClipboard(text);
+      setBodyCopy(ok ? "done" : "failed");
+      setTimeout(() => setBodyCopy("idle"), 2000);
+    } catch (e) {
+      setBodyCopy("idle");
+      setExportError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const [canReveal, setCanReveal] = useState(false);
   const [revealing, setRevealing] = useState(false);
 
@@ -348,6 +364,18 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
           <div className="share-export">
             <div className="share-export-label">파일로 내보내기</div>
             <div className="share-export-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                fullWidth
+                disabled={exporting || revealing}
+                onClick={() => void handleCopyBody()}
+                aria-label="본문 전체 텍스트 복사"
+                style={{ justifyContent: "flex-start", gap: 8 }}
+              >
+                {bodyCopy === "done" ? "✅ 복사됨!" : bodyCopy === "failed" ? "⚠️ 복사 실패" : "📋 본문 전체 텍스트 복사"}
+              </Button>
               <Button
                 type="button"
                 variant="secondary"
