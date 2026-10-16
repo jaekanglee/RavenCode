@@ -2,7 +2,7 @@ mod core;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use tauri::{command, Manager, RunEvent, State, WebviewWindow, WindowEvent};
-use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{Menu, MenuItem, MenuItemBuilder, MenuItemKind, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 
 /// Reveals the window and, if the webview's content process died while the
@@ -459,7 +459,7 @@ fn network_restart_notice(result: &Result<bool, core::StartError>) -> Option<Str
         // Another start owns the slot; the Core asks again later if still needed.
         Ok(_) | Err(core::StartError::Cancelled | core::StartError::Busy) => None,
         Err(error) => Some(format!(
-            "Tailscale 주소가 바뀌어 Backend를 다시 시작했지만 실패했습니다.\n{error}\n트레이의 Restart Backend로 다시 시도하세요."
+            "Tailscale 주소가 바뀌어 Backend를 다시 시작했지만 실패했습니다.\n{error}\n트레이의 백엔드 재시작으로 다시 시도하세요."
         )),
     }
 }
@@ -820,6 +820,73 @@ fn exit_code_for(requested: Option<i32>, loop_code: i32) -> i32 {
     requested.unwrap_or(loop_code)
 }
 
+const TRAY_TOOLTIP: &str = "Raven";
+
+#[derive(Debug, PartialEq, Eq)]
+enum ViewMenuPlacement {
+    /// Append Reload to the existing "View" submenu at this top-level index.
+    AppendToExisting(usize),
+    /// Create and append a new "View" submenu (when the platform default menu has none).
+    CreateSubmenu,
+    /// Do not create a new "View" submenu (macOS lookup failed: avoid duplicate View menu).
+    SkipToAvoidDuplicate,
+}
+
+fn plan_view_menu_placement(
+    submenu_titles: Option<&[Option<String>]>,
+    is_macos: bool,
+) -> ViewMenuPlacement {
+    if let Some(titles) = submenu_titles {
+        if let Some(idx) = titles.iter().position(|t| t.as_deref() == Some("View")) {
+            return ViewMenuPlacement::AppendToExisting(idx);
+        }
+    }
+    if is_macos {
+        ViewMenuPlacement::SkipToAvoidDuplicate
+    } else {
+        ViewMenuPlacement::CreateSubmenu
+    }
+}
+
+fn attach_reload_to_view_menu(
+    app: &tauri::App,
+    app_menu: &Menu<tauri::Wry>,
+    reload_i: &MenuItem<tauri::Wry>,
+) -> tauri::Result<()> {
+    let items = app_menu.items().ok();
+    let submenu_titles: Option<Vec<Option<String>>> = items.as_ref().map(|list| {
+        list.iter()
+            .map(|item| match item {
+                MenuItemKind::Submenu(submenu) => submenu.text().ok(),
+                _ => None,
+            })
+            .collect()
+    });
+    match plan_view_menu_placement(submenu_titles.as_deref(), cfg!(target_os = "macos")) {
+        ViewMenuPlacement::AppendToExisting(idx) => {
+            if let Some(MenuItemKind::Submenu(view_menu)) = items.and_then(|mut list| {
+                if idx < list.len() {
+                    Some(list.swap_remove(idx))
+                } else {
+                    None
+                }
+            }) {
+                view_menu.append(reload_i)?;
+            }
+        }
+        ViewMenuPlacement::CreateSubmenu => {
+            let view_menu = SubmenuBuilder::new(app, "View").item(reload_i).build()?;
+            app_menu.append(&view_menu)?;
+        }
+        ViewMenuPlacement::SkipToAvoidDuplicate => {
+            eprintln!(
+                "[menu] existing View submenu not found on macOS; skipping Reload submenu creation to avoid duplicate View menu"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
 
@@ -872,23 +939,24 @@ pub fn run() {
             });
 
             // 데스크탑 앱은 브라우저가 아니라 웹뷰라 기본 Cmd+R/Ctrl+R 새로고침이 없다 —
-            // View 메뉴에 accelerator를 달아 웹뷰를 강제 새로고침한다(창 포커스 여부와 무관하게 앱 전역 메뉴).
+            // macOS는 Menu::default()가 이미 만든 View(전체 화면) 서브메뉴에 Reload를 추가해
+            // 중복 View 메뉴를 막고, 기본 View가 없는 플랫폼에서만 View 서브메뉴를 새로 붙인다.
             let reload_i = MenuItemBuilder::new("Reload")
                 .id("reload")
                 .accelerator("CmdOrCtrl+R")
                 .build(app)?;
-            let view_menu = SubmenuBuilder::new(app, "View").item(&reload_i).build()?;
             let app_menu = Menu::default(app.handle())?;
-            app_menu.append(&view_menu)?;
+            attach_reload_to_view_menu(app, &app_menu, &reload_i)?;
             app.set_menu(app_menu)?;
 
-            let show_i = MenuItem::with_id(app, "show", "Open Dashboard", true, None::<&str>)?;
-            let restart_i = MenuItem::with_id(app, "restart", "Restart Backend", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit Raven", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "대시보드 열기", true, None::<&str>)?;
+            let restart_i = MenuItem::with_id(app, "restart", "백엔드 재시작", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Raven 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &restart_i, &quit_i])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
+                .tooltip(TRAY_TOOLTIP)
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
@@ -2195,7 +2263,8 @@ mod tests {
             assert_eq!(network_restart_notice(&Err(StartError::Busy)), None);
             assert_eq!(network_restart_notice(&Err(StartError::Cancelled)), None);
             let text = network_restart_notice(&Err(StartError::Failed("boom".into()))).unwrap();
-            assert!(text.contains("boom") && text.contains("Restart Backend"), "{text}");
+            assert!(text.contains("boom") && text.contains("백엔드 재시작"), "{text}");
+            assert!(!text.contains("Restart Backend"), "{text}");
         }
 
         #[test]
@@ -2208,6 +2277,104 @@ mod tests {
             let setup = src.find("spawn_core_event_loop(&handle)").expect("event loop wired in setup");
             let first_start = src.find("handle.state::<CoreState>().start(").expect("initial start");
             assert!(setup < first_start, "the sink must exist before the first Core starts");
+        }
+    }
+
+    // Issue #88: 셸 트레이 메뉴 한국어 통일, tooltip("Raven"), macOS 중복 View 메뉴 방지.
+    mod shell_menu_policy {
+        use super::super::{plan_view_menu_placement, ViewMenuPlacement, TRAY_TOOLTIP};
+
+        #[test]
+        fn tray_menu_strings_are_korean_and_tooltip_is_raven() {
+            assert_eq!(TRAY_TOOLTIP, "Raven");
+            let src = include_str!("lib.rs");
+            let setup_start = src.find(".setup(move |app| {").expect("setup hook");
+            let setup_end = setup_start + src[setup_start..].find(".on_window_event(").expect("end of setup");
+            let setup = &src[setup_start..setup_end];
+
+            for (id, label) in [
+                ("show", "대시보드 열기"),
+                ("restart", "백엔드 재시작"),
+                ("quit", "Raven 종료"),
+            ] {
+                let expected = format!(r#"MenuItem::with_id(app, "{id}", "{label}", true, None::<&str>)"#);
+                assert!(setup.contains(&expected), "missing tray item: {expected}");
+            }
+            for legacy_en in ["Open Dashboard", "Restart Backend", "Quit Raven"] {
+                assert!(!setup.contains(legacy_en), "English tray label remained: {legacy_en}");
+            }
+            assert!(
+                setup.contains(".tooltip(TRAY_TOOLTIP)"),
+                "TrayIconBuilder must set tooltip to TRAY_TOOLTIP"
+            );
+        }
+
+        #[test]
+        fn view_menu_reuses_existing_submenu_and_never_duplicates_on_macos() {
+            let titles = |names: &[Option<&str>]| -> Vec<Option<String>> {
+                names.iter().map(|n| n.map(str::to_string)).collect()
+            };
+
+            // macOS Menu::default() order: [App, File, Edit, View, Window, Help]
+            let macos_default = titles(&[
+                Some("Raven"),
+                Some("File"),
+                Some("Edit"),
+                Some("View"),
+                Some("Window"),
+                Some("Help"),
+            ]);
+            assert_eq!(
+                plan_view_menu_placement(Some(&macos_default), true),
+                ViewMenuPlacement::AppendToExisting(3)
+            );
+
+            // macOS: if lookup fails (missing "View", text() failed, or items() failed),
+            // never create a second "View" submenu.
+            let macos_without_view = titles(&[Some("Raven"), Some("File"), Some("Edit"), Some("Window")]);
+            assert_eq!(
+                plan_view_menu_placement(Some(&macos_without_view), true),
+                ViewMenuPlacement::SkipToAvoidDuplicate
+            );
+            let macos_text_err = titles(&[Some("Raven"), None, Some("Window")]);
+            assert_eq!(
+                plan_view_menu_placement(Some(&macos_text_err), true),
+                ViewMenuPlacement::SkipToAvoidDuplicate
+            );
+            assert_eq!(
+                plan_view_menu_placement(None, true),
+                ViewMenuPlacement::SkipToAvoidDuplicate
+            );
+
+            // Windows/Linux: Menu::default() has no "View" submenu -> create one.
+            let non_macos_default = titles(&[Some("File"), Some("Edit"), Some("Window"), Some("Help")]);
+            assert_eq!(
+                plan_view_menu_placement(Some(&non_macos_default), false),
+                ViewMenuPlacement::CreateSubmenu
+            );
+            // If a non-macOS menu already has "View", still reuse it rather than duplicating.
+            assert_eq!(
+                plan_view_menu_placement(Some(&macos_default), false),
+                ViewMenuPlacement::AppendToExisting(3)
+            );
+        }
+
+        #[test]
+        fn setup_preserves_default_menu_and_routes_reload_through_view_helper() {
+            let src = include_str!("lib.rs");
+            let setup_start = src.find(".setup(move |app| {").expect("setup hook");
+            let setup_end = setup_start + src[setup_start..].find(".on_window_event(").expect("end of setup");
+            let setup = &src[setup_start..setup_end];
+
+            assert!(setup.contains("Menu::default(app.handle())?"), "default menu must be preserved");
+            assert!(
+                setup.contains("attach_reload_to_view_menu(app, &app_menu, &reload_i)?"),
+                "Reload must be attached via attach_reload_to_view_menu"
+            );
+            assert!(
+                !setup.contains("app_menu.append(&view_menu)"),
+                "setup must not unconditionally append a second View submenu"
+            );
         }
     }
 }
