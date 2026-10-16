@@ -73,6 +73,10 @@ loopback으로 보이기 때문). 예외는 `GET /healthz`뿐. 토큰 파일은 
 standalone `raven.mcp.cli`(`./raven.sh start`, team launchd, Docker `mcp-http`)도 HTTP 전송이면 같은 게이트 뒤에서 뜬다
 (`raven.mcp.cli.build_http_app`). 인증 opt-out은 없다. stdio 전송은 네트워크 리스너가 아니라 범위 밖이다
 — `adr-2026-10-09-mcp-remote-token.md`, `adr-2026-10-13-loopback-token-required.md`.
+**내부망 손님 (v0.7.182 이후, `adr-2026-10-16-guest-access-pairing.md`)** — Core API에만 손님 토큰(`rvg_`)이 있다.
+대시보드에서 입장 요청 → 운영자가 관리 탭에서 승인 → 기기 ID·IP에 묶인 vault별 read/create/update 권한.
+라우트 판정 표는 `raven/api/guest_routes.py::ROUTES` — **새 API를 추가하면 여기에 분류**해야 한다(빠지면 테스트 실패, 미분류는 운영자 전용).
+MCP는 손님 토큰을 받지 않는다.
 `./raven.sh start`는 서버/헤드리스 배포용이고, 포트가 이미 점유돼 있으면 건너뛴다.
 MCP SDK는 `mcp>=2.0`(`mcp.server.mcpserver.MCPServer`)이며 핀은 `requirements.txt` 한 곳에만 둔다.
 
