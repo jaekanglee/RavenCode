@@ -182,6 +182,8 @@ make desktop-release   # 새 버전을 물어 범프·커밋·태그·푸시 →
 
 `Python Core 시작 실패 (...): No such file or directory (os error 2)`가 뜨면 번들된 python3 바이너리 자체보다는 (이미 서명/경로 문제는 아님을 확인함) macOS 앱 launch 타이밍과 관련된 `posix_spawn` 실패일 가능성이 높습니다 — 위 `lib.rs`의 비동기 처리 덕분에 크래시 대신 다이얼로그로 안내됩니다.
 
+백엔드가 이상하면 관리 → 백엔드 프로세스 상태에서 API와 MCP를 따로 확인하고 [로그 폴더 열기]를 누르세요. 셸이 10초마다 두 `/healthz`를 확인해 응답이 없으면 Core를 최대 3회 재시작하고, 그래도 안 되면 경고 다이얼로그를 띄웁니다. 로그는 `~/Library/Logs/com.raven.local/core.log`(5MB × 3개)에 남습니다. Claude Code가 "MCP가 꺼져 있다"고 하는데 이 화면이 정상이면, Raven이 잠시 꺼져 있던 사이 그 세션이 재연결을 포기한 것입니다. 그 세션에서 `/mcp` → Reconnect 하세요.
+
 ---
 
 ## 환경 변수 (선택)
