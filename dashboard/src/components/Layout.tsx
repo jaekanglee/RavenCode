@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "./CommandPalette";
 import { UpdateChecker } from "./UpdateChecker";
+import { LanAccessIndicator } from "./LanAccessIndicator";
 import { GuestBanner } from "./GuestBanner";
 import { usePendingGuestCount, useGuestMe } from "../lib/guest";
 import { EmptyState } from "./ui/EmptyState";
@@ -372,39 +373,41 @@ export function Layout() {
 
             {/* Center spacer — 탭 레일이 헤더 바로 아래로 빠지면서 가운데에 공간이 필요 없게 됨 */}
 
-            {/* Right — theme 토글 (slim pill) */}
-            <div
-              className="app-header-theme"
-              style={{
-                marginLeft: "auto",
-                display: "flex",
-                border: "1px solid var(--color-hairline)",
-                borderRadius: "var(--radius-full)",
-                padding: 2,
-                gap: 2,
-                flexShrink: 0,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => theme !== "light" && toggleTheme()}
-                aria-label="라이트 테마"
-                title="라이트"
-                className={clsx("app-header-theme-btn", theme === "light" && "app-header-theme-btn-active")}
-                style={{ fontSize: 13, padding: "4px 10px" }}
+            {/* Right — 내부망 공개 표시(켜져 있을 때만) + theme 토글 (slim pill) */}
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              <LanAccessIndicator />
+              <div
+                className="app-header-theme"
+                style={{
+                  display: "flex",
+                  border: "1px solid var(--color-hairline)",
+                  borderRadius: "var(--radius-full)",
+                  padding: 2,
+                  gap: 2,
+                  flexShrink: 0,
+                }}
               >
-                ☀️
-              </button>
-              <button
-                type="button"
-                onClick={() => theme !== "dark" && toggleTheme()}
-                aria-label="다크 테마"
-                title="다크"
-                className={clsx("app-header-theme-btn", theme === "dark" && "app-header-theme-btn-active")}
-                style={{ fontSize: 13, padding: "4px 10px" }}
-              >
-                🌙
-              </button>
+                <button
+                  type="button"
+                  onClick={() => theme !== "light" && toggleTheme()}
+                  aria-label="라이트 테마"
+                  title="라이트"
+                  className={clsx("app-header-theme-btn", theme === "light" && "app-header-theme-btn-active")}
+                  style={{ fontSize: 13, padding: "4px 10px" }}
+                >
+                  ☀️
+                </button>
+                <button
+                  type="button"
+                  onClick={() => theme !== "dark" && toggleTheme()}
+                  aria-label="다크 테마"
+                  title="다크"
+                  className={clsx("app-header-theme-btn", theme === "dark" && "app-header-theme-btn-active")}
+                  style={{ fontSize: 13, padding: "4px 10px" }}
+                >
+                  🌙
+                </button>
+              </div>
             </div>
           </div>
         </header>
