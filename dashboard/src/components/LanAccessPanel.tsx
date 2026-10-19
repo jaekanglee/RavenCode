@@ -4,7 +4,7 @@
 // 재시작한다(`set_lan_access`). 엔드포인트가 바뀌면 백엔드 재시작 버튼처럼 새로고침한다.
 // 켜져 있으면 Core가 알려 주는 내부망 주소(`lan_api`)를 복사할 수 있게 보여 준다.
 // RAVEN_DESKTOP_HOST/RAVEN_HOST가 설정돼 있으면 그 값이 이기므로 스위치를 끈다.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "./ui/Button";
 import { fetchSystemInfo } from "../lib/api";
 import { getApiBase } from "../lib/api-base";
@@ -30,7 +30,9 @@ export interface LanAccessPanelProps {
 }
 
 export function LanAccessPanel({ invoke, onEndpointMoved = () => window.location.reload() }: LanAccessPanelProps) {
-  const call = invoke ?? tauriInvoke();
+  // tauriInvoke()는 부를 때마다 새 함수다. 렌더마다 바뀌면 refresh와 아래 effect가 매 렌더 다시 돌아
+  // IPC+fetch가 끝없이 반복된다 (2026-10-19: WebKit에 요청 65만 건, 36GB).
+  const call = useMemo(() => invoke ?? tauriInvoke(), [invoke]);
   const [status, setStatus] = useState<LanAccessStatus | null>(null);
   const [lanApi, setLanApi] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

@@ -58,7 +58,17 @@
 - 셸 명령 `lan_access_status` / `set_lan_access` (권한 2종 추가). 저장에 실패하면 재시작하지 않는다.
 - 검증: cargo test 110 (바인딩 결정·설정 파일 왕복·명령 등록), vitest `LanAccessPanel.test.tsx` 5, 전체 664 통과.
 
-## 8. 다음
+## 8. 핫픽스 — 내부망 공개 패널의 무한 루프 (데스크톱 메모리 36GB)
+
+데스크톱 v0.3.9에서 관리 화면을 열면 내부망 공개 패널이 셸 IPC(`lan_access_status`)와 `/api/system/info` 요청을 끝없이 반복했다. 실측(2026-10-19, 앱 가동 23분): WebKit Networking 28GB + WebContent 8GB. 두 프로세스의 heap에 대기 중인 fetch와 CORS 프리플라이트가 약 65만 5천 건씩 남아 있었다. 통합 로그로 보면 관리 화면에 들어간 직후 "IPC 1번 + HTTP 1번" 짝이 초당 약 1,000회씩 나갔다. WebKit의 요청 타임아웃이 7일이라 멈춘 요청이 해제되지 않았고, 창을 닫아도(숨기기) 계속 돌았다.
+
+- 원인: `tauriInvoke()`가 부를 때마다 새 함수를 만든다. 그래서 `call` → `refresh`(useCallback) → `useEffect([refresh])`가 렌더마다 다시 실행됐다. IPC 결과는 매번 새 객체라 `setStatus`가 렌더를 일으키고, 이것이 끝없이 반복됐다. 기존 테스트는 모두 `invoke`를 prop(고정된 함수)으로 주입해서 실제 경로를 타지 않았다.
+- 수정: `call`을 `useMemo(() => invoke ?? tauriInvoke(), [invoke])`로 고정 (`dashboard/src/components/LanAccessPanel.tsx`).
+- 회귀 가드: invoke prop 없이 `__TAURI_INTERNALS__`로 렌더해 IPC와 fetch가 각 1회인지 확인한다. 수정 전에는 100ms 동안 IPC 322회로 실패했다.
+- 검증: vitest 전체 664 passed / 1 skipped, `make typecheck` 통과.
+- 이미 v0.3.9를 쓰는 사용자: 앱을 완전히 종료(트레이 → 종료)하면 메모리가 회수된다. 수정본은 데스크톱 v0.3.10으로 배포한다.
+
+## 9. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.

@@ -3,6 +3,8 @@
  *  1. 셸의 lan_access_status로 상태를 그린다. 환경변수로 고정되면 스위치를 끈다.
  *  2. 스위치를 바꾸면 확인 후 set_lan_access({enabled}) — 엔드포인트가 바뀌면 onEndpointMoved.
  *  3. 0.0.0.0에 바인딩돼 있으면 Core의 lan_api를 공유 주소로 보여 준다.
+ *  4. 데스크톱 실제 경로(invoke prop 없음 → Tauri IPC)에서도 상태 조회는 한 번 — 렌더마다
+ *     IPC+fetch를 다시 부르면 WebKit에 요청이 수십만 건 쌓인다 (2026-10-19 실측 36GB).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -24,6 +26,7 @@ beforeEach(() => {
 afterEach(() => {
   window.fetch = realFetch;
   window.confirm = realConfirm;
+  delete (window as any).__TAURI_INTERNALS__;
 });
 
 describe("LanAccessPanel", () => {
@@ -89,6 +92,19 @@ describe("LanAccessPanel", () => {
     render(<LanAccessPanel invoke={invoke} />);
     fireEvent.click(await screen.findByRole("switch"));
     expect(invoke.mock.calls.some(([c]) => c === "set_lan_access")).toBe(false);
+  });
+
+  it("asks the shell once through the Tauri bridge (no invoke prop)", async () => {
+    sysInfo("127.0.0.1", null);
+    const fetchMock = window.fetch as unknown as ReturnType<typeof vi.fn>;
+    const invoke = vi.fn(async (cmd: string) => (cmd === "lan_access_status" ? { enabled: false, env_override: false } : null));
+    (window as any).__TAURI_INTERNALS__ = { invoke };
+    const { LanAccessPanel } = await import("../src/components/LanAccessPanel");
+    render(<LanAccessPanel />);
+    await screen.findByRole("switch");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("shows an error when the shell refuses", async () => {
