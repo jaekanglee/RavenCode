@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fetchSystemInfo, type SystemInfo } from "../lib/api";
 import { downloadPageMarkdown, downloadPageMarkdownAs, fetchPageText, revealSavedExport } from "../lib/pageExport";
+import { describeBindExposure } from "../lib/bind-exposure";
+import { useLanAccess } from "../lib/useLanAccess";
 import { Button } from "./ui/Button";
 
 // 팝오버는 document.body 포털 + position:fixed 로 렌더한다 (Modal-portal.test.tsx 규약, v0.6.18+).
@@ -69,6 +71,7 @@ function ShareRow({
   copied,
   failed,
   fallbackText,
+  hint,
 }: {
   label: string;
   url: string | null;
@@ -77,6 +80,8 @@ function ShareRow({
   copied: boolean;
   failed: boolean;
   fallbackText: string;
+  /** 누가 이 링크를 열 수 있는지 (링크가 있을 때만). */
+  hint?: string;
 }) {
   return (
     <div style={{ marginBottom: 10 }}>
@@ -116,6 +121,9 @@ function ShareRow({
           {fallbackText}
         </span>
       )}
+      {url && hint && (
+        <div style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 2 }}>{hint}</div>
+      )}
     </div>
   );
 }
@@ -133,14 +141,26 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
   const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  // 데스크톱: 여기서 바로 내부망 공개를 켜고 끈다 (관리 화면 스위치와 같은 셸 상태).
+  // 페이지마다 붙는 버튼이라 열릴 때만 셸에 묻는다.
+  const lan = useLanAccess({ load: false });
+  const refreshLan = lan.refresh;
+  const [lanError, setLanError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    fetchSystemInfo()
-      .then((info) => setSysInfo(info))
+    setLanError(null);
+    Promise.all([fetchSystemInfo().then((info) => setSysInfo(info)), refreshLan()])
       .finally(() => setLoading(false));
-  }, [open]);
+  }, [open, refreshLan]);
+
+  async function changeLan(next: boolean) {
+    setLanError(null);
+    const change = await lan.setEnabled(next);
+    if (change.kind === "changed") setSysInfo(await fetchSystemInfo());
+    else if (change.kind === "failed") setLanError(`❌ 바꾸지 못했습니다: ${change.error}`);
+  }
 
   // 트리거 버튼 기준 viewport 좌표 계산 — 버튼 아래, 왼쪽 정렬, 우측 넘침은 클램프.
   // v0.7.184+: 내보내기 섹션이 붙어 팝오버가 길어졌다. 아래 공간이 부족하면
@@ -287,6 +307,9 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
 
   const lanUrl = sysInfo?.lan_api ? `${sysInfo.lan_api}/page/${vault}/${slug}` : null;
   const tsUrl = sysInfo?.tailscale_api ? `${sysInfo.tailscale_api}/page/${vault}/${slug}` : null;
+  // 셸 상태를 아는 데스크톱에서만 스위치를 그린다. 브라우저는 예전 그대로(경고 + 링크).
+  const lanStatus = lan.supported ? lan.status : null;
+  const localOnly = !!sysInfo && describeBindExposure(sysInfo.bind_host).kind === "loopback";
 
   return (
     <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
@@ -324,7 +347,26 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
           {loading && (
             <div style={{ fontSize: 12, color: "var(--color-muted)" }}>시스템 정보 조회 중…</div>
           )}
-          {!loading && sysInfo?.bind_host === "127.0.0.1" && (
+          {!loading && lanStatus && localOnly && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>🔒 지금은 이 PC에서만 열립니다</div>
+              {lanStatus.env_override ? (
+                <div style={{ fontSize: 11, color: "var(--color-muted)", lineHeight: 1.4 }}>
+                  환경변수(RAVEN_DESKTOP_HOST 또는 RAVEN_HOST)로 바인딩이 고정돼 있어 여기서 바꿀 수 없습니다.
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: "var(--color-muted)", marginBottom: 6, lineHeight: 1.4 }}>
+                    다른 기기에서 열려면 내부망에 공개하세요. 동료는 링크를 열고 입장을 요청하며, 관리 화면에서 승인해야 들어옵니다.
+                  </div>
+                  <Button type="button" size="sm" variant="primary" disabled={lan.busy} onClick={() => void changeLan(true)}>
+                    {lan.busy ? "공개하는 중… (백엔드 재시작)" : "내부망에 공개하기"}
+                  </Button>
+                </>
+              )}
+            </div>
+          )}
+          {!loading && !lanStatus && sysInfo?.bind_host === "127.0.0.1" && (
             <div
               style={{
                 fontSize: 11,
@@ -337,7 +379,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
               서버를 0.0.0.0으로 바인딩해야 합니다.
             </div>
           )}
-          {!loading && (
+          {!loading && !(lanStatus && localOnly) && (
             <>
               <ShareRow
                 label="내부망 링크"
@@ -347,6 +389,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
                 copied={copiedKey === "lan"}
                 failed={failedKey === "lan"}
                 fallbackText="내부망 IP 감지 안 됨"
+                hint={lanStatus ? "같은 망의 동료가 열면 입장 요청 → 관리 화면에서 승인" : undefined}
               />
               <ShareRow
                 label="Tailscale 링크"
@@ -356,8 +399,19 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
                 copied={copiedKey === "ts"}
                 failed={failedKey === "ts"}
                 fallbackText="Tailscale IP 감지 안 됨"
+                hint={lanStatus ? "같은 tailnet에 있는 기기에서만 열립니다" : undefined}
               />
+              {lanStatus && !lanStatus.env_override && (
+                <div style={{ textAlign: "right", marginBottom: 10 }}>
+                  <Button type="button" size="sm" variant="ghost" disabled={lan.busy} onClick={() => void changeLan(false)}>
+                    {lan.busy ? "끄는 중… (백엔드 재시작)" : "공개 끄기"}
+                  </Button>
+                </div>
+              )}
             </>
+          )}
+          {lanError && (
+            <div style={{ fontSize: 11, color: "var(--color-danger-text)", marginBottom: 10 }}>{lanError}</div>
           )}
 
           {/* ── 파일로 내보내기 (v0.7.184+) ── */}
