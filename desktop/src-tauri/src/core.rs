@@ -210,6 +210,18 @@ pub(crate) enum CoreEvent {
     GuestRequest { name: String, ip: String, code: String },
 }
 
+impl CoreEvent {
+    /// 로그용 한 줄. 손님 요청은 종류만 남긴다 (이름·IP·코드는 로그에 넣지 않는다).
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::McpEndpoint(endpoint) => format!("mcp_endpoint {endpoint}"),
+            Self::GuardBlocked { listener, address } => format!("guard_blocked listener={listener} address={address}"),
+            Self::Rebind { bound, target } => format!("rebind bound={bound} target={target}"),
+            Self::GuestRequest { .. } => "guest_request".into(),
+        }
+    }
+}
+
 /// Events from the Core with this id; ids are never reused within the shell.
 pub(crate) type EventSink = mpsc::Sender<(u64, CoreEvent)>;
 
@@ -271,8 +283,11 @@ fn relay_events<R: BufRead>(id: u64, reader: &mut R, events: Option<EventSink>) 
                 let text = String::from_utf8_lossy(&buf);
                 let text = text.trim_end_matches(['\r', '\n']);
                 eprintln!("[raven-core] {text}");
-                if let (Some(sink), Some(event)) = (events.as_ref(), parse_event(text)) {
-                    let _ = sink.send((id, event));
+                if let Some(event) = parse_event(text) {
+                    crate::core_log::log("core:event", &event.summary());
+                    if let Some(sink) = events.as_ref() {
+                        let _ = sink.send((id, event));
+                    }
                 }
             }
         }
@@ -374,7 +389,7 @@ impl StderrTail {
                 .name("raven-core:stderr".into())
                 .spawn(move || {
                     let _done = done_tx;
-                    relay_lines("core:stderr", &mut BufReader::new(stream), Some(&sink));
+                    relay_lines("core:stderr", &mut BufReader::new(stream), Some(&sink), crate::core_log::core_stderr);
                 });
             if spawned.is_err() {
                 eprintln!("[core] could not start the stderr relay");
@@ -403,7 +418,7 @@ impl StderrTail {
 /// The reader thread must outlive `start()`; otherwise the pipe's read end is
 /// closed and the child's next write fails with EPIPE. Invalid UTF-8 is relayed
 /// lossily instead of ending the relay (which would close the pipe).
-fn relay_lines<R: BufRead>(tag: &str, reader: &mut R, tail: Option<&Mutex<Option<String>>>) {
+fn relay_lines<R: BufRead>(tag: &str, reader: &mut R, tail: Option<&Mutex<Option<String>>>, on_line: fn(&str)) {
     let mut buf = Vec::new();
     loop {
         buf.clear();
@@ -413,6 +428,7 @@ fn relay_lines<R: BufRead>(tag: &str, reader: &mut R, tail: Option<&Mutex<Option
                 let text = String::from_utf8_lossy(&buf);
                 let text = text.trim_end_matches(['\r', '\n']);
                 eprintln!("[raven-{tag}] {text}");
+                on_line(text);
                 if let Some(tail) = tail {
                     let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
                     let Some(kept) = guard.as_mut() else { continue };
@@ -435,6 +451,7 @@ const DEV_ENV_HINT: &str = "('make install'로 파이썬 개발 환경을 재구
 
 /// Kill `child` (if still running) and describe the failure with its stderr.
 fn abort(mut child: Child, stderr: &StderrTail, what: String) -> StartError {
+    crate::core_log::log("shell", &format!("core start failed: {what}"));
     let _ = child.kill();
     let _ = child.wait();
     StartError::Failed(format!("{what}. {}", stderr.detail()))
@@ -569,6 +586,8 @@ impl ManagedCore {
                 Path::new(cmd.get_program()).display()
             ))
         })?;
+        crate::core_log::core_starting();
+        crate::core_log::log("shell", &format!("core spawn pid={}", child.id()));
         if let (Some(secret), Some(mut stdin)) = (secret.as_deref(), child.stdin.take()) {
             let _ = writeln!(stdin, "{secret}");
             // dropping `stdin` closes the pipe: the Core reads one line, then EOF
@@ -731,15 +750,32 @@ impl ManagedCore {
         core
     }
 
+    /// Test double: a Core whose child keeps running (`sleep 30`, killed on drop).
     #[cfg(test)]
+    pub(crate) fn for_test_alive(endpoint: &str, mcp_endpoint: Option<&str>) -> Self {
+        Self {
+            child: Command::new("sleep").arg("30").spawn().expect("spawn sleep"),
+            id: NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed),
+            endpoint: endpoint.to_string(),
+            mcp_endpoint: mcp_endpoint.map(str::to_string),
+            session: None,
+        }
+    }
+
     pub(crate) fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// 프로세스가 끝났으면 어떻게 끝났는지 (`exit status: 1`, `signal: 9 (SIGKILL)`), 살아 있으면 `None`.
+    pub(crate) fn exit_status(&mut self) -> Option<String> {
+        self.child.try_wait().ok().flatten().map(|status| status.to_string())
     }
 
     pub(crate) fn stop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let status = self.child.wait().map_or_else(|e| e.to_string(), |s| s.to_string());
+            crate::core_log::log("shell", &format!("core stop pid={} ({status})", self.child.id()));
         }
     }
 
@@ -1318,6 +1354,48 @@ mod tests {
                 &PendingStart::default(),
             ));
             assert!(message.contains("Python Core 시작 실패") && message.contains("/nonexistent/raven-python"), "{message}");
+        }
+    }
+
+    /// spec 2026-10-19-desktop-core-health-design: 원인 로그에 남기는 것과 남기지 않는 것.
+    #[cfg(unix)]
+    mod lifecycle_log {
+        use crate::core::{CoreEvent, ManagedCore};
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn event_summaries_leave_guest_details_out() {
+            let guest = CoreEvent::GuestRequest { name: "홍길동".into(), ip: "10.0.0.7".into(), code: "4821".into() };
+            assert_eq!(guest.summary(), "guest_request");
+            assert_eq!(
+                CoreEvent::McpEndpoint("http://127.0.0.1:8766/mcp".into()).summary(),
+                "mcp_endpoint http://127.0.0.1:8766/mcp"
+            );
+            assert_eq!(
+                CoreEvent::Rebind { bound: "100.64.0.1".into(), target: "100.64.0.2".into() }.summary(),
+                "rebind bound=100.64.0.1 target=100.64.0.2"
+            );
+            assert_eq!(
+                CoreEvent::GuardBlocked { listener: "MCP".into(), address: "100.64.0.1".into() }.summary(),
+                "guard_blocked listener=MCP address=100.64.0.1"
+            );
+        }
+
+        #[test]
+        fn exit_status_describes_how_the_core_ended() {
+            let mut alive = ManagedCore::for_test_alive("http://127.0.0.1:1", None);
+            assert_eq!(alive.exit_status(), None);
+            let mut done = ManagedCore::for_test("http://127.0.0.1:1", None);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                if let Some(status) = done.exit_status() {
+                    break status;
+                }
+                assert!(Instant::now() < deadline, "true가 끝나지 않았다");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(status, "exit status: 0");
+            assert!(alive.pid() > 0);
         }
     }
 }

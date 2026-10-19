@@ -15,6 +15,7 @@
     "allow-save-download-file",
     "allow-save-download-file-as",
     "allow-reveal-saved-export",
+    "allow-reveal-core-log",
     "allow-app-version",
     "updater:default",
     "process:allow-restart",

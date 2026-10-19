@@ -1,4 +1,6 @@
 mod core;
+mod core_log;
+mod health;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use tauri::{command, Manager, RunEvent, State, WebviewWindow, WindowEvent};
@@ -46,6 +48,14 @@ struct CoreState(
     Mutex<Option<String>>,
     Mutex<Option<core::EventSink>>,
 );
+
+/// The health monitor's latest view for `core_status`, and the flag that stops it on exit
+/// (spec 2026-10-19-desktop-core-health-design).
+#[derive(Default)]
+struct HealthState {
+    snapshot: Mutex<health::Snapshot>,
+    stopping: std::sync::atomic::AtomicBool,
+}
 
 /// Frees the "a start is running" slot however `start_with` ends — a panic in a
 /// launch must not leave every later restart refused as `Busy`.
@@ -103,6 +113,15 @@ impl CoreState {
             if pending.is_cancelled() {
                 return Err(core::StartError::Cancelled);
             }
+            core_log::log(
+                "shell",
+                &format!(
+                    "core ready pid={} api={} mcp={}",
+                    core.pid(),
+                    core.endpoint,
+                    core.mcp_endpoint.as_deref().unwrap_or("없음")
+                ),
+            );
             eprintln!("Raven Python Core ready at {}", core.endpoint);
             if let Some(ref mcp_ep) = core.mcp_endpoint {
                 eprintln!("Raven MCP endpoint at {mcp_ep}");
@@ -266,21 +285,43 @@ struct CoreStatus {
     running: bool,
     endpoint: Option<String>,
     mcp_endpoint: Option<String>,
+    /// What the health monitor last saw (spec 2026-10-19-desktop-core-health-design).
+    health: health::Snapshot,
+    log_path: Option<String>,
 }
 
-/// Reports whether the Python Core child process is alive, plus its endpoints.
+/// Reports whether the Python Core child process is alive, its endpoints, and what the
+/// health monitor last saw of its API and MCP.
 #[command]
-fn core_status(state: State<'_, CoreState>) -> CoreStatus {
+fn core_status(state: State<'_, CoreState>, health: State<'_, HealthState>) -> CoreStatus {
+    let snapshot = health.snapshot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let log_path = core_log::path().map(|path| path.display().to_string());
     if let Ok(mut guard) = state.0.lock() {
         if let Some(managed) = guard.as_mut() {
             return CoreStatus {
                 running: managed.is_alive(),
                 endpoint: Some(managed.endpoint.clone()),
                 mcp_endpoint: managed.mcp_endpoint.clone(),
+                health: snapshot,
+                log_path,
             };
         }
     }
-    CoreStatus { running: false, endpoint: None, mcp_endpoint: None }
+    CoreStatus { running: false, endpoint: None, mcp_endpoint: None, health: snapshot, log_path }
+}
+
+/// Shows the Core log in Finder (admin page "로그 폴더 열기"). Takes nothing from the
+/// webview — the path is the shell's own (spec 2026-10-19-desktop-core-health-design).
+#[command]
+fn reveal_core_log() -> Result<(), String> {
+    let path = core_log::path().ok_or("로그 위치를 알 수 없습니다")?;
+    // 아직 한 줄도 안 썼으면 파일이 없다 — 폴더라도 보여 준다.
+    let target = if path.exists() {
+        path
+    } else {
+        path.parent().map(std::path::Path::to_path_buf).ok_or("로그 위치를 알 수 없습니다")?
+    };
+    tauri_plugin_opener::reveal_item_in_dir(target).map_err(|e| e.to_string())
 }
 
 /// Stops and relaunches the Python Core — shared by the tray "Restart Backend"
@@ -630,6 +671,151 @@ fn spawn_core_event_loop(app: &tauri::AppHandle) {
     }
 }
 
+/// Milliseconds since the epoch, for the admin page's "마지막 확인 N초 전".
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// What the health monitor sees of the stored Core, or `None` while a start or
+/// restart is running (its own wait and errors cover that window).
+fn observe_core(state: &CoreState, mcp_enabled: bool) -> Option<health::Observation> {
+    if state.pending().is_some() {
+        return None;
+    }
+    let (core_id, exited, endpoint, mcp_endpoint) = {
+        let mut guard = state.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(core) = guard.as_mut() else {
+            return Some(health::Observation {
+                core_id: None,
+                seen: health::Seen::Gone("마지막 시작이 실패해 실행 중인 Core가 없음".into()),
+            });
+        };
+        (core.id, core.exit_status(), core.endpoint.clone(), core.mcp_endpoint.clone())
+    };
+    // The probes run outside the lock: `core_status` and restarts must not wait on them.
+    let seen = match exited {
+        Some(how) => health::Seen::Gone(how),
+        None => health::Seen::Running {
+            api: health::probe_healthz(&endpoint, health::PROBE_TIMEOUT),
+            mcp: match (mcp_enabled, mcp_endpoint) {
+                (false, _) => health::McpSeen::Off,
+                (true, None) => health::McpSeen::Missing,
+                (true, Some(endpoint)) => health::McpSeen::Probe(health::probe_healthz(&endpoint, health::PROBE_TIMEOUT)),
+            },
+        },
+    };
+    Some(health::Observation { core_id: Some(core_id), seen })
+}
+
+/// One log line for a health state change: `api=ok mcp=down phase=recovering — MCP 응답 없음: 연결 거부`.
+fn health_change_line(s: &health::Snapshot) -> String {
+    let mut line = format!("api={} mcp={} phase={}", s.api, s.mcp, s.phase);
+    if s.api == "down" || s.mcp == "down" || s.mcp == "missing" {
+        if let Some(why) = &s.last_error {
+            line.push_str(&format!(" — {why}"));
+        }
+    }
+    line
+}
+
+/// Watch the stored Core for the life of the app (spec 2026-10-19-desktop-core-health-design):
+/// every `PROBE_INTERVAL` check the process and both `/healthz`, restart through the #44
+/// path when `health::Monitor` says so, and tell the user once when it gives up.
+fn spawn_health_monitor(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("raven-core-health".into()).spawn(move || {
+        let mcp_enabled = core::mcp_enabled_from_env(std::env::var("RAVEN_DESKTOP_MCP").ok());
+        let mut monitor = health::Monitor::default();
+        loop {
+            std::thread::sleep(health::PROBE_INTERVAL);
+            if app.state::<HealthState>().stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            let Some(observation) = observe_core(&app.state::<CoreState>(), mcp_enabled) else {
+                continue;
+            };
+            let before = monitor.snapshot();
+            let action = monitor.observe(std::time::Instant::now(), wall_ms(), observation);
+            let after = monitor.snapshot();
+            if (before.api, before.mcp, before.phase) != (after.api, after.mcp, after.phase) {
+                core_log::log("health", &health_change_line(&after));
+            }
+            *app.state::<HealthState>().snapshot.lock().unwrap_or_else(PoisonError::into_inner) = after;
+            act_on_health(&app, action);
+        }
+    });
+    if spawned.is_err() {
+        eprintln!("[core] could not start the health monitor — a stopped Core will not be restarted");
+    }
+}
+
+fn act_on_health(app: &tauri::AppHandle, action: health::Action) {
+    match action {
+        health::Action::None => {}
+        health::Action::Recovered => core_log::log("health", "recovered"),
+        health::Action::Restart { attempt, reason } => {
+            core_log::log("health", &format!("restart #{attempt}/{} ({reason})", health::MAX_RESTARTS));
+            match do_restart_core(app) {
+                // Like a network restart: reload only when the page's endpoint is gone.
+                Ok(true) => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.eval("location.reload()");
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => core_log::log("health", &format!("restart #{attempt} failed: {error}")),
+            }
+        }
+        health::Action::GiveUp { reason } => {
+            core_log::log("health", &format!("gave up after {} restarts ({reason})", health::MAX_RESTARTS));
+            show_health_dialog(app, &reason);
+        }
+    }
+}
+
+/// One give-up dialog at a time.
+static HEALTH_NOTICE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn show_health_dialog(app: &tauri::AppHandle, reason: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let log_path = core_log::path();
+    let notice = health_notice(reason, core_log::last_warning().as_deref(), log_path.as_deref());
+    eprintln!("{notice}");
+    if HEALTH_NOTICE_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    core_log::log("health", "dialog shown");
+    app.dialog()
+        .message(notice)
+        .title("Raven")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("로그 열기".into(), "닫기".into()))
+        .show(move |open_log| {
+            HEALTH_NOTICE_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let (true, Some(path)) = (open_log, log_path) {
+                let _ = tauri_plugin_opener::reveal_item_in_dir(path);
+            }
+        });
+}
+
+/// The give-up dialog's text.
+fn health_notice(reason: &str, last_warning: Option<&str>, log_path: Option<&std::path::Path>) -> String {
+    let mut text = format!(
+        "Raven 백엔드를 자동으로 복구하지 못했습니다.\n• 증상: {reason}\n• 자동 재시작 {}회 시도",
+        health::MAX_RESTARTS
+    );
+    if let Some(warning) = last_warning {
+        text.push_str(&format!("\n• Core 마지막 경고: {warning}"));
+    }
+    if let Some(path) = log_path {
+        text.push_str(&format!("\n\n로그: {}", path.display()));
+    }
+    text.push_str("\n\n트레이나 관리 화면에서 백엔드를 재시작하면 자동 복구가 다시 켜집니다.");
+    text
+}
+
 /// 웹뷰가 준 파일명에서 경로 성분을 버리고 파일명만 남긴다.
 ///
 /// 웹뷰 입력은 신뢰하지 않는다: `../../etc/passwd`나 `/tmp/evil.md`가 그대로
@@ -973,12 +1159,14 @@ pub fn run() {
         .manage(SavedExport::default())
         .manage(CoreState::default())
         .manage(RequestedExit::default())
+        .manage(HealthState::default())
         .invoke_handler(tauri::generate_handler![
             core_endpoint,
             core_session_token,
             mcp_endpoint,
             app_version,
             core_status,
+            reveal_core_log,
             restart_core,
             lan_access_status,
             set_lan_access,
@@ -999,6 +1187,11 @@ pub fn run() {
             // setup 훅이 Err를 반환하면 Tauri 내부가 응답 불가능한 패닉(panic→abort, FFI 경계라
             // unwind 불가)으로 처리하므로, 여기서 실패를 직접 흡수해 다이얼로그 후 종료한다.
             let handle = app.handle().clone();
+            // spec 2026-10-19-desktop-core-health-design: 원인 로그는 첫 Core보다 먼저 연다.
+            if let Ok(dir) = handle.path().app_log_dir() {
+                core_log::init(dir.join("core.log"));
+            }
+            core_log::log("shell", &format!("Raven {} start", handle.package_info().version));
             let resource_dir = app.path().resource_dir().ok();
             let lan = read_lan_access(settings_path(&handle).as_deref());
             // Before the first start, so that Core's events are delivered too.
@@ -1015,6 +1208,7 @@ pub fn run() {
                     Err(core::StartError::Failed(e)) => report_startup_failure_and_exit(&handle, &e),
                 }
             });
+            spawn_health_monitor(app.handle());
 
             // 데스크탑 앱은 브라우저가 아니라 웹뷰라 기본 Cmd+R/Ctrl+R 새로고침이 없다 —
             // macOS는 Menu::default()가 이미 만든 View(전체 화면) 서브메뉴에 Reload를 추가해
@@ -1088,9 +1282,11 @@ pub fn run() {
                         if let Some(code) = code {
                             *app.state::<RequestedExit>().0.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
                         }
+                        app.state::<HealthState>().stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                         app.state::<CoreState>().stop();
                     }
                     RunEvent::Exit => {
+                        app.state::<HealthState>().stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                         app.state::<CoreState>().stop();
                     }
                     // Tauri only defines `Reopen` on macOS (Dock icon click); matching it
@@ -1538,6 +1734,68 @@ mod tests {
             assert!(!super::read_lan_access(Some(&path)), "{broken}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec 2026-10-19-desktop-core-health-design
+    #[test]
+    fn health_notice_names_the_symptom_the_warning_and_the_log() {
+        let text = super::health_notice(
+            "MCP 응답 없음: 연결 거부",
+            Some("⚠️  [Desktop Core] MCP port 8766 already in use — API only."),
+            Some(std::path::Path::new("/tmp/core.log")),
+        );
+        assert!(text.contains("• 증상: MCP 응답 없음: 연결 거부"));
+        assert!(text.contains("자동 재시작 3회"));
+        assert!(text.contains("MCP port 8766 already in use"));
+        assert!(text.contains("로그: /tmp/core.log"));
+        let bare = super::health_notice("API 응답 없음", None, None);
+        assert!(!bare.contains("마지막 경고") && !bare.contains("로그:"));
+    }
+
+    #[test]
+    fn reveal_core_log_is_registered_allowed_and_takes_nothing_from_the_webview() {
+        let caps: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let perms: Vec<&str> = caps["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str()).collect();
+        assert!(perms.contains(&"allow-reveal-core-log"));
+        let toml = include_str!("../permissions/default.toml");
+        assert!(toml.contains(r#"commands.allow = ["reveal_core_log"]"#));
+        let src = include_str!("lib.rs");
+        assert!(src.contains(concat!("core_status,\n            reveal_core_log,")));
+        assert!(src.contains(concat!("fn reveal_core_log", "() -> Result<(), String>")));
+    }
+
+    #[test]
+    fn health_monitor_starts_in_setup_and_stops_on_exit() {
+        let src = include_str!("lib.rs");
+        let setup = &src[src.find(".setup(move |app| {").unwrap()..];
+        assert!(setup.contains(concat!("spawn_health_", "monitor(")));
+        assert!(setup.contains(concat!("core_log::", "init(")));
+        assert!(src.matches(concat!(".stopping", ".store(true")).count() >= 2, "ExitRequested와 Exit 둘 다 감시를 멈춘다");
+    }
+
+    #[test]
+    fn observe_core_reports_a_missing_core_and_skips_a_running_start() {
+        let state = CoreState::default();
+        let seen = super::observe_core(&state, true).unwrap();
+        assert_eq!(seen.core_id, None);
+        assert!(matches!(seen.seen, super::health::Seen::Gone(_)));
+        *state.pending() = Some(Arc::new(super::core::PendingStart::default()));
+        assert!(super::observe_core(&state, true).is_none(), "시작 중에는 관측하지 않는다");
+    }
+
+    #[test]
+    fn observe_core_probes_a_live_core_and_flags_missing_mcp() {
+        use super::health::{McpSeen, Probe, Seen};
+        let state = CoreState::default();
+        *state.0.lock().unwrap() = Some(ManagedCore::for_test_alive("http://127.0.0.1:1", None));
+        match super::observe_core(&state, true).unwrap().seen {
+            Seen::Running { api: Probe::Fail(_), mcp: McpSeen::Missing } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            super::observe_core(&state, false).unwrap().seen,
+            Seen::Running { mcp: McpSeen::Off, .. }
+        ));
     }
 
     #[test]

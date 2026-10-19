@@ -1,6 +1,6 @@
 [default]
 description = "Allow the webview to query the managed Python Core endpoint."
-permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-lan-access-status", "allow-set-lan-access", "allow-save-download-file", "allow-save-download-file-as", "allow-reveal-saved-export", "allow-app-version"]
+permissions = ["allow-core-endpoint", "allow-core-session-token", "allow-mcp-endpoint", "allow-core-status", "allow-restart-core", "allow-lan-access-status", "allow-set-lan-access", "allow-save-download-file", "allow-save-download-file-as", "allow-reveal-saved-export", "allow-app-version", "allow-reveal-core-log"]
 
 [[permission]]
 identifier = "allow-core-endpoint"
@@ -56,3 +56,8 @@ commands.allow = ["app_version"]
 identifier = "allow-reveal-saved-export"
 description = "Reveal only the last file successfully saved by Rust."
 commands.allow = ["reveal_saved_export", "begin_export"]
+
+[[permission]]
+identifier = "allow-reveal-core-log"
+description = "Allow invoking the reveal_core_log command (shows the shell's own Core log in Finder; takes no path)."
+commands.allow = ["reveal_core_log"]
