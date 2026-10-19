@@ -12,6 +12,7 @@ import { describeBindExposure } from "../lib/bind-exposure";
 import { describeTailnetAccess } from "../lib/network-status";
 import { coreEndpointMoved } from "../lib/core-endpoint";
 import { getApiBase } from "../lib/api-base";
+import { CoreHealthPanel, type CoreStatus } from "../components/CoreHealthPanel";
 import {
   fetchLinkCheck, runExport, repairVault, cloneVault,
   fetchLocks, releaseLock, apiFetch, formatApiError,
@@ -91,7 +92,6 @@ export function VaultManage() {
   }, []);
 
   // ── 백엔드(Python Core) 프로세스 상태 ──
-  interface CoreStatus { running: boolean; endpoint?: string | null; mcp_endpoint?: string | null; }
   const [coreStatus, setCoreStatus] = useState<CoreStatus | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
@@ -135,6 +135,14 @@ export function VaultManage() {
       setRestartMsg(`❌ 재시작 실패: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRestarting(false);
+    }
+  }
+
+  async function revealCoreLog() {
+    try {
+      await (window as any).__TAURI_INTERNALS__?.invoke("reveal_core_log");
+    } catch (e) {
+      setRestartMsg(`❌ 로그를 열지 못했습니다: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -815,25 +823,7 @@ export function VaultManage() {
                 gap: 10,
               }}
             >
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", textTransform: "uppercase", marginBottom: 6 }}>
-                  백엔드 프로세스 상태
-                </div>
-                <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                  <span
-                    style={{
-                      display: "inline-block", width: 8, height: 8, borderRadius: "50%",
-                      background: coreStatus?.running ? "var(--color-success-text)" : "var(--color-danger-text)",
-                    }}
-                  />
-                  <strong>{coreStatus === null ? "확인 중…" : coreStatus.running ? "실행 중" : "중지됨"}</strong>
-                </div>
-                {coreStatus?.mcp_endpoint && (
-                  <div style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 4, wordBreak: "break-all" }}>
-                    MCP: {coreStatus.mcp_endpoint}
-                  </div>
-                )}
-              </div>
+              <CoreHealthPanel status={coreStatus} onRevealLog={() => void revealCoreLog()} />
               <div>
                 <Button variant="secondary" size="sm" disabled={restarting} onClick={() => void restartBackend()}>
                   {restarting ? "재시작 중..." : "🔁 백엔드 재시작"}
