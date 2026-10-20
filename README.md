@@ -22,7 +22,7 @@ raven는 **사람 1차 Zettelkasten-inspired 마크다운 PKM 도구**. Obsidian
 | **Index** (쿼리) | SQLite (FTS5 + backlinks view) | `<vault>/wiki.db` |
 | **Engine** (Python) | raven.core (db/lint/export/link) | `raven/core/` |
 | **CLI** (사람/자동화) | Typer 7 top-level commands + 12 subcommand groups | `raven/cli/` |
-| **API** (HTTP) | FastAPI 78 endpoints | `raven/api/` |
+| **API** (HTTP) | FastAPI 80 endpoints | `raven/api/` |
 | **GUI** (웹) | React 19 + Vite + PWA | `dashboard/` |
 | **MCP** (LLM 표준) | MCPServer 25 tools + 4 resources | `raven/mcp/` |
 
@@ -254,7 +254,7 @@ raven mcp token add|list|revoke <name>          # 원격(tailnet·내부망) MCP
 
 ---
 
-## HTTP API (78 endpoints)
+## HTTP API (80 endpoints)
 
 ```bash
 # vault 관리
@@ -275,6 +275,10 @@ DELETE /api/vaults/{name}/pages/{slug}           # → _archive/
 # 운영 지침 (_meta/policy/VAULT-POLICY.md, 사용자 소유)
 GET    /api/vaults/{name}/policy                 # 없으면 content null + 빈 양식 template
 PUT    /api/vaults/{name}/policy                 # body: {content, precondition?} — 본문 그대로 저장, 낡은 토큰은 409
+
+# 초안 검토 (에이전트가 쓴 status: draft, 운영자 전용)
+GET    /api/vaults/{name}/review                 # draft 문서 목록 (마지막 작성 에이전트 포함)
+POST   /api/vaults/{name}/review/approve         # body: {items: [{slug, precondition?}]} → current + draft 태그 제거, 건별 결과
 
 # 쿼리
 GET    /api/vaults/{name}/search?q=X&top_k=N

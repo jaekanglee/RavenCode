@@ -92,6 +92,8 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", f"{V}/clone"): "owner",
     ("POST", f"{V}/drafts/commit"): "owner",    # 운영자가 LLM으로 만든 초안의 발행
     ("POST", f"{V}/drafts/generate"): "owner",  # LLM 비용
+    ("GET", f"{V}/review"): "owner",            # 초안 검토 대기열 — 승인은 운영자 일
+    ("POST", f"{V}/review/approve"): "owner",
     ("POST", f"{V}/export"): "owner",
     ("PUT", f"{V}/feedback/{{index}}"): "owner",  # 남의 피드백 문구를 원래 작성자 이름으로 바꾼다
     ("GET", f"{V}/git/diff"): "owner",

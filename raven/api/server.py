@@ -40,7 +40,7 @@ from raven.core import policy as policy_module
 from raven.core.vault import Vault
 from raven.core import backup as backup_module
 from raven.core.access import TokenGate, route_path
-from raven.api import guest_api, guest_routes
+from raven.api import guest_api, guest_routes, review_api
 from raven.api.guest_api import guest_actor, guest_of
 
 # v0.7.61+ workspace tree (read-only) — WorkspacePage OS 파일 트리 노출.
@@ -175,6 +175,9 @@ def _vault_or_404(name: str) -> Vault:
                 f"registry entry, it never touches vault files."
             ),
         )
+
+
+review_api.install(app, _vault_or_404)  # SPA fallback보다 먼저
 
 
 def _safe_slug_or_400(slug: str, v: Vault) -> Path:
@@ -900,6 +903,7 @@ def _build_tree_node(path: Path, v_root: Path) -> dict:
                     "slug": slug,
                     "title": meta.get("title", slug),
                     "pageType": meta.get("type", "?"),
+                    "status": normalize_status(meta.get("status")),
                 })
     except (PermissionError, OSError):
         pass

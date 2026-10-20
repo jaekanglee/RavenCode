@@ -224,6 +224,14 @@ def test_every_route_is_classified():
     assert not missing, "guest_routes.ROUTES에 분류를 추가하세요: " + ", ".join(missing)
 
 
+def test_guest_cannot_use_the_review_queue(root):
+    g = _guest(_pair({"alpha": ["read", "create", "update"]}))
+
+    assert g.get("/api/vaults/alpha/review").status_code == 403
+    r = g.post("/api/vaults/alpha/review/approve", json={"items": [{"slug": "content/hello"}]})
+    assert r.status_code == 403
+
+
 def test_no_delete_route_is_open_to_guests():
     from raven.api.guest_routes import ROUTES
 
