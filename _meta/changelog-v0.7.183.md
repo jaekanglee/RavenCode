@@ -112,7 +112,31 @@
   - vitest 680 passed / 1 skipped. 신규 `LanAccessIndicator.test.tsx` 6개: 브라우저·이 PC 전용이면 숨김, 주소·손님·권한 표시 후 끄기, 환경변수 고정, 관리 스위치로 켜면 즉시 표시, 셸 IPC 1회. `make typecheck` 통과.
   - 실제 앱(`tauri dev`, 내부망 공개 켠 상태): 헤더에 표시가 뜨는 것을 창 캡처로 확인했다.
 
-## 12. 다음
+## 12. 초안 검토 대기열
+
+에이전트가 MCP로 쓴 문서는 frontmatter `status: draft`로 들어오고, 운영자가 승인해야 `current`가 된다(vault에 주입되는 `SCHEMA.md`의 전이 규칙). 그런데 대시보드는 `status`를 읽지 않았다. 문서 상단 경고(SCHEMA가 약속한 "헤더 경고")도, 사이드바 표시도, 모아 보기도 없었고, 승인하려면 에디터에서 frontmatter를 직접 고쳐야 했다. rider-app은 27개 중 17개가 draft로 쌓여 있었다. 이름이 같은 `drafts/` 폴더 기능(`wiki_generate_draft` → `wiki_commit_draft`)은 별개이고 그대로 둔다.
+
+- **승인 = `status: current` + tags에서 `draft`만 제거.** 본문과 나머지 frontmatter(다른 태그, `agents`, `relations` 등)는 그대로다. 쓰기는 `contracts.write_page`를 타고(대시보드 문서 수정과 같은 조건), `log.md`에 `update` 레코드와 "검토 승인: draft → current"를 남긴다. 읽는 시점의 precondition 토큰을 쓰기에 넘겨, 읽기와 쓰기 사이에 바뀐 문서는 덮어쓰지 않는다.
+- **API (운영자 전용, `guest_routes`에서 `owner`)**: `GET /api/vaults/{name}/review`(draft 목록 + 마지막 작성 에이전트), `POST /api/vaults/{name}/review/approve`(`{items: [{slug, precondition?}]}`, 1~200건, 건별 결과 `approved / not_found / not_draft / stale_precondition / error`). 손님 토큰은 `update` 권한이 있어도 403. MCP 도구는 두지 않는다(에이전트가 스스로 승인하지 않는다). 트리 API의 page 노드에 `status`를 더했다.
+- **대시보드**:
+  - 사이드바: vault 섹션 맨 위 "검토 대기 N"(누르면 `/review/<vault>`, 손님 탭이면 숨김), draft 문서 행에 점, type 그룹 행에 하위 draft 개수. 트리 응답만으로 센다.
+  - `/review/<vault>`: 체크박스 목록(제목·타입·에이전트·수정일), 전체 선택, "선택 승인 (k)", 결과 토스트("✅ 2건 승인 · 1건 건너뜀(이미 승인됨 1)").
+  - 문서 상단 배너 "에이전트가 쓴 초안입니다 · 검토 대기" + [승인](운영자만). 읽을 때 받은 precondition을 실어 보내, 그 뒤 바뀌었으면 승인하지 않고 다시 확인하라고 말한다.
+  - 홈 "손볼 문서"에 draft를 포함했다.
+  - 색은 경고 토큰(`--color-warning-*`, 라이트·다크).
+- README HTTP API 목록과 개수(78 → 80)를 갱신했다(`test_v0_7_178_doc_count_guards`).
+- 설계·계획: `docs/superpowers/specs/2026-10-20-draft-review-queue-design.md`, `docs/superpowers/plans/2026-10-20-draft-review-queue.md`.
+- 검증:
+  - pytest: 신규 `test_review.py` 14개, `test_review_api.py` 7개, `test_guest_gate.py`에 손님 403 1개. 전체 3273 passed / 1 skipped.
+  - vitest 697 passed / 1 skipped(신규 17개: `review.lib`·`Sidebar.review-queue`·`ReviewPage`·`DraftReviewBanner`, `HomePage.workbench` 1개 수정). `tsc -b --noEmit` 통과. 전체 실행에서 `PageExport`·`App.route-error-boundary`가 한 번씩 실패했다가 단독·재실행에서 통과했다(부하 시 간헐 실패, 이번 변경과 무관한 파일).
+  - 실제 화면(스크래치 vault + 임시 Core가 빌드본을 서빙, headless Chrome CDP, 다크·라이트): 사이드바 "검토 대기 3건"과 그룹 개수 → 검토 화면에서 2건 선택 승인 → 문서 배너에서 나머지 승인 → 배너·draft 태그·검토 대기 줄이 사라지는 것을 확인했다. API로는 낡은 precondition 거절과 `not_draft` 건너뜀도 확인했다. 사용자 vault는 건드리지 않았다.
+
+## 13. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.
+- 초안 검토 후속 후보:
+  - `stale`·`contested` 헤더 경고: Tier 2 SCHEMA가 약속하지만 아직 없다. `DraftReviewBanner`를 상태별로 넓히면 된다.
+  - issue draft 7일 자동 승격: Tier 2 SCHEMA에 적혀 있지만 `_auto_promote_draft_issues`를 부르는 곳이 없다. 문서를 고칠지 코드를 살릴지 정해야 한다.
+  - 정본 `_meta/SCHEMA.md`의 status 표는 4종(draft 없음)이라 Tier 2 템플릿(5종)과 어긋난다.
+  - CLI `raven review list|approve`.

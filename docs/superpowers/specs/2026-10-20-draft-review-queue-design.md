@@ -31,12 +31,12 @@
 | 위치 | 내용 |
 |---|---|
 | 사이드바 vault 섹션 | 트리 맨 위에 "검토 대기 N" 줄. 누르면 `/review/<vault>`. N이 0이거나 손님 탭이면 숨긴다. N은 트리 응답에서 센다(추가 요청 없음). |
-| 사이드바 트리 | draft 문서 행에 상태 점. 폴더 행에는 하위 draft 개수. |
+| 사이드바 트리 | draft 문서 행에 상태 점. 그룹 행(사이드바는 문서를 type별로 묶는다)에는 하위 draft 개수. |
 | `/review/<vault>` (신규) | 제목 줄 "검토 대기 N · in <vault>". 목록 행: 체크박스, 제목(누르면 문서로 이동), 타입 pill, 마지막 작성 에이전트, 수정일. 상단에 "전체 선택"과 "선택 승인 (k)". 승인 뒤 결과 토스트(성공 n건, 건너뜀 m건과 이유)를 띄우고 목록을 다시 불러온다. 비면 `EmptyState`("검토할 초안이 없습니다"). 손님 탭이면 안내만 보여 준다. |
 | 문서 상단 | `status: draft`이면 배너 "에이전트가 쓴 초안입니다 · 검토 대기"와 **승인** 버튼(운영자만). 승인되면 문서를 다시 불러오고 배너가 사라진다. |
 | 홈 "손볼 문서" | 필터에 `draft`를 더한다. 빈 문구는 "stale·contested·draft 문서가 없습니다." |
 
-승인이 끝나면 `tree:<vault>`·`pages:<vault>` 캐시를 무효화하고 `raven-review-changed` 이벤트를 보낸다. 사이드바와 검토 화면이 이 이벤트로 다시 불러온다.
+승인이 끝나면 `tree:<vault>`·`pages:<vault>` 캐시를 무효화하고, Layout의 `refresh`(outlet context)를 불러 사이드바 트리를 다시 받는다. 문서 수정 저장 뒤와 같은 경로다. 검토 화면은 승인 뒤 자기 목록을 다시 불러온다.
 
 ## API
 
@@ -88,7 +88,7 @@
 | `raven/api/guest_routes.py` | 새 라우트 둘을 `owner`로 분류. |
 | `dashboard/src/types.ts` | `TreeNode.status?: string` |
 | `dashboard/src/lib/api.ts` | `fetchReviewQueue`, `approveDrafts`와 응답 타입. 승인 뒤 캐시 무효화. |
-| `dashboard/src/lib/review.ts` (신규) | `countDrafts(node)`, `isDraftStatus(status)` 같은 순수 함수. 사이드바와 테스트가 함께 쓴다. |
+| `dashboard/src/lib/review.ts` (신규) | `isDraftStatus(status)`, `countDrafts(node)`, `summarizeApproval(results)` 순수 함수. 사이드바·검토 화면·문서 화면과 테스트가 함께 쓴다. |
 | `dashboard/src/components/Sidebar.tsx` | 검토 대기 줄, 문서 행 점, 폴더 개수. |
 | `dashboard/src/routes/ReviewPage.tsx` (신규) | 검토 대기 화면. |
 | `dashboard/src/App.tsx` | `/review/:vault` 라우트. |
