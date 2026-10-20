@@ -1830,6 +1830,94 @@ textarea.input-base {
   white-space: nowrap;
 }
 
+/* 초안 검토 대기열 (spec 2026-10-20-draft-review-queue-design) — 경고 토큰이 라이트·다크를 맡는다 */
+.sidebar-draft-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-warning-text);
+}
+.sidebar-draft-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: 1px solid var(--color-warning-border);
+}
+.review-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+}
+.review-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--color-hairline);
+  font-size: 14px;
+}
+.review-row:first-child {
+  border-top: none;
+}
+.review-row-head {
+  grid-template-columns: 20px 1fr;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.review-row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink);
+}
+.review-row-meta {
+  font-size: 12px;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+@media (max-width: 744px) {
+  .review-row {
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+  }
+  .review-row .review-row-meta {
+    display: none;
+  }
+}
+.draft-review-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  color: var(--color-warning-text);
+  font-size: 13px;
+}
+.draft-review-banner-text {
+  flex: 1;
+  font-weight: 600;
+}
+.draft-review-banner-message {
+  font-size: 12px;
+}
+
 /* ─── Sidebar Revamp UI components ─── */
 .sidebar-vault-selector-container {
   margin-bottom: 12px;

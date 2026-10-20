@@ -11,6 +11,8 @@ import { Button } from "../components/ui/Button";
 import { EmptyIcon } from "../lib/emptyIcons";
 import { deletePage, fetchPage, getActiveVault, sendPageFeedback, updatePage, deletePageFeedback, updatePageFeedback, fetchRecommendations, commitDraft, deleteDraft , apiFetch} from "../lib/api";
 import { PropertiesPanel } from "../components/PropertiesPanel";
+import { DraftReviewBanner } from "../components/DraftReviewBanner";
+import { isDraftStatus } from "../lib/review";
 import { canGuest, useGuestMe } from "../lib/guest";
 import type { Graph, Page, Recommendation } from "../types";
 
@@ -297,6 +299,7 @@ export function PageView() {
           tags,
           content: d.content,
           backlinks: d.backlinks || [],
+          status: fm.status || "",
           issueStatus: fm.issue_status || "",
           relations: fm.relations || [],
           precondition: d.precondition || "",
@@ -474,6 +477,19 @@ export function PageView() {
               삭제
             </Button>
           </div>
+        )}
+        {/* status: draft 배너 — 에이전트가 쓴 초안의 검토·승인 (spec 2026-10-20) */}
+        {isDraftStatus(page.status) && (
+          <DraftReviewBanner
+            vault={vault}
+            slug={page.slug}
+            precondition={page.precondition}
+            canApprove={guestMe === null}
+            onApproved={() => {
+              setReloadKey((k) => k + 1);
+              ctx?.refresh?.();
+            }}
+          />
         )}
         {/* Properties Panel — type/tags 편집 + 문서 연결 */}
         <PropertiesPanel

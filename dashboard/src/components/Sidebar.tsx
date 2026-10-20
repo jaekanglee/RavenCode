@@ -15,6 +15,8 @@ import {
   readHostScopedStored,
   type DraftListItem,
 } from "../lib/api";
+import { isGuestTab } from "../lib/guest";
+import { countDrafts, isDraftStatus } from "../lib/review";
 import { useIsDrawerMobile } from "../lib/useMediaQuery";
 import type { TreeNode as TNode, VaultMeta } from "../types";
 
@@ -716,6 +718,7 @@ function VaultTreeGroup({
 }) {
   const [openFolders, setOpenFolders] = useState<Set<string>>(() => readOpenFolders(vault.name));
   const open = openFolders.has(VAULT_OPEN_KEY);
+  const draftCount = useMemo(() => countDrafts(tree), [tree]);
 
   function toggleFolder(key: string) {
     setOpenFolders((prev) => {
@@ -784,6 +787,9 @@ function VaultTreeGroup({
         )}
       </div>
 
+      {open && draftCount > 0 && !isGuestTab() && (
+        <ReviewQueueRow vault={vault.name} count={draftCount} onClose={onClose} />
+      )}
       {open && tree && (
         <div className="sidebar-tree">
           {(tree.children ?? []).map((child) => (
@@ -856,6 +862,29 @@ function NewRawFileButton({
         />
       )}
     </>
+  );
+}
+
+// 초안 검토 대기열 진입점 (spec 2026-10-20-draft-review-queue-design).
+// 개수는 트리 응답의 status에서 센다 — 추가 요청 없음. 손님 탭에서는 그리지 않는다(승인은 운영자 일).
+function ReviewQueueRow({ vault, count, onClose }: { vault: string; count: number; onClose: () => void }) {
+  const navigate = useNavigate();
+  return (
+    <button
+      type="button"
+      className="sidebar-tree-page-row"
+      onClick={() => {
+        navigate(`/review/${vault}`);
+        onClose();
+      }}
+      style={{ paddingLeft: 18 }}
+      aria-label={`검토 대기 ${count}건`}
+      title="에이전트가 쓴 초안 중 승인을 기다리는 문서"
+    >
+      <span aria-hidden className="sidebar-draft-dot" />
+      <span className="sidebar-tree-page-label">검토 대기</span>
+      <span aria-hidden className="sidebar-draft-count">{count}</span>
+    </button>
   );
 }
 
@@ -978,6 +1007,7 @@ function TreeLeaf({
   const isOpen = openFolders.has(node.path);
 
   if (node.type === "dir") {
+    const folderDrafts = countDrafts(node);
     return (
       <div>
         <div style={{ display: "flex", alignItems: "center" }}>
@@ -995,6 +1025,11 @@ function TreeLeaf({
             </span>
             <span aria-hidden style={{ fontSize: 13 }}>📁</span>
             <span className="sidebar-tree-dir-label">{displayTitle(node)}</span>
+            {folderDrafts > 0 && (
+              <span className="sidebar-draft-count" role="img" aria-label={`초안 ${folderDrafts}개`}>
+                {folderDrafts}
+              </span>
+            )}
           </button>
           <NewPageButton
             vault={vault}
@@ -1049,6 +1084,9 @@ function TreeLeaf({
       <span aria-hidden className="sidebar-tree-page-dot" style={{ background: nodeColor(node.pageType) }} />
       {label && <span aria-hidden className="sidebar-tree-page-pill" data-type={node.pageType}>{label}</span>}
       <span className="sidebar-tree-page-label">{displayTitle(node)}</span>
+      {isDraftStatus(node.status) && (
+        <span className="sidebar-draft-dot" role="img" aria-label="검토 대기" title="검토 대기 초안" />
+      )}
     </button>
   );
 }

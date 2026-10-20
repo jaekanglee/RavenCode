@@ -20,6 +20,7 @@ const LintPage = lazyRoute(() => import("./routes/LintPage").then((m) => ({ defa
 const NewVaultPage = lazyRoute(() => import("./routes/NewVaultPage").then((m) => ({ default: m.NewVaultPage })));
 const VaultManage = lazyRoute(() => import("./routes/VaultManage").then((m) => ({ default: m.VaultManage })));
 const VaultPolicyPage = lazyRoute(() => import("./routes/VaultPolicyPage").then((m) => ({ default: m.VaultPolicyPage })));
+const ReviewPage = lazyRoute(() => import("./routes/ReviewPage").then((m) => ({ default: m.ReviewPage })));
 const ArchivePage = lazyRoute(() => import("./routes/ArchivePage").then((m) => ({ default: m.ArchivePage })));
 const GardenPage = lazyRoute(() => import("./routes/GardenPage").then((m) => ({ default: m.GardenPage })));
 const RawPanel = lazyRoute(() => import("./routes/RawPanel").then((m) => ({ default: m.RawPanel })));
@@ -65,6 +66,7 @@ export default function App() {
               <Route path="/vault/new" element={<RouteSlot><NewVaultPage /></RouteSlot>} />
               <Route path="/vault/manage" element={<RouteSlot><VaultManage /></RouteSlot>} />
               <Route path="/vault/policy/:vault" element={<RouteSlot><VaultPolicyPage /></RouteSlot>} />
+              <Route path="/review/:vault" element={<RouteSlot><ReviewPage /></RouteSlot>} />
               <Route path="/archive" element={<RouteSlot><ArchivePage /></RouteSlot>} />
               {/* v0.7.50+: raw/ folder panel */}
               <Route path="/raw/:vault/*" element={<RouteSlot><RawPanel /></RouteSlot>} />

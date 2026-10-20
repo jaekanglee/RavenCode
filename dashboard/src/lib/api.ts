@@ -1351,3 +1351,45 @@ export function draftStorageKey(vault: string, slug: string): string {
 export function legacyDraftStorageKey(vault: string, slug: string): string {
   return `raven:draft:${vault}:${slug}`;
 }
+
+// ─── 초안 검토 대기열 (spec 2026-10-20-draft-review-queue-design) ───
+// 운영자 전용 API. status: draft 문서를 모아 보고 승인한다(→ current, draft 태그 제거).
+
+export interface ReviewDraft {
+  slug: string;
+  title: string;
+  type: string;
+  created: string;
+  updated: string;
+  last_agent: string | null;
+}
+
+export type ApproveResult = "approved" | "not_found" | "not_draft" | "stale_precondition" | "error";
+
+export async function fetchReviewQueue(vault: string): Promise<ReviewDraft[]> {
+  const r = await apiFetch(`/api/vaults/${encodeURIComponent(vault)}/review`);
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail;
+    throw new Error(detail ? String(detail) : `review queue failed: ${r.status}`);
+  }
+  return (await r.json()).drafts || [];
+}
+
+export async function approveDrafts(
+  vault: string,
+  items: { slug: string; precondition?: string }[],
+): Promise<{ slug: string; result: ApproveResult }[]> {
+  const r = await apiFetch(`/api/vaults/${encodeURIComponent(vault)}/review/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail;
+    throw new Error(detail ? String(detail) : `approve failed: ${r.status}`);
+  }
+  // 승인은 status·tags를 바꾼다 — 목록·트리 캐시를 문서 수정과 같은 범위로 무효화한다.
+  invalidateCache(`pages:${vault}`);
+  invalidateCache(`tree:${vault}`);
+  return (await r.json()).results || [];
+}

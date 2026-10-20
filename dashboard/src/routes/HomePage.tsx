@@ -164,10 +164,10 @@ export function pickRecentPages<T extends HomePageSummary>(pages: T[], limit = 6
     .slice(0, limit);
 }
 
-// SCHEMA.md status 4종 중 사람이 손봐야 하는 것은 stale/contested — archived는 거리지 않는다.
+// 사람이 손봐야 하는 status: stale·contested(사실 재확인)와 draft(승인 대기). archived는 넣지 않는다.
 export function pickUnfinishedPages<T extends HomePageSummary>(pages: T[], limit = 6): T[] {
   return pickRecentPages(
-    pages.filter((p) => p.status === "stale" || p.status === "contested"),
+    pages.filter((p) => p.status === "stale" || p.status === "contested" || p.status === "draft"),
     limit,
   );
 }
@@ -408,7 +408,7 @@ export function HomePage() {
             />
             <PageQueue
               heading="손볼 문서"
-              emptyText={pagesLoading ? "불러오는 중…" : "stale·contested 문서가 없습니다."}
+              emptyText={pagesLoading ? "불러오는 중…" : "stale·contested·draft 문서가 없습니다."}
               vault={activeVault}
               pages={unfinishedPages}
               showStatus

@@ -41,6 +41,7 @@ const PAGES: HomePageSummary[] = [
   { slug: "b", title: "B", status: "stale", updated: "2026-07-20" },
   { slug: "c", title: "C", status: "contested", updated: "2026-03-05" },
   { slug: "d", title: "D", status: "archived", updated: "2026-07-30" },
+  { slug: "f", title: "F", status: "draft", updated: "2026-02-01" },
   { slug: "e", title: "E", status: "current" },
 ];
 
@@ -66,8 +67,8 @@ describe("작업대 선별 규칙", () => {
     expect(pickRecentPages(PAGES).at(-1)?.slug).toBe("e");
   });
 
-  it("손볼 문서는 stale·contested만 담고 archived는 제외한다", () => {
-    expect(pickUnfinishedPages(PAGES).map((p) => p.slug)).toEqual(["b", "c"]);
+  it("손볼 문서는 stale·contested·draft를 담고 archived는 제외한다", () => {
+    expect(pickUnfinishedPages(PAGES).map((p) => p.slug)).toEqual(["b", "c", "f"]);
   });
 
   it("test/tmp 계열은 스크래치로 식별한다", () => {

@@ -40,6 +40,8 @@ export interface TreeNode {
   title?: string;
   /** page only — frontmatter type (8종). */
   pageType?: string;
+  /** page only — frontmatter status (없으면 "current"). 사이드바 초안 표시용. */
+  status?: string;
   children?: TreeNode[];
 }
 
