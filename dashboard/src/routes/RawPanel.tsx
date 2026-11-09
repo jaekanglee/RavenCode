@@ -43,6 +43,11 @@ export function RawPanel() {
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
+  const [showSource, setShowSource] = useState(false);
+
+  // .html/.htm은 렌더링해서 보여준다. 편집·소스 보기는 기존 textarea 그대로.
+  const isHtml = /\.html?$/i.test(relPath);
+  const showHtmlPreview = isHtml && !editMode && !showSource;
 
   // raw list
   useEffect(() => {
@@ -72,6 +77,7 @@ export function RawPanel() {
     }
     setContentLoading(true);
     setEditMode(false);
+    setShowSource(false);
     setSaveError(null);
     fetchRawContent(vault, relPath)
       .then((d) => {
@@ -296,6 +302,11 @@ export function RawPanel() {
                   </span>
                 )}
                 <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                  {isHtml && !editMode && (
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setShowSource((v) => !v)}>
+                      {showSource ? "👁 미리보기" : "</> 소스"}
+                    </Button>
+                  )}
                   {!editMode ? (
                     <Button type="button" variant="secondary" size="sm" onClick={() => setEditMode(true)}>
                       ✏ 편집
@@ -354,6 +365,23 @@ export function RawPanel() {
               )}
 
               <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+                {showHtmlPreview ? (
+                  // allow-same-origin 없이 allow-scripts만 — 문서 스크립트는 돌지만
+                  // opaque origin이라 대시보드의 토큰·API·storage에 닿지 못한다.
+                  <iframe
+                    title="HTML 미리보기"
+                    srcDoc={content.content}
+                    sandbox="allow-scripts"
+                    style={{
+                      flex: 1,
+                      width: "100%",
+                      height: "100%",
+                      border: "none",
+                      borderRadius: 6,
+                      background: "var(--color-html-preview-bg)",
+                    }}
+                  />
+                ) : (
                 <textarea
                   value={editMode ? draft : content.content}
                   onChange={(e) => setDraft(e.target.value)}
@@ -379,6 +407,7 @@ export function RawPanel() {
                     tabSize: 2,
                   }}
                 />
+                )}
               </div>
             </div>
           )}

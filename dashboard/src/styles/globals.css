@@ -34,6 +34,9 @@
   --color-canvas: #ffffff;
   --color-surface-soft: #f7f7f7;
   --color-surface-strong: #f2f2f2;
+  /* raw/ HTML 미리보기 iframe 배경. 문서는 브라우저 기본(흰 배경)을 가정하고
+     쓰이므로 다크 테마에서도 덮어쓰지 않는다. */
+  --color-html-preview-bg: #ffffff;
   --color-hairline: #ebebeb;
   --color-hairline-strong: #dddddd;
   --color-on-primary: #ffffff;
