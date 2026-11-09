@@ -131,7 +131,26 @@
   - vitest 697 passed / 1 skipped(신규 17개: `review.lib`·`Sidebar.review-queue`·`ReviewPage`·`DraftReviewBanner`, `HomePage.workbench` 1개 수정). `tsc -b --noEmit` 통과. 전체 실행에서 `PageExport`·`App.route-error-boundary`가 한 번씩 실패했다가 단독·재실행에서 통과했다(부하 시 간헐 실패, 이번 변경과 무관한 파일).
   - 실제 화면(스크래치 vault + 임시 Core가 빌드본을 서빙, headless Chrome CDP, 다크·라이트): 사이드바 "검토 대기 3건"과 그룹 개수 → 검토 화면에서 2건 선택 승인 → 문서 배너에서 나머지 승인 → 배너·draft 태그·검토 대기 줄이 사라지는 것을 확인했다. API로는 낡은 precondition 거절과 `not_draft` 건너뜀도 확인했다. 사용자 vault는 건드리지 않았다.
 
-## 13. 다음
+## 13. raw/ HTML 파일 미리보기
+
+`raw/`의 `.html`/`.htm` 파일을 열면 소스 텍스트만 보였다. 이제 기본으로 그려진 화면을 보여 준다 (커밋 `0fcd948`).
+
+- `dashboard/src/routes/RawPanel.tsx`: HTML 파일은 `srcdoc` iframe으로 그린다. `sandbox="allow-scripts"`만 켜고 `allow-same-origin`은 뺐다. 문서 안 스크립트는 돌지만 opaque origin이라 대시보드의 토큰·API·저장소에 닿지 못한다.
+- 상단 버튼으로 미리보기 ↔ 소스를 오간다. 편집은 지금처럼 텍스트 편집창. 다른 파일을 열면 보기 상태가 기본값으로 돌아간다. HTML이 아닌 파일은 그대로다.
+- 미리보기 배경색은 토큰 `--color-html-preview-bg`(`globals.css`)로 뺐다(AGENTS.md §13.2).
+- 검증: 신규 `dashboard/tests/RawPanel.html-preview.test.tsx` 4개 통과(기본 sandbox 미리보기, 소스 전환, 편집, 비HTML 파일). 대시보드 전체 vitest는 돌리지 않았다.
+
+## 14. macOS 메뉴바 아이콘을 템플릿 이미지로
+
+메뉴바(트레이) 아이콘이 컬러 앱 아이콘 그대로라 다른 앱의 단색 아이콘 사이에서 혼자 튀었다.
+
+- `desktop/src-tauri/icons/tray-template.svg`(원본) + `tray-template.png`(36×36 = 18pt @2x): Dock 아이콘의 "달 원 안의 통통한 까마귀"를 단순화해 다시 그렸다. 달 원은 채우고 까마귀 몸·머리 깃털은 뚫고, 큰 눈과 부리는 다시 채웠다. 검정 + 알파만 쓴다.
+  - Dock 아이콘(`icon.png`)에서 픽셀로 오려 내는 방법은 버렸다. 까마귀가 달을 거의 덮고 있어 18pt로 줄이면 얇은 고리만 남는다.
+- `desktop/src-tauri/src/lib.rs`: macOS에서만 `tauri::include_image!("icons/tray-template.png")` + `.icon_as_template(true)`. 시스템이 라이트·다크·선택 상태에 맞춰 색을 입힌다. Windows/Linux는 템플릿 개념이 없어(검정은 어두운 작업표시줄에서 사라짐) 기존 앱 아이콘을 유지한다. 메뉴·동작은 그대로다.
+- 의존성 추가 없음(`tauri`의 `tray-icon` 기능은 이미 켜져 있었다).
+- 검증: `cargo check` 통과(기존 경고 1개 `core.rs` `launch_with_events` 미사용, 이번 변경과 무관). PNG가 36×36이고 색이 검정 하나뿐인 것을 확인. `make desktop-dev`로 실제 메뉴바에서 사용자가 확인했다.
+
+## 15. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.

@@ -1226,8 +1226,17 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Raven 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &restart_i, &quit_i])?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            // macOS menu bar: monochrome template image so the system tints it
+            // for light/dark mode like other menu-bar items. Windows/Linux have no
+            // template concept (black would vanish on dark taskbars) — keep the app icon.
+            #[cfg(target_os = "macos")]
+            let tray = TrayIconBuilder::new()
+                .icon(tauri::include_image!("icons/tray-template.png"))
+                .icon_as_template(true);
+            #[cfg(not(target_os = "macos"))]
+            let tray = TrayIconBuilder::new().icon(app.default_window_icon().unwrap().clone());
+
+            let _tray = tray
                 .tooltip(TRAY_TOOLTIP)
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {

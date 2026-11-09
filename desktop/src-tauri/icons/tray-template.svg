@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36">
+  <!-- macOS menu-bar template icon (black + alpha only): moon disc, round crow punched out.
+       tray-template.png is this drawing rasterized at 36x36 (18pt @2x). -->
+  <mask id="m">
+    <circle cx="18" cy="18" r="16" fill="#fff"/>
+    <ellipse cx="18" cy="21" rx="11.5" ry="10.5" fill="#000"/>
+    <polygon points="13.5,13 17.5,11 14.5,4.5" fill="#000"/>
+    <polygon points="17,11 22,12.5 21.5,5" fill="#000"/>
+    <circle cx="13.5" cy="19.5" r="3.3" fill="#fff"/>
+    <circle cx="22.5" cy="19.5" r="3.3" fill="#fff"/>
+    <circle cx="14.3" cy="20.2" r="1.5" fill="#000"/>
+    <circle cx="23.3" cy="20.2" r="1.5" fill="#000"/>
+    <polygon points="16.2,23.6 19.8,23.6 18,27" fill="#fff"/>
+  </mask>
+  <rect width="36" height="36" fill="#000" mask="url(#m)"/>
+</svg>
