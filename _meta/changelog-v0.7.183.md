@@ -150,7 +150,16 @@
 - 의존성 추가 없음(`tauri`의 `tray-icon` 기능은 이미 켜져 있었다).
 - 검증: `cargo check` 통과(기존 경고 1개 `core.rs` `launch_with_events` 미사용, 이번 변경과 무관). PNG가 36×36이고 색이 검정 하나뿐인 것을 확인. `make desktop-dev`로 실제 메뉴바에서 사용자가 확인했다.
 
-## 15. 다음
+## 15. 그래프 탭 문서 검색 → 걸린 문서 강조
+
+그래프 탭 검색칸은 제목·slug·type에 그 글자가 들어간 문서와 1촌만 남기고 나머지 노드를 지웠다. 본문은 보지 않았다. 이제 사이드바와 같은 검색으로 본문까지 찾고, 노드를 지우지 않고 걸린 문서만 호버처럼 강조한다.
+
+- `dashboard/src/routes/GraphPage.tsx`: 검색칸이 `useHybridSearch`(사이드바 SearchBar와 같은 훅, limit 50)를 쓴다. `filterGraphView`에는 빈 query를 넘겨 노드를 걸러내지 않는다. 결과 slug는 current-vault 그래프의 노드 id와 같아 그대로 매칭한다.
+- `dashboard/src/components/GraphCanvas.tsx`: `externalHighlightNodeIds` prop을 추가했다. 이 노드들은 호버한 노드처럼 빛나고 나머지는 흐려진다. 이웃까지 넓히지 않는다. 기존 호버·선택 강조와 함께 동작한다.
+- 이제 `lib/graph/derive.ts`의 `matchesGraphQuery`·query 분기는 그래프 페이지에서 쓰지 않는다(삭제는 하지 않았다). 전체화면 그래프 모달에는 강조를 연결하지 않았다.
+- 검증: 신규 `dashboard/tests/GraphPage.search-highlight.test.tsx`(본문 검색 결과 강조, 노드 유지, 검색어 지우면 해제) 통과. 대시보드 vitest 전체 97파일 702 passed / 1 skipped, `tsc --noEmit` 통과. 실제 화면 확인은 하지 않았다.
+
+## 16. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.

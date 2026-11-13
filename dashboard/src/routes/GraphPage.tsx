@@ -1,4 +1,5 @@
 import { apiFetch } from "../lib/api";
+import { useHybridSearch } from "../lib/useHybridSearch";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import {
@@ -219,12 +220,21 @@ export function GraphPage() {
     () =>
       filterGraphView(graph, {
         hideOrphans,
-        query,
+        // 검색은 노드를 지우지 않고 강조만 한다 — 아래 searchHighlightIds 참고.
+        query: "",
         selectedType,
         selectedCommunity: null,
         visibleRelations,
       }),
-    [graph, hideOrphans, query, selectedType, visibleRelations]
+    [graph, hideOrphans, selectedType, visibleRelations]
+  );
+
+  // 문서 검색 — 사이드바 SearchBar와 같은 하이브리드 검색으로 걸린 문서를 캔버스에서
+  // 호버처럼 강조한다. 노드 id는 current-vault 그래프에서 slug와 같다.
+  const searchHits = useHybridSearch(vault, query, { limit: 50 });
+  const searchHighlightIds = useMemo(
+    () => (query.trim() ? new Set(searchHits.map((hit) => hit.slug)) : null),
+    [query, searchHits]
   );
 
   const visibleNodes = filteredGraph.nodes;
@@ -320,7 +330,7 @@ export function GraphPage() {
           hideLabel
           value={query}
           onChange={(e) => dispatchFilters({ type: "setQuery", value: e.target.value })}
-          placeholder="문서 검색 — 일치 문서와 1촌 이웃만 남김"
+          placeholder="문서 검색 — 걸린 문서를 그래프에서 강조"
         />
       </div>
       <div className="graph-filter-chips" aria-label="문서 타입">
@@ -481,6 +491,7 @@ export function GraphPage() {
             // 우선순위: hoveredInsightNodeId(호버 노드) > selectedNodeId(클릭 선택 노드).
             externalHighlightNodeId={hoveredInsightNodeId ?? selectedNodeId}
             externalHighlightType={hoveredInsightType}
+            externalHighlightNodeIds={searchHighlightIds}
             density="normal"
             focusDepthLimit={focusDepth}
             fitKey={selectedType}

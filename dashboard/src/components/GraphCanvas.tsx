@@ -36,6 +36,8 @@ interface Props {
   persistentHighlightNodeId?: string | null;
   /** 외부에서 하이라이트 요청한 문서 타입 */
   externalHighlightType?: string | null;
+  /** 검색 등에서 한꺼번에 강조할 노드 ID들 — 이웃 확장 없이 이 노드들만 밝힌다 */
+  externalHighlightNodeIds?: ReadonlySet<string> | null;
   /** 전체화면 모달 요청 — 상위 컴포넌트가 모달을 열어 처리 */
   onFullscreen?: () => void;
   /** all-vault 등 고밀도 그래프에서는 기본 라벨/엣지를 낮춰 지도 시인성을 우선한다.
@@ -382,6 +384,7 @@ export function GraphCanvas({
   externalHighlightNodeId,
   persistentHighlightNodeId,
   externalHighlightType,
+  externalHighlightNodeIds,
   onFullscreen,
   density = "normal",
   onResetLayout,
@@ -436,6 +439,7 @@ export function GraphCanvas({
   const externalHighlightIdRef = useRef<string | null | undefined>(externalHighlightNodeId);
   const persistentHighlightIdRef = useRef<string | null | undefined>(persistentHighlightNodeId);
   const externalHighlightTypeRef = useRef<string | null | undefined>(externalHighlightType);
+  const externalHighlightIdsRef = useRef<ReadonlySet<string> | null | undefined>(externalHighlightNodeIds);
 
   /** 데이터를 다시 넣지 않고 다음 프레임만 다시 그리도록 force-graph에 알린다. */
   const requestRepaint = () => {
@@ -503,7 +507,11 @@ export function GraphCanvas({
 
   /** 포커스(선택/호버/타입 강조)가 걸린 상태인지 — 페인트 루프에서 ref로만 읽는다. */
   const isFocusActive = (): boolean =>
-    !!(externalHighlightIdRef.current || externalHighlightTypeRef.current);
+    !!(
+      externalHighlightIdRef.current ||
+      externalHighlightTypeRef.current ||
+      externalHighlightIdsRef.current?.size
+    );
 
   const recomputeHighlights = (hover: any, extId: string | null | undefined, edgeList: typeof edges) => {
     const nodeSet = new Set<string>();
@@ -515,6 +523,7 @@ export function GraphCanvas({
         if (e.target === hover.id) nodeSet.add(e.source);
       });
     }
+    externalHighlightIdsRef.current?.forEach((id) => nodeSet.add(id));
     if (extId) {
       nodeSet.add(extId);
       edgeList.forEach((e) => {
@@ -549,9 +558,10 @@ export function GraphCanvas({
     externalHighlightIdRef.current = externalHighlightNodeId;
     persistentHighlightIdRef.current = persistentHighlightNodeId;
     externalHighlightTypeRef.current = externalHighlightType;
+    externalHighlightIdsRef.current = externalHighlightNodeIds;
     recomputeHighlights(hoveredNodeRef.current, externalHighlightNodeId, edges);
     requestRepaint();
-  }, [externalHighlightNodeId, persistentHighlightNodeId, externalHighlightType, edges]);
+  }, [externalHighlightNodeId, persistentHighlightNodeId, externalHighlightType, externalHighlightNodeIds, edges]);
 
   // (v0.7.139+: 이동 모드 토글 제거 — force-graph native pan/zoom이 항상 동작한다.
   // Space 단축키 핸들러도 함께 제거됨. dense 모드에서도 노드 탭 → 인사이트,
@@ -1041,7 +1051,10 @@ export function GraphCanvas({
       // A3: props 대신 ref로 읽는다 — 하이라이트가 바뀌어도 이 effect가 재실행되지 않는다.
       const isPersistent = persistentHighlightIdRef.current === node.id;
       const isFocused =
-        isHovered || isPersistent || externalHighlightIdRef.current === node.id;
+        isHovered ||
+        isPersistent ||
+        externalHighlightIdRef.current === node.id ||
+        !!externalHighlightIdsRef.current?.has(node.id);
       const fillOpacity = nodeOpacity(node.freshness);
 
       // 1. 노드 본체 — 테두리 없는 평면 점. 포커스된 노드만 같은 색으로 은은하게 빛난다.
