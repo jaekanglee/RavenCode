@@ -173,7 +173,17 @@
 - 이름 변경은 넣지 않았다. title만 바꾸면 파일명 규칙이 깨지고, 파일명 변경(`contracts.rename_page`)은 HTTP API가 아직 없다.
 - 검증: 신규 `dashboard/tests/Sidebar.context-menu.test.tsx` 4개(메뉴 열기·Esc 닫기, 삭제 확인 → `deletePage` → 새로고침, 공유 팝오버, 손님 탭 삭제 숨김). 구현 전 4개 모두 실패 확인. 대시보드 vitest 전체 98파일 706 passed / 1 skipped, `tsc --noEmit` 통과. 실제 화면 확인은 하지 않았다.
 
-## 17. 다음
+## 17. 그래프 노드 겹침 방지 (충돌 힘)
+
+그래프 탭에서 노드끼리 포개져 읽기 어려웠다. 물리에는 반발력·링크 장력·중력·무게중심 보정만 있고 노드 크기를 보는 힘이 없어서, 링크가 많이 당기는 허브 주변에서 평형점에 포개진 채 멈췄다.
+
+- `dashboard/src/components/GraphCanvas.tsx`: `createCollideForce()`를 추가해 `d3Force("collide")`로 등록했다. 겹친 쌍을 반지름 합 + `COLLIDE_PADDING`(3)만큼 밀어낸다.
+  - 반지름은 그려지는 크기와 같은 `nodeSize()`라서 큰 허브가 더 넓게 자리를 차지한다.
+  - 드래그로 저장한 고정 노드(`fx`)는 움직이지 않고 상대가 비킨다.
+  - `d3.forceCollide`와 같은 역할이지만 의존성을 늘리지 않으려고 격자(셀 = 최대 지름)로 이웃만 검사하는 단순 구현을 썼다.
+- 검증: 신규 `dashboard/tests/GraphCanvas.collide.test.ts` 4개(겹침 해소, 고정 노드 유지, 같은 좌표 NaN 없음, 떨어진 노드 불변). 대시보드 vitest 전체 99파일 710 passed / 1 skipped, `tsc --noEmit` 통과. 실제 vault 그래프에서 겹침이 사라진 것을 사용자가 확인했다.
+
+## 18. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.

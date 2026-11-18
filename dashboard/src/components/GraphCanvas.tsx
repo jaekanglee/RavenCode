@@ -240,6 +240,68 @@ const FORCE_LINK_STRENGTH = 0.5;
 // 바큇살 모양을 만드는 것을 막되, 목차에만 걸린 문서(저널 등)가 멀리 흩어지지 않을
 // 만큼은 남긴다 (0.03은 흩어지고 0.5는 다시 뭉쳤다).
 const FORCE_INDEX_LINK_STRENGTH = 0.2;
+// 노드끼리 겹치지 않게 반지름 + 이만큼 떨어뜨린다 (그래프 좌표 단위).
+const COLLIDE_PADDING = 3;
+const COLLIDE_STRENGTH = 0.7;
+
+/**
+ * 충돌 힘 — 겹친 노드 쌍을 반지름 합(n.__collideR)만큼 밀어낸다. charge/link만으로는
+ * 평형점에서 노드가 포개진 채 멈출 수 있다. d3.forceCollide와 같은 역할이지만 의존성을
+ * 늘리지 않으려고 격자(셀 = 최대 지름)로 이웃만 검사하는 단순 구현을 쓴다.
+ * 고정 노드(fx != null, 드래그로 저장한 좌표)는 움직이지 않고 상대가 전부 비킨다.
+ */
+export function createCollideForce(strength = COLLIDE_STRENGTH) {
+  let ns: any[] = [];
+  const force = (_alpha: number) => {
+    let maxR = 0;
+    for (const n of ns) maxR = Math.max(maxR, n.__collideR ?? 0);
+    if (ns.length < 2 || maxR <= 0) return;
+    const cell = maxR * 2;
+    const grid = new Map<string, number[]>();
+    const cellOf = (n: any) => [Math.floor(n.x / cell), Math.floor(n.y / cell)];
+    ns.forEach((n, i) => {
+      const [cx, cy] = cellOf(n);
+      const key = `${cx},${cy}`;
+      const bucket = grid.get(key);
+      if (bucket) bucket.push(i);
+      else grid.set(key, [i]);
+    });
+    ns.forEach((a, i) => {
+      const [cx, cy] = cellOf(a);
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          for (const j of grid.get(`${gx},${gy}`) ?? []) {
+            if (j <= i) continue;
+            const b = ns[j];
+            const aFixed = a.fx != null;
+            const bFixed = b.fx != null;
+            if (aFixed && bFixed) continue;
+            const r = (a.__collideR ?? 0) + (b.__collideR ?? 0);
+            let dx = b.x + b.vx - (a.x + a.vx);
+            let dy = b.y + b.vy - (a.y + a.vy);
+            let d = Math.hypot(dx, dy);
+            if (d >= r) continue;
+            if (d === 0) {
+              // 완전히 포개진 쌍 — 인덱스로 정한 방향으로 벌린다 (결정적, NaN 방지).
+              const angle = ((i * 7 + j * 13) % 360) * (Math.PI / 180);
+              dx = Math.cos(angle) * 1e-3;
+              dy = Math.sin(angle) * 1e-3;
+              d = 1e-3;
+            }
+            const push = ((r - d) / d) * strength;
+            const wa = aFixed ? 0 : bFixed ? 1 : 0.5;
+            const wb = 1 - wa;
+            a.vx -= dx * push * wa;
+            a.vy -= dy * push * wa;
+            b.vx += dx * push * wb;
+            b.vy += dy * push * wb;
+          }
+        }
+      }
+    });
+  };
+  return Object.assign(force, { initialize: (nodes: any[]) => { ns = nodes; } });
+}
 const LABEL_ALL_ZOOM = 2.5;
 const SETTLED_FIT_DELAY_MS = 1500;
 const HUB_TOP_RATIO = 0.04;
@@ -628,6 +690,7 @@ export function GraphCanvas({
       { initialize: (ns: any[]) => { recenterNodes = ns; } }
     );
     graph.d3Force("recenter", recenter);
+    graph.d3Force("collide", createCollideForce());
     graph.d3Force("charge")?.strength(FORCE_CHARGE).distanceMax(FORCE_CHARGE_DISTANCE_MAX);
     graph
       .d3Force("link")
@@ -719,6 +782,8 @@ export function GraphCanvas({
     const sortedDegrees = [...degree.values()].sort((a, b) => b - a);
     const hubThreshold = Math.max(HUB_MIN_DEGREE, sortedDegrees[Math.floor(sortedDegrees.length * HUB_TOP_RATIO)] ?? 0);
     for (const n of formattedNodes) {
+      n.__collideR =
+        nodeSize(n.weight, isDense ? "dense" : "normal", n.importance, nodes.length) + COLLIDE_PADDING;
       n.__index = isIndexPage(n.slug ?? n.id);
       n.__hub = !n.__index && (degree.get(n.id) ?? 0) >= hubThreshold;
     }
