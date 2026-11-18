@@ -131,10 +131,14 @@ function ShareRow({
 export interface ShareButtonProps {
   vault: string;
   slug: string;
+  /** 주면 트리거 버튼 없이 이 화면 좌표에서 팝오버를 바로 연다 (사이드바 우클릭 메뉴). */
+  anchorPoint?: { x: number; y: number };
+  /** anchorPoint 모드에서 팝오버가 닫힐 때 호출 */
+  onClose?: () => void;
 }
 
-export function ShareButton({ vault, slug }: ShareButtonProps) {
-  const [open, setOpen] = useState(false);
+export function ShareButton({ vault, slug, anchorPoint, onClose }: ShareButtonProps) {
+  const [open, setOpen] = useState(!!anchorPoint);
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -170,7 +174,9 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
     if (!open) return;
     let raf = 0;
     function place() {
-      const rect = containerRef.current?.getBoundingClientRect();
+      const rect = anchorPoint
+        ? { top: anchorPoint.y, bottom: anchorPoint.y, left: anchorPoint.x }
+        : containerRef.current?.getBoundingClientRect();
       if (!rect) return;
       const height = popoverRef.current?.offsetHeight || POPOVER_ESTIMATED_HEIGHT;
       const viewport = window.innerHeight;
@@ -203,6 +209,10 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
       window.removeEventListener("scroll", place, true);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (anchorPoint && !open) onClose?.();
+  }, [anchorPoint, open, onClose]);
 
   // 포털로 빠진 팝오버는 containerRef 밖이므로 popoverRef 도 "안쪽" 으로 취급해야 한다.
   useEffect(() => {
@@ -313,7 +323,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
 
   return (
     <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
-      <Button
+      {!anchorPoint && <Button
         type="button"
         variant="ghost"
         size="sm"
@@ -323,7 +333,7 @@ export function ShareButton({ vault, slug }: ShareButtonProps) {
         style={{ minWidth: 36, padding: "0 8px" }}
       >
         <Icon.Share />
-      </Button>
+      </Button>}
 
       {open && pos && createPortal(
         <div

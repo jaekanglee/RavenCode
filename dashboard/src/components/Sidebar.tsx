@@ -5,6 +5,7 @@ import { NewPageButton } from "./NewPageButton";
 import { NewIssueButton } from "./NewIssueButton";
 import { nodeColor, typeLabel } from "./GraphCanvas";
 import { RawTree } from "./RawTree";
+import { PageContextMenu } from "./PageContextMenu";
 import { RawCreateDialog } from "./RawCreateDialog";
 import { SearchBar } from "./SearchBar";
 import { HostPicker } from "./HostPicker";
@@ -1005,6 +1006,8 @@ function TreeLeaf({
 }) {
   const navigate = useNavigate();
   const isOpen = openFolders.has(node.path);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const closeMenu = useCallback(() => setMenuAt(null), []);
 
   if (node.type === "dir") {
     const folderDrafts = countDrafts(node);
@@ -1064,13 +1067,19 @@ function TreeLeaf({
 
   const isActive = slugMatchesActive(node.path, activeSlug);
   const label = typeLabel(node.pageType);
+  const pageSlug = node.path.replace(/^content\//, "");
   return (
+    <>
     <button
       type="button"
       className={clsx("sidebar-tree-page-row", isActive && "sidebar-tree-page-row-active")}
       onClick={() => {
-        navigate(`/page/${vault}/${node.path.replace(/^content\//, "")}`);
+        navigate(`/page/${vault}/${pageSlug}`);
         onClose();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenuAt({ x: e.clientX, y: e.clientY });
       }}
       onMouseEnter={() => {
         window.dispatchEvent(new CustomEvent("raven-node-hover", { detail: { id: node.path } }));
@@ -1088,6 +1097,22 @@ function TreeLeaf({
         <span className="sidebar-draft-dot" role="img" aria-label="검토 대기" title="검토 대기 초안" />
       )}
     </button>
+    {menuAt && (
+      <PageContextMenu
+        vault={vault}
+        slug={pageSlug}
+        title={displayTitle(node)}
+        x={menuAt.x}
+        y={menuAt.y}
+        onClose={closeMenu}
+        onDeleted={() => {
+          onRefresh?.();
+          // 보고 있던 문서를 지웠으면 빈 화면 대신 홈으로 (본문 편집기 삭제와 같은 동작).
+          if (isActive) navigate("/");
+        }}
+      />
+    )}
+    </>
   );
 }
 

@@ -159,7 +159,21 @@
 - 이제 `lib/graph/derive.ts`의 `matchesGraphQuery`·query 분기는 그래프 페이지에서 쓰지 않는다(삭제는 하지 않았다). 전체화면 그래프 모달에는 강조를 연결하지 않았다.
 - 검증: 신규 `dashboard/tests/GraphPage.search-highlight.test.tsx`(본문 검색 결과 강조, 노드 유지, 검색어 지우면 해제) 통과. 대시보드 vitest 전체 97파일 702 passed / 1 skipped, `tsc --noEmit` 통과. 실제 화면 확인은 하지 않았다.
 
-## 16. 다음
+## 16. 사이드바 문서 우클릭 메뉴 — 공유하기 / 삭제
+
+사이드바 문서 줄에 우클릭 메뉴가 없어서, 공유하거나 지우려면 문서를 열고 상단 버튼을 눌러야 했다. 이제 우클릭으로 바로 할 수 있다.
+
+- `dashboard/src/components/PageContextMenu.tsx` (신규): 커서 위치에 메뉴를 띄운다(바깥 클릭·Esc로 닫힘, 화면 가장자리에서는 안쪽으로 밀림).
+  - **공유하기**: 문서 상단의 공유 팝오버를 메뉴 자리에서 연다.
+  - **삭제**: 기존 `ConfirmDialog`로 한 번 확인한 뒤 `deletePage`(아카이브 이동)를 부르고 트리를 새로고침한다. 보고 있던 문서를 지우면 홈으로 간다(본문 편집기 삭제와 같은 동작).
+  - 손님 탭에서는 삭제를 숨긴다. `DELETE pages`가 owner 전용이다(`raven/api/guest_routes.py`).
+- `dashboard/src/components/ShareButton.tsx`: `anchorPoint`·`onClose` prop을 추가해 트리거 버튼 없이 지정 좌표에서 바로 열 수 있다. 기존 버튼 동작은 그대로다.
+- `dashboard/src/components/Sidebar.tsx`: 일반 문서 줄에 `onContextMenu`를 붙였다. `raw/` 파일·폴더에는 없다.
+- `dashboard/src/styles/globals.css`: `.page-context-menu*`. 더보기 드롭과 같은 표면 토큰을 쓴다(AGENTS.md §13.2).
+- 이름 변경은 넣지 않았다. title만 바꾸면 파일명 규칙이 깨지고, 파일명 변경(`contracts.rename_page`)은 HTTP API가 아직 없다.
+- 검증: 신규 `dashboard/tests/Sidebar.context-menu.test.tsx` 4개(메뉴 열기·Esc 닫기, 삭제 확인 → `deletePage` → 새로고침, 공유 팝오버, 손님 탭 삭제 숨김). 구현 전 4개 모두 실패 확인. 대시보드 vitest 전체 98파일 706 passed / 1 skipped, `tsc --noEmit` 통과. 실제 화면 확인은 하지 않았다.
+
+## 17. 다음
 
 - 데스크톱 앱 릴리스(알림·스위치 포함). 관리 → 내부망 공개를 켜면 동료가 링크로 입장을 요청할 수 있다.
 - 권한 수정 API, 손님별 마지막 활동 상세는 필요해지면.

@@ -2101,6 +2101,45 @@ textarea.input-base {
   background: var(--color-surface-soft);
 }
 
+/* 사이드바 문서 우클릭 메뉴 — 더보기 드롭과 같은 표면. 위치는 커서 좌표(fixed). */
+.page-context-menu {
+  position: fixed;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  z-index: 80;
+}
+.page-context-menu-item {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.page-context-menu-item:hover,
+.page-context-menu-item:focus-visible {
+  background: var(--color-surface-soft);
+  outline: none;
+}
+.page-context-menu-item-danger {
+  color: var(--color-error-text);
+}
+.page-context-menu-error {
+  font-size: 13px;
+  color: var(--color-error-text);
+}
+
 /* v0.7.97.4.2+: sidebar resize 중 transition 무력화 (drag 버벅임 해결).
    body에 .sidebar-resizing class 부착 시 사이드바 내부 모든 transition/transform 끔.
    drag 끝나면 class 제거 → 원래 transition 복귀. */
